@@ -71,7 +71,9 @@ fn run_until_complete(bus: &mut Bus, cpu: &mut Cpu) {
         }
 
         let cycles = cpu.step(bus) as u64;
-        bus.ppu.tick(cycles);
+        if bus.tick_ppu(cycles) {
+            cpu.nmi();
+        }
         total_cycles += cycles;
     }
 }
