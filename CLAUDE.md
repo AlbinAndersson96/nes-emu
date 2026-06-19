@@ -23,8 +23,13 @@ cargo fmt            # format
 - **`src/cpu/instructions.rs`** — `execute()` dispatcher; one match arm per opcode including all unofficial opcodes (LAX, SAX, DCP, ISB, SLO, SRE, RLA, RRA, SHA, SHX, SHY, TAS, ANC, ALR, ARR, XAA, LAS).
 - **`src/bus.rs`** — `Bus` struct implements `CpuBus`. Wires RAM, PPU, APU stubs, controllers, and cartridge into the 16-bit address space. Exposes `bus.ppu` publicly so the run loop can tick it.
 - **`src/ppu.rs`** — Minimal `Ppu` stub. Tracks CPU-cycle count and derives the NTSC VBlank flag from frame timing (cycle % 29,781 ∈ [27,394, 29,667) → bit 7 of $2002 set). No rendering.
-- **`src/cartridge.rs`** — iNES parser; supports NROM (mapper 0) and MMC1 (mapper 1).
-- **`src/tests/roms.rs`** — Blargg ROM test harness. Polls $6000/$6001–$6003 for test completion; calls `bus.ppu.tick(cycles)` after every CPU step.
+- **`src/cartridge.rs`** — iNES parser; supports NROM (mapper 0) and MMC1 (mapper 1). MMC1 implements the full 5-bit serial shift register protocol and all four PRG bank modes (32 KB switch, fix-first, fix-last). 8 KB PRG-RAM at $6000–$7FFF is always present regardless of the iNES header flag, because blargg test ROMs write their results there unconditionally.
+- **`src/tests/mod.rs`** — `TestBus`: flat 64 KB address space used by unit tests (no mirroring, no side effects).
+- **`src/tests/bus.rs`** — bus unit tests.
+- **`src/tests/cpu.rs`** — CPU unit tests.
+- **`src/tests/roms.rs`** — Blargg ROM test harness. Polls $6000/$6001–$6003 for test completion; calls `bus.ppu.tick(cycles)` after every CPU step. Runs 17 tests from the `instr_test-v5` suite; the 256 KB PRG-ROM test uses mapper 1.
+- **`docs/bus.md`** — NES address map and bus design notes.
+- **`docs/cpu_instructions.md`** — 6502 instruction reference (official opcodes, addressing modes, cycle counts).
 
 ## Key design notes
 
