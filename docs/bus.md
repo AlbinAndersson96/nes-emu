@@ -72,7 +72,9 @@ button bit (A, B, Select, Start, Up, Down, Left, Right).
 ## Cartridge ($4020–$FFFF)
 
 The cartridge receives all addresses not decoded by the CPU's internal logic.
-Mapper 0 (NROM) is the only mapper currently supported:
+Two mappers are currently supported:
+
+### Mapper 0 — NROM
 
 - **16 KB PRG-ROM**: mapped at both $8000–$BFFF and $C000–$FFFF (mirrored).
 - **32 KB PRG-ROM**: mapped linearly at $8000–$FFFF.
@@ -80,6 +82,19 @@ Mapper 0 (NROM) is the only mapper currently supported:
 
 The iNES header byte 4 gives the number of 16 KB PRG-ROM banks. The `Cartridge`
 struct mirrors smaller ROMs via `(addr - 0x8000) % prg_rom.len()`.
+
+### Mapper 1 — MMC1 (SxROM)
+
+- **PRG-ROM** up to 512 KB: four bank modes controlled by register $E000.
+  - Mode 0/1: switch full 32 KB at $8000.
+  - Mode 2: fix $8000–$BFFF to first bank, switch $C000–$FFFF.
+  - Mode 3: switch $8000–$BFFF, fix $C000–$FFFF to last bank.
+- **CHR**: not yet wired (PPU rendering not implemented).
+- **PRG-RAM** (8 KB): always present at $6000–$7FFF regardless of the iNES header
+  flag, because blargg test ROMs write results there unconditionally.
+- Configuration via a 5-bit serial shift register: five consecutive writes to any
+  address $8000–$FFFF with bit 0 clock the shift register; the fifth write also
+  carries the register-select bits (bits 13–14 of the address).
 
 ### Interrupt vectors
 The cartridge ROM supplies all three vectors in its final 6 bytes:
@@ -92,9 +107,10 @@ The cartridge ROM supplies all three vectors in its final 6 bytes:
 
 ## Implementation Notes
 
-- `Bus::read` takes `&self` (no mutation on reads) except for PPU $2002 and
-  $2007 which have read-side effects. Those will need `Cell`/`RefCell` or an
-  `&mut self` signature change when the PPU is wired in.
+- `Bus::read` takes `&mut self`. Some registers have read side-effects ($2002
+  clears the VBlank flag; $2007 auto-increments the VRAM address; controller
+  reads shift out bits). The `&mut self` signature handles this without needing
+  `Cell`/`RefCell`.
 - OAM DMA ($4014) will need special handling in the CPU step loop: the bus
   triggers a 513/514-cycle copy from a CPU RAM page into OAM; this is not a
   normal memory read and must suspend the CPU for the duration.
