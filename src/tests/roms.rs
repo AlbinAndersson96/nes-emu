@@ -32,7 +32,7 @@ fn load_rom(name: &str) -> Vec<u8> {
         .unwrap_or_else(|_| panic!("ROM not found: {} — place it in tests/roms/", path.display()))
 }
 
-fn read_output(bus: &Bus) -> String {
+fn read_output(bus: &mut Bus) -> String {
     let mut out = String::new();
     let mut addr = 0x6004u16;
     loop {
@@ -83,7 +83,7 @@ fn run_rom(filename: &str) {
     let mut bus = Bus::new();
     bus.insert_cartridge(cartridge);
     let mut cpu = Cpu::new();
-    cpu.reset(&bus);
+    cpu.reset(&mut bus);
     run_until_complete(&mut bus, &mut cpu);
 }
 

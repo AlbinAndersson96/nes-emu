@@ -378,7 +378,14 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, opcode: u8) -> u8 {
             cpu.write(bus, a, v); 5
         }
 
-        _ => 1,
+        _ => {
+            debug_assert!(
+                false,
+                "undefined opcode {opcode:#04x} at PC={:#06x}",
+                cpu.pc.wrapping_sub(1)
+            );
+            1
+        }
     }
 }
 
@@ -397,7 +404,7 @@ fn adc(cpu: &mut Cpu, m: u8) {
     cpu.set_nz(cpu.a);
 }
 
-fn adc_m(cpu: &mut Cpu, bus: &dyn Bus, addr: u16) {
+fn adc_m(cpu: &mut Cpu, bus: &mut dyn Bus, addr: u16) {
     let v = cpu.read(bus, addr);
     adc(cpu, v);
 }
@@ -406,7 +413,7 @@ fn sbc(cpu: &mut Cpu, m: u8) {
     adc(cpu, m ^ 0xFF);
 }
 
-fn sbc_m(cpu: &mut Cpu, bus: &dyn Bus, addr: u16) {
+fn sbc_m(cpu: &mut Cpu, bus: &mut dyn Bus, addr: u16) {
     let v = cpu.read(bus, addr);
     sbc(cpu, v);
 }
@@ -416,7 +423,7 @@ fn and(cpu: &mut Cpu, m: u8) {
     cpu.set_nz(cpu.a);
 }
 
-fn and_m(cpu: &mut Cpu, bus: &dyn Bus, addr: u16) {
+fn and_m(cpu: &mut Cpu, bus: &mut dyn Bus, addr: u16) {
     let v = cpu.read(bus, addr);
     and(cpu, v);
 }
@@ -426,7 +433,7 @@ fn ora(cpu: &mut Cpu, m: u8) {
     cpu.set_nz(cpu.a);
 }
 
-fn ora_m(cpu: &mut Cpu, bus: &dyn Bus, addr: u16) {
+fn ora_m(cpu: &mut Cpu, bus: &mut dyn Bus, addr: u16) {
     let v = cpu.read(bus, addr);
     ora(cpu, v);
 }
@@ -436,7 +443,7 @@ fn eor(cpu: &mut Cpu, m: u8) {
     cpu.set_nz(cpu.a);
 }
 
-fn eor_m(cpu: &mut Cpu, bus: &dyn Bus, addr: u16) {
+fn eor_m(cpu: &mut Cpu, bus: &mut dyn Bus, addr: u16) {
     let v = cpu.read(bus, addr);
     eor(cpu, v);
 }
@@ -491,7 +498,7 @@ fn rmw(cpu: &mut Cpu, bus: &mut dyn Bus, addr: u16, op: fn(&mut Cpu, u8) -> u8) 
     cpu.write(bus, addr, r);
 }
 
-fn bit(cpu: &mut Cpu, bus: &dyn Bus, addr: u16) {
+fn bit(cpu: &mut Cpu, bus: &mut dyn Bus, addr: u16) {
     let m = cpu.read(bus, addr);
     cpu.set_flag(FLAG_Z, cpu.a & m == 0);
     cpu.set_flag(FLAG_N, m & FLAG_N != 0);
@@ -504,7 +511,7 @@ fn cmp(cpu: &mut Cpu, reg: u8, m: u8) {
     cpu.set_nz(result);
 }
 
-fn cmp_m(cpu: &mut Cpu, bus: &dyn Bus, reg: u8, addr: u16) {
+fn cmp_m(cpu: &mut Cpu, bus: &mut dyn Bus, reg: u8, addr: u16) {
     let v = cpu.read(bus, addr);
     cmp(cpu, reg, v);
 }
@@ -513,11 +520,11 @@ fn lda(cpu: &mut Cpu, v: u8) { cpu.a = v; cpu.set_nz(v); }
 fn ldx(cpu: &mut Cpu, v: u8) { cpu.x = v; cpu.set_nz(v); }
 fn ldy(cpu: &mut Cpu, v: u8) { cpu.y = v; cpu.set_nz(v); }
 
-fn lda_m(cpu: &mut Cpu, bus: &dyn Bus, addr: u16) { let v = cpu.read(bus, addr); lda(cpu, v); }
-fn ldx_m(cpu: &mut Cpu, bus: &dyn Bus, addr: u16) { let v = cpu.read(bus, addr); ldx(cpu, v); }
-fn ldy_m(cpu: &mut Cpu, bus: &dyn Bus, addr: u16) { let v = cpu.read(bus, addr); ldy(cpu, v); }
+fn lda_m(cpu: &mut Cpu, bus: &mut dyn Bus, addr: u16) { let v = cpu.read(bus, addr); lda(cpu, v); }
+fn ldx_m(cpu: &mut Cpu, bus: &mut dyn Bus, addr: u16) { let v = cpu.read(bus, addr); ldx(cpu, v); }
+fn ldy_m(cpu: &mut Cpu, bus: &mut dyn Bus, addr: u16) { let v = cpu.read(bus, addr); ldy(cpu, v); }
 
-fn branch(cpu: &mut Cpu, bus: &dyn Bus, taken: bool) -> u8 {
+fn branch(cpu: &mut Cpu, bus: &mut dyn Bus, taken: bool) -> u8 {
     let offset = cpu.fetch(bus) as i8 as i16;
     if taken {
         let old_pc = cpu.pc;
@@ -544,11 +551,11 @@ fn jsr(cpu: &mut Cpu, bus: &mut dyn Bus) {
     cpu.pc = target;
 }
 
-fn rts(cpu: &mut Cpu, bus: &dyn Bus) {
+fn rts(cpu: &mut Cpu, bus: &mut dyn Bus) {
     cpu.pc = cpu.pop_u16(bus).wrapping_add(1);
 }
 
-fn rti(cpu: &mut Cpu, bus: &dyn Bus) {
+fn rti(cpu: &mut Cpu, bus: &mut dyn Bus) {
     let p = cpu.pop(bus);
     cpu.p = (p & !FLAG_B) | FLAG_U;
     cpu.pc = cpu.pop_u16(bus);
@@ -617,12 +624,12 @@ fn lax(cpu: &mut Cpu, v: u8) {
     cpu.set_nz(v);
 }
 
-fn lax_m(cpu: &mut Cpu, bus: &dyn Bus, addr: u16) {
+fn lax_m(cpu: &mut Cpu, bus: &mut dyn Bus, addr: u16) {
     let v = cpu.read(bus, addr);
     lax(cpu, v);
 }
 
-fn las(cpu: &mut Cpu, bus: &dyn Bus, addr: u16) {
+fn las(cpu: &mut Cpu, bus: &mut dyn Bus, addr: u16) {
     let v = cpu.read(bus, addr) & cpu.sp;
     cpu.a = v;
     cpu.x = v;

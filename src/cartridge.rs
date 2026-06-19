@@ -1,3 +1,21 @@
+/// Error returned when a ROM cannot be loaded.
+#[derive(Debug)]
+pub enum CartridgeError {
+    InvalidHeader,
+    Truncated,
+    UnsupportedMapper(u8),
+}
+
+impl std::fmt::Display for CartridgeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidHeader => write!(f, "not a valid iNES file"),
+            Self::Truncated => write!(f, "iNES file truncated"),
+            Self::UnsupportedMapper(id) => write!(f, "unsupported mapper {id}"),
+        }
+    }
+}
+
 pub struct Cartridge {
     prg_rom: Vec<u8>,
     /// WRAM at $6000–$7FFF — always present regardless of the iNES header flag,
@@ -7,9 +25,9 @@ pub struct Cartridge {
 }
 
 impl Cartridge {
-    pub fn from_ines(data: &[u8]) -> Result<Self, &'static str> {
+    pub fn from_ines(data: &[u8]) -> Result<Self, CartridgeError> {
         if data.len() < 16 || &data[0..4] != b"NES\x1A" {
-            return Err("not a valid iNES file");
+            return Err(CartridgeError::InvalidHeader);
         }
         let prg_banks = data[4] as usize;
         let mapper_id = (data[6] >> 4) | (data[7] & 0xF0);
@@ -17,14 +35,14 @@ impl Cartridge {
         let prg_start = 16 + if has_trainer { 512 } else { 0 };
         let prg_size = prg_banks * 16384;
         if data.len() < prg_start + prg_size {
-            return Err("iNES file truncated");
+            return Err(CartridgeError::Truncated);
         }
         let prg_rom = data[prg_start..prg_start + prg_size].to_vec();
 
         let mapper: Box<dyn Mapper> = match mapper_id {
             0 => Box::new(Nrom),
             1 => Box::new(Mmc1::new(prg_banks)),
-            _ => return Err("unsupported mapper"),
+            _ => return Err(CartridgeError::UnsupportedMapper(mapper_id)),
         };
 
         Ok(Self { prg_rom, prg_ram: [0u8; 8192], mapper })
@@ -33,7 +51,10 @@ impl Cartridge {
     pub fn read(&self, addr: u16) -> u8 {
         match addr {
             0x6000..=0x7FFF => self.prg_ram[(addr - 0x6000) as usize],
-            0x8000..=0xFFFF => self.mapper.read_prg(addr, &self.prg_rom),
+            0x8000..=0xFFFF => {
+                let offset = self.mapper.prg_offset(self.prg_rom.len(), addr);
+                self.prg_rom.get(offset).copied().unwrap_or(0)
+            }
             _ => 0,
         }
     }
@@ -51,8 +72,10 @@ impl Cartridge {
 // Mapper trait
 // ---------------------------------------------------------------------------
 
+/// Address translation for PRG-ROM. `prg_offset` returns a byte index into the
+/// PRG-ROM slice; the cartridge does the actual array access.
 trait Mapper {
-    fn read_prg(&self, addr: u16, prg_rom: &[u8]) -> u8;
+    fn prg_offset(&self, rom_len: usize, addr: u16) -> usize;
     fn write_prg(&mut self, addr: u16, data: u8);
 }
 
@@ -63,8 +86,8 @@ trait Mapper {
 struct Nrom;
 
 impl Mapper for Nrom {
-    fn read_prg(&self, addr: u16, prg_rom: &[u8]) -> u8 {
-        prg_rom[(addr - 0x8000) as usize % prg_rom.len()]
+    fn prg_offset(&self, rom_len: usize, addr: u16) -> usize {
+        (addr - 0x8000) as usize % rom_len
     }
 
     fn write_prg(&mut self, _addr: u16, _data: u8) {}
@@ -110,7 +133,7 @@ impl Mmc1 {
         }
     }
 
-    fn prg_offset(&self, addr: u16) -> usize {
+    fn bank_offset(&self, addr: u16) -> usize {
         let mode = (self.control >> 2) & 0x03;
         let bank = (self.prg_bank & 0x0F) as usize;
         let last = self.prg_bank_count - 1;
@@ -146,8 +169,8 @@ impl Mmc1 {
 }
 
 impl Mapper for Mmc1 {
-    fn read_prg(&self, addr: u16, prg_rom: &[u8]) -> u8 {
-        prg_rom.get(self.prg_offset(addr)).copied().unwrap_or(0)
+    fn prg_offset(&self, _rom_len: usize, addr: u16) -> usize {
+        self.bank_offset(addr)
     }
 
     fn write_prg(&mut self, addr: u16, data: u8) {

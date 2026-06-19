@@ -34,7 +34,7 @@ impl Cpu {
         }
     }
 
-    pub fn reset(&mut self, bus: &dyn Bus) {
+    pub fn reset(&mut self, bus: &mut dyn Bus) {
         self.a = 0;
         self.x = 0;
         self.y = 0;
@@ -70,7 +70,7 @@ impl Cpu {
 
     // --- memory ---
 
-    pub fn read(&self, bus: &dyn Bus, addr: u16) -> u8 {
+    pub fn read(&self, bus: &mut dyn Bus, addr: u16) -> u8 {
         bus.read(addr)
     }
 
@@ -78,27 +78,27 @@ impl Cpu {
         bus.write(addr, data);
     }
 
-    pub fn read_u16(&self, bus: &dyn Bus, addr: u16) -> u16 {
+    pub fn read_u16(&self, bus: &mut dyn Bus, addr: u16) -> u16 {
         let lo = bus.read(addr) as u16;
         let hi = bus.read(addr.wrapping_add(1)) as u16;
         (hi << 8) | lo
     }
 
     // Replicates the JMP ($xxFF) page-wrap hardware bug.
-    pub fn read_u16_bugged(&self, bus: &dyn Bus, addr: u16) -> u16 {
+    pub fn read_u16_bugged(&self, bus: &mut dyn Bus, addr: u16) -> u16 {
         let lo = bus.read(addr) as u16;
         let hi_addr = (addr & 0xFF00) | ((addr.wrapping_add(1)) & 0x00FF);
         let hi = bus.read(hi_addr) as u16;
         (hi << 8) | lo
     }
 
-    pub fn fetch(&mut self, bus: &dyn Bus) -> u8 {
+    pub fn fetch(&mut self, bus: &mut dyn Bus) -> u8 {
         let byte = bus.read(self.pc);
         self.pc = self.pc.wrapping_add(1);
         byte
     }
 
-    pub fn fetch_u16(&mut self, bus: &dyn Bus) -> u16 {
+    pub fn fetch_u16(&mut self, bus: &mut dyn Bus) -> u16 {
         let lo = self.fetch(bus) as u16;
         let hi = self.fetch(bus) as u16;
         (hi << 8) | lo
@@ -111,7 +111,7 @@ impl Cpu {
         self.sp = self.sp.wrapping_sub(1);
     }
 
-    pub fn pop(&mut self, bus: &dyn Bus) -> u8 {
+    pub fn pop(&mut self, bus: &mut dyn Bus) -> u8 {
         self.sp = self.sp.wrapping_add(1);
         bus.read(0x0100 | self.sp as u16)
     }
@@ -121,7 +121,7 @@ impl Cpu {
         self.push(bus, (data & 0xFF) as u8);
     }
 
-    pub fn pop_u16(&mut self, bus: &dyn Bus) -> u16 {
+    pub fn pop_u16(&mut self, bus: &mut dyn Bus) -> u16 {
         let lo = self.pop(bus) as u16;
         let hi = self.pop(bus) as u16;
         (hi << 8) | lo
@@ -129,45 +129,46 @@ impl Cpu {
 
     // --- addressing modes ---
     // Each returns the effective address and whether a page was crossed.
+    // `pub(in crate::cpu)` — used only by instructions.rs; not part of the public API.
 
-    pub fn addr_zero_page(&mut self, bus: &dyn Bus) -> (u16, bool) {
+    pub(in crate::cpu) fn addr_zero_page(&mut self, bus: &mut dyn Bus) -> (u16, bool) {
         (self.fetch(bus) as u16, false)
     }
 
-    pub fn addr_zero_page_x(&mut self, bus: &dyn Bus) -> (u16, bool) {
+    pub(in crate::cpu) fn addr_zero_page_x(&mut self, bus: &mut dyn Bus) -> (u16, bool) {
         let base = self.fetch(bus);
         (base.wrapping_add(self.x) as u16, false)
     }
 
-    pub fn addr_zero_page_y(&mut self, bus: &dyn Bus) -> (u16, bool) {
+    pub(in crate::cpu) fn addr_zero_page_y(&mut self, bus: &mut dyn Bus) -> (u16, bool) {
         let base = self.fetch(bus);
         (base.wrapping_add(self.y) as u16, false)
     }
 
-    pub fn addr_absolute(&mut self, bus: &dyn Bus) -> (u16, bool) {
+    pub(in crate::cpu) fn addr_absolute(&mut self, bus: &mut dyn Bus) -> (u16, bool) {
         (self.fetch_u16(bus), false)
     }
 
-    pub fn addr_absolute_x(&mut self, bus: &dyn Bus) -> (u16, bool) {
+    pub(in crate::cpu) fn addr_absolute_x(&mut self, bus: &mut dyn Bus) -> (u16, bool) {
         let base = self.fetch_u16(bus);
         let addr = base.wrapping_add(self.x as u16);
         (addr, page_crossed(base, addr))
     }
 
-    pub fn addr_absolute_y(&mut self, bus: &dyn Bus) -> (u16, bool) {
+    pub(in crate::cpu) fn addr_absolute_y(&mut self, bus: &mut dyn Bus) -> (u16, bool) {
         let base = self.fetch_u16(bus);
         let addr = base.wrapping_add(self.y as u16);
         (addr, page_crossed(base, addr))
     }
 
-    pub fn addr_indirect_x(&mut self, bus: &dyn Bus) -> (u16, bool) {
+    pub(in crate::cpu) fn addr_indirect_x(&mut self, bus: &mut dyn Bus) -> (u16, bool) {
         let ptr = self.fetch(bus).wrapping_add(self.x) as u16;
         let lo = bus.read(ptr) as u16;
         let hi = bus.read(ptr.wrapping_add(1) & 0x00FF) as u16;
         ((hi << 8) | lo, false)
     }
 
-    pub fn addr_indirect_y(&mut self, bus: &dyn Bus) -> (u16, bool) {
+    pub(in crate::cpu) fn addr_indirect_y(&mut self, bus: &mut dyn Bus) -> (u16, bool) {
         let ptr = self.fetch(bus) as u16;
         let lo = bus.read(ptr) as u16;
         let hi = bus.read(ptr.wrapping_add(1) & 0x00FF) as u16;
@@ -178,7 +179,9 @@ impl Cpu {
 }
 
 pub trait Bus {
-    fn read(&self, addr: u16) -> u8;
+    /// Reads a byte. Takes `&mut self` because some registers have read side effects
+    /// (e.g. reading $2002 clears the VBlank flag on real hardware).
+    fn read(&mut self, addr: u16) -> u8;
     fn write(&mut self, addr: u16, data: u8);
 }
 

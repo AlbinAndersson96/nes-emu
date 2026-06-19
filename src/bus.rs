@@ -51,7 +51,7 @@ impl Bus {
 }
 
 impl CpuBus for Bus {
-    fn read(&self, addr: u16) -> u8 {
+    fn read(&mut self, addr: u16) -> u8 {
         match addr {
             // Internal RAM + mirrors
             0x0000..=0x1FFF => self.ram[(addr & 0x07FF) as usize],
