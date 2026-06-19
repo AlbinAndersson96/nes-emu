@@ -41,6 +41,13 @@ impl Bus {
         self.cartridge = Some(cartridge);
     }
 
+    /// Tick the PPU by `cycles` CPU cycles and return whether an NMI should fire.
+    /// An NMI fires when VBlank starts and PPUCTRL bit 7 (NMI enable) is set.
+    pub fn tick_ppu(&mut self, cycles: u64) -> bool {
+        self.ppu.tick(cycles);
+        self.ppu.take_nmi() && (self.ppu_registers[0] & 0x80 != 0)
+    }
+
     /// Strobe the controller shift registers. Writing 1 to bit 0 of $4016
     /// continuously reloads the latch; writing 0 freezes it and starts serial read.
     pub fn set_controller_state(&mut self, port: usize, buttons: u8) {

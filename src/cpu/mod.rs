@@ -9,6 +9,8 @@ pub struct Cpu {
     pub pc: u16,
     pub p: u8,
     pub cycles: u64,
+    nmi_pending: bool,
+    irq_pending: bool,
 }
 
 // P register flag masks
@@ -31,7 +33,19 @@ impl Cpu {
             pc: 0,
             p: FLAG_U | FLAG_I,
             cycles: 0,
+            nmi_pending: false,
+            irq_pending: false,
         }
+    }
+
+    /// Signal a non-maskable interrupt. Serviced at the top of the next step().
+    pub fn nmi(&mut self) {
+        self.nmi_pending = true;
+    }
+
+    /// Signal a maskable interrupt. Serviced at the top of the next step() if FLAG_I is clear.
+    pub fn irq(&mut self) {
+        self.irq_pending = true;
     }
 
     pub fn reset(&mut self, bus: &mut dyn Bus) {
@@ -45,8 +59,25 @@ impl Cpu {
     }
 
     pub fn step(&mut self, bus: &mut dyn Bus) -> u8 {
+        if self.nmi_pending {
+            self.nmi_pending = false;
+            return self.service_interrupt(bus, 0xFFFA);
+        }
+        if self.irq_pending && !self.flag(FLAG_I) {
+            self.irq_pending = false;
+            return self.service_interrupt(bus, 0xFFFE);
+        }
         let opcode = self.fetch(bus);
         instructions::execute(self, bus, opcode)
+    }
+
+    fn service_interrupt(&mut self, bus: &mut dyn Bus, vector: u16) -> u8 {
+        self.push_u16(bus, self.pc);
+        let p = (self.p & !FLAG_B) | FLAG_U;
+        self.push(bus, p);
+        self.set_flag(FLAG_I, true);
+        self.pc = self.read_u16(bus, vector);
+        7
     }
 
     // --- flag helpers ---

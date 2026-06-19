@@ -37,7 +37,9 @@ fn main() {
     cpu.reset(&mut bus);
 
     loop {
-        let cycles = cpu.step(&mut bus);
-        bus.ppu.tick(cycles as u64);
+        let cycles = cpu.step(&mut bus) as u64;
+        if bus.tick_ppu(cycles) {
+            cpu.nmi();
+        }
     }
 }
