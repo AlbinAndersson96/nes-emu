@@ -96,6 +96,8 @@ macro_rules! rom_test {
     };
 }
 
+// All ROM test files below were written by Shay Green <gblargg@gmail.com>.
+
 // instr_test-v5/rom_singles — one ROM per addressing mode / instruction group
 rom_test!(basics,     "01-basics.nes");
 rom_test!(implied,    "02-implied.nes");
@@ -116,3 +118,21 @@ rom_test!(special,    "16-special.nes");
 
 // instr_test-v5 — full suite (Mapper 1 / MMC1, 256 KB PRG-ROM)
 rom_test!(official_only, "official_only.nes");
+
+// cpu_interrupts_v2 — interrupt timing and sequencing
+rom_test!(cpu_interrupts_v2_cli_latency,      "cpu_interrupts_v2/rom_singles/1-cli_latency.nes");
+rom_test!(cpu_interrupts_v2_nmi_and_brk,      "cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes");
+rom_test!(cpu_interrupts_v2_nmi_and_irq,      "cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes");
+rom_test!(cpu_interrupts_v2_irq_and_dma,      "cpu_interrupts_v2/rom_singles/4-irq_and_dma.nes");
+rom_test!(cpu_interrupts_v2_branch_delays_irq, "cpu_interrupts_v2/rom_singles/5-branch_delays_irq.nes");
+rom_test!(cpu_interrupts_v2_all,              "cpu_interrupts_v2/cpu_interrupts.nes");
+
+// instr_misc — instruction behaviour edge cases
+rom_test!(instr_misc_abs_x_wrap,    "instr_misc/rom_singles/01-abs_x_wrap.nes");
+rom_test!(instr_misc_branch_wrap,   "instr_misc/rom_singles/02-branch_wrap.nes");
+rom_test!(instr_misc_dummy_reads,   "instr_misc/rom_singles/03-dummy_reads.nes");
+rom_test!(instr_misc_dummy_reads_apu, "instr_misc/rom_singles/04-dummy_reads_apu.nes");
+rom_test!(instr_misc_all,           "instr_misc/instr_misc.nes");
+
+// instr_timing — cycle-accurate instruction timing (Mapper 1 / MMC1)
+rom_test!(instr_timing, "instr_timing/instr_timing.nes");

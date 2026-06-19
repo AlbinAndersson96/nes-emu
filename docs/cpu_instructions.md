@@ -53,7 +53,9 @@ Flag: N  V  1  B  D  I  Z  C
 
 > **JMP indirect bug**: `JMP ($xxFF)` reads the low byte from `$xxFF` and the high byte from `$xx00` instead of `$(xx+1)00`. Reproduce this exactly.
 
-> **Read-modify-write (RMW)**: ASL, LSR, ROL, ROR, INC, DEC first write the original value back, then write the modified value. This matters for hardware register side-effects.
+> **Read-modify-write (RMW)**: ASL, LSR, ROL, ROR, INC, DEC on memory perform three bus operations at the effective address: read → write-back old value → write new value. The intermediate write-back is observable on hardware registers.
+
+> **Dummy reads**: Several addressing modes perform a spurious bus read before reaching the true effective address. The most common cases: (a) any read instruction with Absolute,X or Absolute,Y crosses a page — the CPU reads at `base_hi : (lo + index) & 0xFF` before correcting to the full address; (b) RMW instructions always perform this uncorrected read regardless of page crossing; (c) some zero-page indexed modes read the unindexed zero-page address first. These reads are architecturally visible — they trigger register side-effects (e.g. reading $2002 clears the VBlank flag).
 
 ---
 
