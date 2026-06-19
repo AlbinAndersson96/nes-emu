@@ -96,6 +96,8 @@ macro_rules! rom_test {
     };
 }
 
+// All ROM test files below were written by Shay Green <gblargg@gmail.com>.
+
 // instr_test-v5/rom_singles — one ROM per addressing mode / instruction group
 rom_test!(basics,     "01-basics.nes");
 rom_test!(implied,    "02-implied.nes");

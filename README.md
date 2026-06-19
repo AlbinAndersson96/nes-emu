@@ -57,6 +57,16 @@ tests/roms/          — blargg ROM files (instr_test-v5, cpu_interrupts_v2, ins
 - [`docs/bus.md`](docs/bus.md) — NES address map and bus design
 - [`docs/cpu_instructions.md`](docs/cpu_instructions.md) — 6502 instruction reference
 
+## Credits
+
+The ROM test files in `tests/roms/` are from two suites, both written by
+**Shay Green** (gblargg@gmail.com):
+
+- [`instr_test-v5`](https://github.com/christopherpow/nes-test-roms/tree/master/instr_test-v5) — instruction correctness (official + unofficial opcodes)
+- [`cpu_interrupts_v2`](https://github.com/christopherpow/nes-test-roms/tree/master/cpu_interrupts_v2) — IRQ/NMI interrupt timing
+- [`instr_misc`](https://github.com/christopherpow/nes-test-roms/tree/master/instr_misc) — instruction edge cases (address wrap, dummy reads)
+- [`instr_timing`](https://github.com/christopherpow/nes-test-roms/tree/master/instr_timing) — cycle-accurate instruction timing
+
 ## What's next
 
 - PPU rendering (background tiles, sprites, palette, scrolling)
