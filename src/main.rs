@@ -34,7 +34,7 @@ fn main() {
     bus.insert_cartridge(cartridge);
 
     let mut cpu = cpu::Cpu::new();
-    cpu.reset(&bus);
+    cpu.reset(&mut bus);
 
     loop {
         let cycles = cpu.step(&mut bus);

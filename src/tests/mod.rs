@@ -18,7 +18,7 @@ impl TestBus {
 }
 
 impl CpuBus for TestBus {
-    fn read(&self, addr: u16) -> u8 {
+    fn read(&mut self, addr: u16) -> u8 {
         self.mem[addr as usize]
     }
     fn write(&mut self, addr: u16, data: u8) {
