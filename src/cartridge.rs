@@ -1,3 +1,14 @@
+/// Nametable mirroring mode (determines how the PPU maps the two 1 KB VRAM banks
+/// to the four logical nametable addresses $2000/$2400/$2800/$2C00).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Mirroring {
+    Horizontal, // NT0=A NT1=A NT2=B NT3=B
+    Vertical,   // NT0=A NT1=B NT2=A NT3=B
+    SingleLow,  // all → bank A
+    SingleHigh, // all → bank B
+    FourScreen, // cartridge-supplied four-screen VRAM (not yet supported)
+}
+
 /// Error returned when a ROM cannot be loaded.
 #[derive(Debug)]
 pub enum CartridgeError {
@@ -21,7 +32,13 @@ pub struct Cartridge {
     /// WRAM at $6000–$7FFF — always present regardless of the iNES header flag,
     /// because blargg-style test ROMs write results there unconditionally.
     prg_ram: [u8; 8192],
+    /// CHR-ROM from the iNES image. Empty when the game uses CHR-RAM.
+    chr_rom: Vec<u8>,
+    /// 8 KB CHR-RAM used by games with no CHR-ROM (chr_rom.is_empty()).
+    chr_ram: Box<[u8; 8192]>,
     mapper: Box<dyn Mapper>,
+    /// Mirroring mode from the iNES header (mappers may override dynamically).
+    header_mirroring: Mirroring,
 }
 
 impl Cartridge {
@@ -30,14 +47,25 @@ impl Cartridge {
             return Err(CartridgeError::InvalidHeader);
         }
         let prg_banks = data[4] as usize;
+        let chr_banks = data[5] as usize;
         let mapper_id = (data[6] >> 4) | (data[7] & 0xF0);
         let has_trainer = data[6] & 0x04 != 0;
         let prg_start = 16 + if has_trainer { 512 } else { 0 };
         let prg_size = prg_banks * 16384;
-        if data.len() < prg_start + prg_size {
+        let chr_size = chr_banks * 8192;
+        if data.len() < prg_start + prg_size + chr_size {
             return Err(CartridgeError::Truncated);
         }
         let prg_rom = data[prg_start..prg_start + prg_size].to_vec();
+        let chr_rom = data[prg_start + prg_size..prg_start + prg_size + chr_size].to_vec();
+
+        let header_mirroring = if data[6] & 0x08 != 0 {
+            Mirroring::FourScreen
+        } else if data[6] & 0x01 != 0 {
+            Mirroring::Vertical
+        } else {
+            Mirroring::Horizontal
+        };
 
         let mapper: Box<dyn Mapper> = match mapper_id {
             0 => Box::new(Nrom),
@@ -45,7 +73,14 @@ impl Cartridge {
             _ => return Err(CartridgeError::UnsupportedMapper(mapper_id)),
         };
 
-        Ok(Self { prg_rom, prg_ram: [0u8; 8192], mapper })
+        Ok(Self {
+            prg_rom,
+            prg_ram: [0u8; 8192],
+            chr_rom,
+            chr_ram: Box::new([0u8; 8192]),
+            mapper,
+            header_mirroring,
+        })
     }
 
     pub fn read(&self, addr: u16) -> u8 {
@@ -66,6 +101,28 @@ impl Cartridge {
             _ => {}
         }
     }
+
+    /// Read from the PPU pattern table space ($0000–$1FFF).
+    pub fn chr_read(&self, addr: u16) -> u8 {
+        if self.chr_rom.is_empty() {
+            self.chr_ram[(addr & 0x1FFF) as usize]
+        } else {
+            let offset = self.mapper.chr_offset(addr);
+            self.chr_rom.get(offset).copied().unwrap_or(0)
+        }
+    }
+
+    /// Write to the PPU pattern table space (CHR-RAM only; ignored for CHR-ROM).
+    pub fn chr_write(&mut self, addr: u16, data: u8) {
+        if self.chr_rom.is_empty() {
+            self.chr_ram[(addr & 0x1FFF) as usize] = data;
+        }
+    }
+
+    /// Current nametable mirroring mode. Mappers may override the header value.
+    pub fn mirroring(&self) -> Mirroring {
+        self.mapper.mirroring().unwrap_or(self.header_mirroring)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -77,6 +134,10 @@ impl Cartridge {
 trait Mapper {
     fn prg_offset(&self, rom_len: usize, addr: u16) -> usize;
     fn write_prg(&mut self, addr: u16, data: u8);
+    /// CHR address → byte offset into CHR-ROM. Default: identity (no banking).
+    fn chr_offset(&self, addr: u16) -> usize { (addr & 0x1FFF) as usize }
+    /// Dynamic mirroring override. Returns None to use the header's mirroring value.
+    fn mirroring(&self) -> Option<Mirroring> { None }
 }
 
 // ---------------------------------------------------------------------------
@@ -171,6 +232,15 @@ impl Mmc1 {
 impl Mapper for Mmc1 {
     fn prg_offset(&self, _rom_len: usize, addr: u16) -> usize {
         self.bank_offset(addr)
+    }
+
+    fn mirroring(&self) -> Option<Mirroring> {
+        Some(match self.control & 0x03 {
+            0 => Mirroring::SingleLow,
+            1 => Mirroring::SingleHigh,
+            2 => Mirroring::Vertical,
+            _ => Mirroring::Horizontal,
+        })
     }
 
     fn write_prg(&mut self, addr: u16, data: u8) {

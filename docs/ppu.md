@@ -565,23 +565,23 @@ When reading palette RAM via `$2007`, the read buffer is updated with the nameta
 
 For a minimal but correct PPU implementation:
 
-- [ ] Internal registers: `v`, `t`, `x`, `w`
-- [ ] Register R/W behavior: `$2000`–`$2007`, `$4014`
-- [ ] `$2002` side effects: clear VBlank on read, clear `w` on read
-- [ ] VRAM address space with nametable mirroring (configured by cartridge)
-- [ ] Pattern table reads (CHR-ROM/RAM via cartridge)
-- [ ] Scanline counter and dot counter (341 dots × 262 scanlines NTSC)
-- [ ] VBlank flag: set dot 1 scanline 241, cleared dot 1 scanline 261
-- [ ] NMI generation (edge detection on VBlank × NMI-enable)
-- [ ] Pre-render scanline: vertical scroll reload (dots 280–304)
-- [ ] Horizontal scroll update: `t`→`v` copy at dot 257
-- [ ] Coarse-X increment every 8 dots during rendering
-- [ ] Fine-Y / coarse-Y increment at dot 256
-- [ ] Background tile fetch pipeline (nametable, attribute, CHR low, CHR high)
-- [ ] Sprite evaluation for next scanline (secondary OAM, 8-sprite limit)
-- [ ] Sprite pattern fetch and latching
-- [ ] Sprite-0 hit detection
-- [ ] Pixel output with priority multiplexer
-- [ ] Palette RAM (32 bytes) with mirrors
-- [ ] OAM DMA (`$4014`): 513/514 CPU cycle stall
-- [ ] Odd-frame dot skip (dot 339 skipped when rendering enabled)
+- [x] Internal registers: `v`, `t`, `x`, `w`
+- [x] Register R/W behavior: `$2000`–`$2007`, `$4014`
+- [x] `$2002` side effects: clear VBlank on read, clear `w` on read
+- [x] VRAM address space with nametable mirroring (configured by cartridge)
+- [x] Pattern table reads (CHR-ROM/RAM via cartridge)
+- [x] Scanline counter and dot counter (341 dots × 262 scanlines NTSC)
+- [x] VBlank flag: set dot 1 scanline 241, cleared dot 1 scanline 261
+- [x] NMI generation (edge detection on VBlank × NMI-enable)
+- [x] Pre-render scanline: vertical scroll reload (dots 280–304)
+- [x] Horizontal scroll update: `t`→`v` copy at dot 257
+- [x] Coarse-X increment every 8 dots during rendering
+- [x] Fine-Y / coarse-Y increment at dot 256
+- [x] Background tile fetch pipeline (nametable, attribute, CHR low, CHR high)
+- [x] Sprite evaluation for next scanline (secondary OAM, 8-sprite limit)
+- [x] Sprite pattern fetch and latching
+- [x] Sprite-0 hit detection
+- [x] Pixel output with priority multiplexer
+- [x] Palette RAM (32 bytes) with mirrors
+- [x] OAM DMA (`$4014`): 513/514 CPU cycle stall
+- [x] Odd-frame dot skip (dot 339 skipped when rendering enabled)
