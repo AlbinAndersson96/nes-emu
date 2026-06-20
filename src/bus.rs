@@ -92,7 +92,7 @@ impl CpuBus for Bus {
             0x0000..=0x1FFF => self.ram[(addr & 0x07FF) as usize],
 
             // PPU registers + mirrors (every 8 bytes)
-            0x2000..=0x3FFF => self.ppu.read_register((addr & 0x0007) as u8),
+            0x2000..=0x3FFF => self.ppu.read_register((addr & 0x0007) as u8, self.cartridge.as_ref()),
 
             // APU / I/O
             0x4000..=0x4015 => self.apu.read(addr),
@@ -113,7 +113,7 @@ impl CpuBus for Bus {
             0x0000..=0x1FFF => self.ram[(addr & 0x07FF) as usize] = data,
 
             // PPU registers + mirrors
-            0x2000..=0x3FFF => self.ppu.write_register((addr & 0x0007) as u8, data),
+            0x2000..=0x3FFF => self.ppu.write_register((addr & 0x0007) as u8, data, self.cartridge.as_mut()),
 
             // APU registers
             0x4000..=0x4013 => self.apu.write(addr, data),

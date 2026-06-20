@@ -1,4 +1,4 @@
-use crate::cartridge::Mirroring;
+use crate::cartridge::{Cartridge, Mirroring};
 
 /// NES PPU — register state, VRAM, OAM, palette, VBlank/NMI, and scanline timing.
 ///
@@ -153,44 +153,40 @@ impl Ppu {
         bank * 0x400 + off
     }
 
-    fn ppu_read(&mut self, addr: u16) -> u8 {
+    fn palette_idx(addr: u16) -> usize {
+        let mut idx = (addr & 0x001F) as usize;
+        // Backdrop mirrors: $3F10/$3F14/$3F18/$3F1C → $3F00/$3F04/$3F08/$3F0C
+        if idx >= 0x10 && idx % 4 == 0 {
+            idx -= 0x10;
+        }
+        idx
+    }
+
+    fn ppu_read(&self, addr: u16, cart: Option<&Cartridge>) -> u8 {
         match addr & 0x3FFF {
-            0x0000..=0x1FFF => 0, // CHR ROM/RAM — not yet wired to cartridge
-            0x2000..=0x3EFF => {
-                let idx = self.mirror_vram_addr(addr);
-                self.vram[idx]
-            }
-            _ => {
-                // Palette ($3F00–$3FFF, mirrored every 32 bytes)
-                let mut idx = (addr & 0x001F) as usize;
-                // Backdrop mirrors: $3F10/$3F14/$3F18/$3F1C → $3F00/$3F04/$3F08/$3F0C
-                if idx >= 0x10 && idx % 4 == 0 {
-                    idx -= 0x10;
-                }
-                self.palette[idx]
-            }
+            0x0000..=0x1FFF => cart.map_or(0, |c| c.chr_read(addr)),
+            0x2000..=0x3EFF => self.vram[self.mirror_vram_addr(addr)],
+            _ => self.palette[Self::palette_idx(addr)],
         }
     }
 
-    fn ppu_write(&mut self, addr: u16, data: u8) {
+    fn ppu_write(&mut self, addr: u16, data: u8, cart: Option<&mut Cartridge>) {
         match addr & 0x3FFF {
-            0x0000..=0x1FFF => {} // CHR ROM/RAM — not yet wired
+            0x0000..=0x1FFF => {
+                if let Some(c) = cart {
+                    c.chr_write(addr, data);
+                }
+            }
             0x2000..=0x3EFF => {
                 let idx = self.mirror_vram_addr(addr);
                 self.vram[idx] = data;
             }
-            _ => {
-                let mut idx = (addr & 0x001F) as usize;
-                if idx >= 0x10 && idx % 4 == 0 {
-                    idx -= 0x10;
-                }
-                self.palette[idx] = data;
-            }
+            _ => self.palette[Self::palette_idx(addr)] = data,
         }
     }
 
     /// Read a PPU register. `reg` is the 3-bit register select (addr & 7).
-    pub fn read_register(&mut self, reg: u8) -> u8 {
+    pub fn read_register(&mut self, reg: u8, cart: Option<&Cartridge>) -> u8 {
         match reg {
             // $2002 PPUSTATUS — reading clears VBlank flag and write toggle
             2 => {
@@ -209,12 +205,12 @@ impl Ppu {
                 let addr = self.v;
                 self.v = self.v.wrapping_add(self.vram_increment());
                 if addr & 0x3FFF >= 0x3F00 {
-                    // Palette: return immediately; refresh buffer from underlying nametable
-                    self.read_buf = self.ppu_read(addr & 0x2FFF);
-                    self.ppu_read(addr)
+                    // Palette: return immediately; refresh buffer from nametable behind palette
+                    self.read_buf = self.ppu_read(addr & 0x2FFF, cart);
+                    self.ppu_read(addr, cart)
                 } else {
                     let buffered = self.read_buf;
-                    self.read_buf = self.ppu_read(addr);
+                    self.read_buf = self.ppu_read(addr, cart);
                     buffered
                 }
             }
@@ -223,7 +219,7 @@ impl Ppu {
     }
 
     /// Write a PPU register. `reg` is the 3-bit register select (addr & 7).
-    pub fn write_register(&mut self, reg: u8, data: u8) {
+    pub fn write_register(&mut self, reg: u8, data: u8, cart: Option<&mut Cartridge>) {
         match reg {
             // $2000 PPUCTRL
             0 => {
@@ -249,11 +245,9 @@ impl Ppu {
             // $2005 PPUSCROLL — two writes
             5 => {
                 if !self.w {
-                    // First write: coarse X scroll into t[4:0], fine X separate
                     self.t = (self.t & 0xFFE0) | ((data as u16) >> 3);
                     self.fine_x = data & 0x07;
                 } else {
-                    // Second write: fine Y into t[14:12], coarse Y into t[9:5]
                     self.t = (self.t & 0x8C1F)
                         | ((data as u16 & 0x07) << 12)
                         | ((data as u16 & 0xF8) << 2);
@@ -263,10 +257,8 @@ impl Ppu {
             // $2006 PPUADDR — two writes
             6 => {
                 if !self.w {
-                    // First write: high 6 bits of t (top 2 bits cleared)
                     self.t = (self.t & 0x00FF) | ((data as u16 & 0x3F) << 8);
                 } else {
-                    // Second write: low byte of t, then t → v
                     self.t = (self.t & 0xFF00) | data as u16;
                     self.v = self.t;
                 }
@@ -275,7 +267,7 @@ impl Ppu {
             // $2007 PPUDATA
             7 => {
                 let addr = self.v;
-                self.ppu_write(addr, data);
+                self.ppu_write(addr, data, cart);
                 self.v = self.v.wrapping_add(self.vram_increment());
             }
             _ => {}
