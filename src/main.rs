@@ -1,3 +1,4 @@
+mod apu;
 mod bus;
 mod cartridge;
 mod cpu;
@@ -40,6 +41,9 @@ fn main() {
         let cycles = cpu.step(&mut bus) as u64;
         if bus.tick_ppu(cycles) {
             cpu.nmi();
+        }
+        if bus.tick_apu(cycles) {
+            cpu.irq();
         }
     }
 }

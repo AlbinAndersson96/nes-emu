@@ -1,3 +1,4 @@
+use crate::apu::Apu;
 use crate::cartridge::Cartridge;
 use crate::cpu::Bus as CpuBus;
 use crate::ppu::Ppu;
@@ -19,7 +20,7 @@ pub struct Bus {
     cartridge: Option<Cartridge>,
     pub ppu: Ppu,
     ppu_registers: [u8; 8], // write-side mirrors; reads route through Ppu where applicable
-    apu_io: [u8; 24],       // $4000–$4017
+    pub apu: Apu,
     controller_latch: [u8; 2],
     controller_shift: [u8; 2],
 }
@@ -31,7 +32,7 @@ impl Bus {
             cartridge: None,
             ppu: Ppu::new(),
             ppu_registers: [0u8; 8],
-            apu_io: [0u8; 24],
+            apu: Apu::new(),
             controller_latch: [0u8; 2],
             controller_shift: [0u8; 2],
         }
@@ -46,6 +47,19 @@ impl Bus {
     pub fn tick_ppu(&mut self, cycles: u64) -> bool {
         self.ppu.tick(cycles);
         self.ppu.take_nmi() && (self.ppu_registers[0] & 0x80 != 0)
+    }
+
+    /// Advance the APU by `cpu_cycles`. Returns true if an IRQ should be raised.
+    pub fn tick_apu(&mut self, cpu_cycles: u64) -> bool {
+        let irq = self.apu.tick(cpu_cycles as u32);
+        // TODO: if the DMC needs a DMA byte, stall the CPU for 4 cycles and
+        // supply the read here:
+        //   if self.apu.dmc_needs_dma() {
+        //       let addr = self.apu.dmc_dma_address();
+        //       let data = self.read(addr);
+        //       self.apu.dmc_supply_byte(data);
+        //   }
+        irq
     }
 
     /// Strobe the controller shift registers. Writing 1 to bit 0 of $4016
@@ -76,9 +90,9 @@ impl CpuBus for Bus {
             }
 
             // APU / I/O
-            0x4000..=0x4015 => self.apu_io[(addr - 0x4000) as usize],
+            0x4000..=0x4015 => self.apu.read(addr),
             0x4016 => self.controller_shift[0] & 0x01,
-            0x4017 => self.controller_shift[1] & 0x01,
+            0x4017 => self.controller_shift[1] & 0x01, // $4017 read = controller 2
 
             // Disabled region
             0x4018..=0x401F => 0,
@@ -100,14 +114,14 @@ impl CpuBus for Bus {
             0x2000..=0x3FFF => self.ppu_registers[(addr & 0x0007) as usize] = data,
 
             // APU / I/O
-            0x4000..=0x4015 => self.apu_io[(addr - 0x4000) as usize] = data,
+            0x4000..=0x4015 => self.apu.write(addr, data),
             0x4016 => {
                 // Controller strobe: reload shift registers while bit 0 is set
                 if data & 0x01 != 0 {
                     self.controller_shift = self.controller_latch;
                 }
             }
-            0x4017 => self.apu_io[0x17] = data, // APU frame counter
+            0x4017 => self.apu.write(0x4017, data), // $4017 write = APU frame counter
 
             // Disabled region
             0x4018..=0x401F => {}

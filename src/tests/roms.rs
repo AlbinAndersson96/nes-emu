@@ -74,6 +74,9 @@ fn run_until_complete(bus: &mut Bus, cpu: &mut Cpu) {
         if bus.tick_ppu(cycles) {
             cpu.nmi();
         }
+        if bus.tick_apu(cycles) {
+            cpu.irq();
+        }
         total_cycles += cycles;
     }
 }
