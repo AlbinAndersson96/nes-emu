@@ -88,6 +88,9 @@ impl Ppu {
 
     /// Clock one PPU dot: run events for (scanline, dot), then advance counters.
     fn clock_dot(&mut self) {
+        let render = self.rendering_enabled();
+
+        // ── VBlank / pre-render flag events ─────────────────────────────────
         match self.scanline {
             VBLANK_SCANLINE if self.dot == 1 => {
                 self.vblank = true;
@@ -103,13 +106,39 @@ impl Ppu {
             _ => {}
         }
 
-        // Advance dot; on odd frames with rendering enabled, pre-render scanline
-        // is 340 dots (dot 339 is skipped, matching the NESdev "odd-frame short" behaviour).
+        // ── Scroll pipeline (visible scanlines 0–239 and pre-render 261) ────
+        let is_render_scanline = self.scanline <= 239 || self.scanline == PRERENDER_SCANLINE;
+        if render && is_render_scanline {
+            // Coarse-X increment: every 8 dots during pixel output and pipe-fill
+            let coarse_x_tick = matches!(self.dot,
+                8 | 16 | 24 | 32 | 40 | 48 | 56 | 64 | 72 | 80 |
+                88 | 96 | 104 | 112 | 120 | 128 | 136 | 144 | 152 | 160 |
+                168 | 176 | 184 | 192 | 200 | 208 | 216 | 224 | 232 | 240 |
+                248 | 256 | 328 | 336);
+            if coarse_x_tick {
+                self.increment_coarse_x();
+            }
+
+            // Fine-Y / coarse-Y increment at dot 256
+            if self.dot == 256 {
+                self.increment_y();
+            }
+
+            // Horizontal bits: copy t → v at dot 257
+            if self.dot == 257 {
+                self.copy_t_to_v_horizontal();
+            }
+
+            // Pre-render only: copy vertical bits of t → v at dots 280–304
+            if self.scanline == PRERENDER_SCANLINE && (280..=304).contains(&self.dot) {
+                self.copy_t_to_v_vertical();
+            }
+        }
+
+        // ── Advance dot counter ──────────────────────────────────────────────
         self.dot += 1;
-        let scanline_len = if self.scanline == PRERENDER_SCANLINE
-            && self.odd_frame
-            && self.rendering_enabled()
-        {
+        // Odd-frame short: pre-render scanline is 340 dots when rendering enabled
+        let scanline_len = if self.scanline == PRERENDER_SCANLINE && self.odd_frame && render {
             340
         } else {
             DOTS_PER_SCANLINE
@@ -126,6 +155,45 @@ impl Ppu {
 
     fn rendering_enabled(&self) -> bool {
         self.mask & 0x18 != 0
+    }
+
+    /// Increment coarse X in v, flipping horizontal nametable at tile 31.
+    fn increment_coarse_x(&mut self) {
+        if self.v & 0x001F == 31 {
+            self.v &= !0x001F; // coarse X = 0
+            self.v ^= 0x0400;  // flip horizontal nametable
+        } else {
+            self.v += 1;
+        }
+    }
+
+    /// Increment fine Y in v, carrying into coarse Y and wrapping at row 29.
+    fn increment_y(&mut self) {
+        if self.v & 0x7000 != 0x7000 {
+            self.v += 0x1000; // increment fine Y
+        } else {
+            self.v &= !0x7000; // fine Y = 0
+            let mut y = (self.v >> 5) & 0x1F;
+            if y == 29 {
+                y = 0;
+                self.v ^= 0x0800; // flip vertical nametable
+            } else if y == 31 {
+                y = 0; // wrap without flipping (attribute area)
+            } else {
+                y += 1;
+            }
+            self.v = (self.v & !0x03E0) | (y << 5);
+        }
+    }
+
+    /// Copy horizontal bits (coarse X + horizontal nametable) from t to v.
+    fn copy_t_to_v_horizontal(&mut self) {
+        self.v = (self.v & !0x041F) | (self.t & 0x041F);
+    }
+
+    /// Copy vertical bits (fine Y + coarse Y + vertical nametable) from t to v.
+    fn copy_t_to_v_vertical(&mut self) {
+        self.v = (self.v & !0x7BE0) | (self.t & 0x7BE0);
     }
 
     /// Returns true (and clears the latch) if an NMI is pending.

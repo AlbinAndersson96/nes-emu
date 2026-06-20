@@ -573,10 +573,10 @@ For a minimal but correct PPU implementation:
 - [x] Scanline counter and dot counter (341 dots × 262 scanlines NTSC)
 - [x] VBlank flag: set dot 1 scanline 241, cleared dot 1 scanline 261
 - [x] NMI generation (edge detection on VBlank × NMI-enable)
-- [ ] Pre-render scanline: vertical scroll reload (dots 280–304)
-- [ ] Horizontal scroll update: `t`→`v` copy at dot 257
-- [ ] Coarse-X increment every 8 dots during rendering
-- [ ] Fine-Y / coarse-Y increment at dot 256
+- [x] Pre-render scanline: vertical scroll reload (dots 280–304)
+- [x] Horizontal scroll update: `t`→`v` copy at dot 257
+- [x] Coarse-X increment every 8 dots during rendering
+- [x] Fine-Y / coarse-Y increment at dot 256
 - [ ] Background tile fetch pipeline (nametable, attribute, CHR low, CHR high)
 - [ ] Sprite evaluation for next scanline (secondary OAM, 8-sprite limit)
 - [ ] Sprite pattern fetch and latching
