@@ -583,5 +583,5 @@ For a minimal but correct PPU implementation:
 - [x] Sprite-0 hit detection
 - [x] Pixel output with priority multiplexer
 - [x] Palette RAM (32 bytes) with mirrors
-- [ ] OAM DMA (`$4014`): 513/514 CPU cycle stall
+- [x] OAM DMA (`$4014`): 513/514 CPU cycle stall
 - [x] Odd-frame dot skip (dot 339 skipped when rendering enabled)

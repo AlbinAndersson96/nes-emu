@@ -24,6 +24,9 @@ pub struct Bus {
     pub apu: Apu,
     controller_latch: [u8; 2],
     controller_shift: [u8; 2],
+    /// CPU cycles to stall after an OAM DMA write to $4014.
+    /// 513 cycles normally; 514 on an odd CPU cycle. The run loop consumes this.
+    oam_dma_stall: u16,
 }
 
 impl Bus {
@@ -35,7 +38,16 @@ impl Bus {
             apu: Apu::new(),
             controller_latch: [0u8; 2],
             controller_shift: [0u8; 2],
+            oam_dma_stall: 0,
         }
+    }
+
+    /// Returns the number of CPU cycles to stall after an OAM DMA, then clears it.
+    /// The caller is responsible for advancing PPU/APU by the stall amount.
+    pub fn take_oam_dma_stall(&mut self) -> u16 {
+        let s = self.oam_dma_stall;
+        self.oam_dma_stall = 0;
+        s
     }
 
     pub fn insert_cartridge(&mut self, cartridge: Cartridge) {
@@ -75,13 +87,15 @@ impl Bus {
     }
 
     /// Execute an OAM DMA transfer: copy 256 bytes from `page` of CPU RAM into OAM.
-    /// The 513/514-cycle CPU stall is not yet implemented here.
+    /// Sets oam_dma_stall so the run loop stalls the CPU for 513 cycles (the
+    /// extra +1 for odd CPU cycles is applied by the run loop when it consumes it).
     fn oam_dma(&mut self, page: u8) {
         let base = (page as u16) << 8;
         for offset in 0u16..256 {
             let data = self.read(base | offset);
             self.ppu.oam_dma_write(offset as u8, data);
         }
+        self.oam_dma_stall = 513;
     }
 }
 

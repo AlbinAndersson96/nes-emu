@@ -71,13 +71,18 @@ fn run_until_complete(bus: &mut Bus, cpu: &mut Cpu) {
         }
 
         let cycles = cpu.step(bus) as u64;
-        if bus.tick_ppu(cycles) {
+
+        let dma_stall = bus.take_oam_dma_stall() as u64;
+        let extra = if dma_stall > 0 { dma_stall + (cpu.cycles & 1) } else { 0 };
+        let total = cycles + extra;
+
+        if bus.tick_ppu(total) {
             cpu.nmi();
         }
-        if bus.tick_apu(cycles) {
+        if bus.tick_apu(total) {
             cpu.irq();
         }
-        total_cycles += cycles;
+        total_cycles += total;
     }
 }
 
