@@ -39,11 +39,16 @@ impl Bus {
     }
 
     pub fn insert_cartridge(&mut self, cartridge: Cartridge) {
+        self.ppu.set_mirroring(cartridge.mirroring());
         self.cartridge = Some(cartridge);
     }
 
     /// Tick the PPU by `cycles` CPU cycles. Returns true if an NMI should fire.
+    /// Also refreshes the PPU's mirroring mode so mapper-driven changes take effect.
     pub fn tick_ppu(&mut self, cycles: u64) -> bool {
+        if let Some(ref cart) = self.cartridge {
+            self.ppu.set_mirroring(cart.mirroring());
+        }
         self.ppu.tick(cycles);
         self.ppu.take_nmi()
     }

@@ -568,7 +568,7 @@ For a minimal but correct PPU implementation:
 - [x] Internal registers: `v`, `t`, `x`, `w`
 - [x] Register R/W behavior: `$2000`–`$2007`, `$4014`
 - [x] `$2002` side effects: clear VBlank on read, clear `w` on read
-- [ ] VRAM address space with nametable mirroring (configured by cartridge)
+- [x] VRAM address space with nametable mirroring (configured by cartridge)
 - [ ] Pattern table reads (CHR-ROM/RAM via cartridge)
 - [x] Scanline counter and dot counter (341 dots × 262 scanlines NTSC)
 - [x] VBlank flag: set dot 1 scanline 241, cleared dot 1 scanline 261

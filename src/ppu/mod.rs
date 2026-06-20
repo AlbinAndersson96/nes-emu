@@ -1,3 +1,5 @@
+use crate::cartridge::Mirroring;
+
 /// NES PPU — register state, VRAM, OAM, palette, VBlank/NMI, and scanline timing.
 ///
 /// NTSC timing:
@@ -42,6 +44,8 @@ pub struct Ppu {
     dot: u16,
     scanline: u16,
     odd_frame: bool,
+
+    mirroring: Mirroring,
 }
 
 impl Ppu {
@@ -65,7 +69,14 @@ impl Ppu {
             dot: 0,
             scanline: 0,
             odd_frame: false,
+            mirroring: Mirroring::Horizontal,
         }
+    }
+
+    /// Set the nametable mirroring mode (called by the bus when a cartridge is
+    /// inserted or when a mapper changes mirroring dynamically).
+    pub fn set_mirroring(&mut self, m: Mirroring) {
+        self.mirroring = m;
     }
 
     /// Advance PPU by `cpu_cycles` CPU cycles (= 3× PPU dots each).
@@ -128,16 +139,18 @@ impl Ppu {
         if self.ctrl & 0x04 != 0 { 32 } else { 1 }
     }
 
-    // Nametable mirroring: horizontal by default.
-    // $2000/$2400 share the first 1 KB bank; $2800/$2C00 share the second.
     fn mirror_vram_addr(&self, addr: u16) -> usize {
-        let addr = (addr & 0x0FFF) as usize;
-        match addr {
-            0x000..=0x3FF => addr,
-            0x400..=0x7FF => addr - 0x400,
-            0x800..=0xBFF => addr - 0x400,
-            _ => addr - 0x800,
-        }
+        let a = (addr & 0x0FFF) as usize; // strip high bits → 0x000–0xFFF
+        let nt = (a >> 10) & 0x3;        // nametable index 0–3
+        let off = a & 0x3FF;             // byte offset within nametable
+        let bank: usize = match self.mirroring {
+            Mirroring::Horizontal => [0, 0, 1, 1][nt],
+            Mirroring::Vertical   => [0, 1, 0, 1][nt],
+            Mirroring::SingleLow  => 0,
+            Mirroring::SingleHigh => 1,
+            Mirroring::FourScreen => nt & 1, // only 2 KB on-chip; treat as vertical
+        };
+        bank * 0x400 + off
     }
 
     fn ppu_read(&mut self, addr: u16) -> u8 {
