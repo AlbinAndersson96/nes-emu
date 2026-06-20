@@ -1,16 +1,14 @@
-/// NES PPU — register state, VRAM, OAM, palette, and VBlank/NMI timing.
+/// NES PPU — register state, VRAM, OAM, palette, VBlank/NMI, and scanline timing.
 ///
 /// NTSC timing:
-///   CPU clock:             1,789,773 Hz
-///   PPU clock:             5,369,318 Hz (3× CPU)
-///   PPU cycles per frame:  262 scanlines × 341 dots = 89,342
-///   CPU cycles per frame:  89,342 / 3 ≈ 29,781
-///
-///   VBlank SET   at scanline 241 dot 1 → CPU cycle 27,394
-///   VBlank CLEAR at scanline 261 dot 1 → CPU cycle 29,667
-const CPU_CYCLES_PER_FRAME: u64 = 29_781;
-const VBLANK_START: u64 = 27_394;
-const VBLANK_END: u64 = 29_667;
+///   PPU clock:   5,369,318 Hz (3× CPU)
+///   Dots/line:   341
+///   Scanlines:   262 (0–239 visible, 240 post-render, 241–260 VBlank, 261 pre-render)
+///   Dots/frame:  89,342 (89,341 on odd frames with rendering enabled)
+const DOTS_PER_SCANLINE: u16 = 341;
+const SCANLINES_PER_FRAME: u16 = 262;
+const VBLANK_SCANLINE: u16 = 241;
+const PRERENDER_SCANLINE: u16 = 261;
 
 pub struct Ppu {
     // Programmer-visible write-only registers
@@ -40,8 +38,10 @@ pub struct Ppu {
     // NMI edge detector
     nmi_pending: bool,
 
-    // Cycle counter for VBlank timing (counts CPU cycles)
-    cycle: u64,
+    // Dot/scanline counters (PPU runs at 3× CPU clock)
+    dot: u16,
+    scanline: u16,
+    odd_frame: bool,
 }
 
 impl Ppu {
@@ -62,31 +62,59 @@ impl Ppu {
             sprite0_hit: false,
             sprite_overflow: false,
             nmi_pending: false,
-            cycle: 0,
+            dot: 0,
+            scanline: 0,
+            odd_frame: false,
         }
     }
 
-    /// Advance PPU timing by `cpu_cycles` CPU cycles.
-    /// Sets the VBlank flag on the rising edge and latches an NMI if enabled.
+    /// Advance PPU by `cpu_cycles` CPU cycles (= 3× PPU dots each).
     pub fn tick(&mut self, cpu_cycles: u64) {
-        let was_vblank = self.in_vblank();
-        self.cycle = self.cycle.wrapping_add(cpu_cycles);
-        let now_vblank = self.in_vblank();
+        for _ in 0..cpu_cycles * 3 {
+            self.clock_dot();
+        }
+    }
 
-        if !was_vblank && now_vblank {
-            // Rising edge of VBlank
-            self.vblank = true;
-            if self.ctrl & 0x80 != 0 {
-                self.nmi_pending = true;
+    /// Clock one PPU dot: run events for (scanline, dot), then advance counters.
+    fn clock_dot(&mut self) {
+        match self.scanline {
+            VBLANK_SCANLINE if self.dot == 1 => {
+                self.vblank = true;
+                if self.ctrl & 0x80 != 0 {
+                    self.nmi_pending = true;
+                }
+            }
+            PRERENDER_SCANLINE if self.dot == 1 => {
+                self.vblank = false;
+                self.sprite0_hit = false;
+                self.sprite_overflow = false;
+            }
+            _ => {}
+        }
+
+        // Advance dot; on odd frames with rendering enabled, pre-render scanline
+        // is 340 dots (dot 339 is skipped, matching the NESdev "odd-frame short" behaviour).
+        self.dot += 1;
+        let scanline_len = if self.scanline == PRERENDER_SCANLINE
+            && self.odd_frame
+            && self.rendering_enabled()
+        {
+            340
+        } else {
+            DOTS_PER_SCANLINE
+        };
+        if self.dot >= scanline_len {
+            self.dot = 0;
+            self.scanline += 1;
+            if self.scanline >= SCANLINES_PER_FRAME {
+                self.scanline = 0;
+                self.odd_frame = !self.odd_frame;
             }
         }
+    }
 
-        if was_vblank && !now_vblank {
-            // Falling edge: clear VBlank and sprite flags for the new frame
-            self.vblank = false;
-            self.sprite0_hit = false;
-            self.sprite_overflow = false;
-        }
+    fn rendering_enabled(&self) -> bool {
+        self.mask & 0x18 != 0
     }
 
     /// Returns true (and clears the latch) if an NMI is pending.
@@ -94,11 +122,6 @@ impl Ppu {
         let v = self.nmi_pending;
         self.nmi_pending = false;
         v
-    }
-
-    fn in_vblank(&self) -> bool {
-        let frame_cycle = self.cycle % CPU_CYCLES_PER_FRAME;
-        (VBLANK_START..VBLANK_END).contains(&frame_cycle)
     }
 
     fn vram_increment(&self) -> u16 {
