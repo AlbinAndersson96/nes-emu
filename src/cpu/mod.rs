@@ -63,8 +63,11 @@ impl Cpu {
             self.nmi_pending = false;
             return self.service_interrupt(bus, 0xFFFA);
         }
-        if self.irq_pending && !self.flag(FLAG_I) {
-            self.irq_pending = false;
+        // IRQ is level-triggered on real hardware: consume the pending flag every
+        // step regardless of FLAG_I so a masked IRQ doesn't linger indefinitely.
+        let irq = self.irq_pending;
+        self.irq_pending = false;
+        if irq && !self.flag(FLAG_I) {
             return self.service_interrupt(bus, 0xFFFE);
         }
         let opcode = self.fetch(bus);
