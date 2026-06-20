@@ -577,11 +577,11 @@ For a minimal but correct PPU implementation:
 - [x] Horizontal scroll update: `t`→`v` copy at dot 257
 - [x] Coarse-X increment every 8 dots during rendering
 - [x] Fine-Y / coarse-Y increment at dot 256
-- [ ] Background tile fetch pipeline (nametable, attribute, CHR low, CHR high)
-- [ ] Sprite evaluation for next scanline (secondary OAM, 8-sprite limit)
-- [ ] Sprite pattern fetch and latching
-- [ ] Sprite-0 hit detection
-- [ ] Pixel output with priority multiplexer
+- [x] Background tile fetch pipeline (nametable, attribute, CHR low, CHR high)
+- [x] Sprite evaluation for next scanline (secondary OAM, 8-sprite limit)
+- [x] Sprite pattern fetch and latching
+- [x] Sprite-0 hit detection
+- [x] Pixel output with priority multiplexer
 - [x] Palette RAM (32 bytes) with mirrors
 - [ ] OAM DMA (`$4014`): 513/514 CPU cycle stall
 - [x] Odd-frame dot skip (dot 339 skipped when rendering enabled)

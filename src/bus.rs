@@ -49,7 +49,7 @@ impl Bus {
         if let Some(ref cart) = self.cartridge {
             self.ppu.set_mirroring(cart.mirroring());
         }
-        self.ppu.tick(cycles);
+        self.ppu.tick(cycles, self.cartridge.as_mut());
         self.ppu.take_nmi()
     }
 
