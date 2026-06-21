@@ -82,7 +82,21 @@ fn run_until_complete(bus: &mut Bus, cpu: &mut Cpu) {
         if bus.tick_apu(total) {
             cpu.irq();
         }
-        total_cycles += total;
+
+        // DMC DMA stall: the APU fetched a sample byte; tick PPU/APU by the stall
+        // cycles so timing stays consistent (approximate — stall is mid-instruction
+        // on real hardware, but whole-instruction emulation can't do better).
+        let dmc_stall = bus.take_dmc_dma_stall() as u64;
+        if dmc_stall > 0 {
+            if bus.tick_ppu(dmc_stall) {
+                cpu.nmi();
+            }
+            if bus.tick_apu(dmc_stall) {
+                cpu.irq();
+            }
+        }
+
+        total_cycles += total + dmc_stall;
     }
 }
 

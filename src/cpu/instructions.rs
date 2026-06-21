@@ -28,7 +28,7 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, opcode: u8) -> u8 {
         0x06 => { let (a,_) = cpu.addr_zero_page(bus);   rmw(cpu,bus,a,asl); 5 }
         0x16 => { let (a,_) = cpu.addr_zero_page_x(bus); rmw(cpu,bus,a,asl); 6 }
         0x0E => { let (a,_) = cpu.addr_absolute(bus);    rmw(cpu,bus,a,asl); 6 }
-        0x1E => { let (a,_) = cpu.addr_absolute_x(bus);  rmw(cpu,bus,a,asl); 7 }
+        0x1E => { let a = cpu.addr_absolute_x_rmw(bus);   rmw(cpu,bus,a,asl); 7 }
 
         // --- Branches ---
         0x90 => branch(cpu, bus, !cpu.flag(FLAG_C)), // BCC
@@ -50,7 +50,12 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, opcode: u8) -> u8 {
         // --- Flag clears / sets ---
         0x18 => { cpu.set_flag(FLAG_C, false); 2 } // CLC
         0xD8 => { cpu.set_flag(super::FLAG_D, false); 2 } // CLD
-        0x58 => { cpu.set_flag(FLAG_I, false); 2 } // CLI
+        0x58 => {                                                              // CLI
+            let was_set = cpu.flag(FLAG_I);
+            cpu.set_flag(FLAG_I, false);
+            if was_set { cpu.irq_inhibit_next = true; }
+            2
+        }
         0xB8 => { cpu.set_flag(FLAG_V, false); 2 } // CLV
         0x38 => { cpu.set_flag(FLAG_C, true);  2 } // SEC
         0xF8 => { cpu.set_flag(super::FLAG_D, true);  2 } // SED
@@ -80,7 +85,7 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, opcode: u8) -> u8 {
         0xC6 => { let (a,_) = cpu.addr_zero_page(bus);   rmw(cpu,bus,a,dec); 5 }
         0xD6 => { let (a,_) = cpu.addr_zero_page_x(bus); rmw(cpu,bus,a,dec); 6 }
         0xCE => { let (a,_) = cpu.addr_absolute(bus);    rmw(cpu,bus,a,dec); 6 }
-        0xDE => { let (a,_) = cpu.addr_absolute_x(bus);  rmw(cpu,bus,a,dec); 7 }
+        0xDE => { let a = cpu.addr_absolute_x_rmw(bus);   rmw(cpu,bus,a,dec); 7 }
 
         // --- DEX / DEY ---
         0xCA => { cpu.x = cpu.x.wrapping_sub(1); cpu.set_nz(cpu.x); 2 }
@@ -100,7 +105,7 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, opcode: u8) -> u8 {
         0xE6 => { let (a,_) = cpu.addr_zero_page(bus);   rmw(cpu,bus,a,inc); 5 }
         0xF6 => { let (a,_) = cpu.addr_zero_page_x(bus); rmw(cpu,bus,a,inc); 6 }
         0xEE => { let (a,_) = cpu.addr_absolute(bus);    rmw(cpu,bus,a,inc); 6 }
-        0xFE => { let (a,_) = cpu.addr_absolute_x(bus);  rmw(cpu,bus,a,inc); 7 }
+        0xFE => { let a = cpu.addr_absolute_x_rmw(bus);   rmw(cpu,bus,a,inc); 7 }
 
         // --- INX / INY ---
         0xE8 => { cpu.x = cpu.x.wrapping_add(1); cpu.set_nz(cpu.x); 2 }
@@ -142,7 +147,7 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, opcode: u8) -> u8 {
         0x46 => { let (a,_) = cpu.addr_zero_page(bus);   rmw(cpu,bus,a,lsr); 5 }
         0x56 => { let (a,_) = cpu.addr_zero_page_x(bus); rmw(cpu,bus,a,lsr); 6 }
         0x4E => { let (a,_) = cpu.addr_absolute(bus);    rmw(cpu,bus,a,lsr); 6 }
-        0x5E => { let (a,_) = cpu.addr_absolute_x(bus);  rmw(cpu,bus,a,lsr); 7 }
+        0x5E => { let a = cpu.addr_absolute_x_rmw(bus);   rmw(cpu,bus,a,lsr); 7 }
 
         // --- NOP ---
         0xEA => 2,
@@ -161,21 +166,27 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, opcode: u8) -> u8 {
         0x48 => { let a = cpu.a; cpu.push(bus, a); 3 }                       // PHA
         0x08 => { let p = cpu.p | FLAG_B | FLAG_U; cpu.push(bus, p); 3 }     // PHP
         0x68 => { let v = cpu.pop(bus); cpu.a = v; cpu.set_nz(v); 4 }        // PLA
-        0x28 => { let v = cpu.pop(bus); cpu.p = (v & !FLAG_B) | FLAG_U; 4 }  // PLP
+        0x28 => {                                                              // PLP
+            let old_i = cpu.flag(FLAG_I);
+            let v = cpu.pop(bus);
+            cpu.p = (v & !FLAG_B) | FLAG_U;
+            if old_i && !cpu.flag(FLAG_I) { cpu.irq_inhibit_next = true; }
+            4
+        }
 
         // --- ROL ---
         0x2A => { cpu.a = rol(cpu, cpu.a); 2 }
         0x26 => { let (a,_) = cpu.addr_zero_page(bus);   rmw(cpu,bus,a,rol); 5 }
         0x36 => { let (a,_) = cpu.addr_zero_page_x(bus); rmw(cpu,bus,a,rol); 6 }
         0x2E => { let (a,_) = cpu.addr_absolute(bus);    rmw(cpu,bus,a,rol); 6 }
-        0x3E => { let (a,_) = cpu.addr_absolute_x(bus);  rmw(cpu,bus,a,rol); 7 }
+        0x3E => { let a = cpu.addr_absolute_x_rmw(bus);   rmw(cpu,bus,a,rol); 7 }
 
         // --- ROR ---
         0x6A => { cpu.a = ror(cpu, cpu.a); 2 }
         0x66 => { let (a,_) = cpu.addr_zero_page(bus);   rmw(cpu,bus,a,ror); 5 }
         0x76 => { let (a,_) = cpu.addr_zero_page_x(bus); rmw(cpu,bus,a,ror); 6 }
         0x6E => { let (a,_) = cpu.addr_absolute(bus);    rmw(cpu,bus,a,ror); 6 }
-        0x7E => { let (a,_) = cpu.addr_absolute_x(bus);  rmw(cpu,bus,a,ror); 7 }
+        0x7E => { let a = cpu.addr_absolute_x_rmw(bus);   rmw(cpu,bus,a,ror); 7 }
 
         // --- RTI / RTS ---
         0x40 => { rti(cpu, bus); 6 }
@@ -195,10 +206,10 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, opcode: u8) -> u8 {
         0x85 => { let (a,_) = cpu.addr_zero_page(bus);   let v=cpu.a; cpu.write(bus,a,v); 3 }
         0x95 => { let (a,_) = cpu.addr_zero_page_x(bus); let v=cpu.a; cpu.write(bus,a,v); 4 }
         0x8D => { let (a,_) = cpu.addr_absolute(bus);    let v=cpu.a; cpu.write(bus,a,v); 4 }
-        0x9D => { let (a,_) = cpu.addr_absolute_x(bus);  let v=cpu.a; cpu.write(bus,a,v); 5 }
-        0x99 => { let (a,_) = cpu.addr_absolute_y(bus);  let v=cpu.a; cpu.write(bus,a,v); 5 }
+        0x9D => { let a = cpu.addr_absolute_x_store(bus); let v=cpu.a; cpu.write(bus,a,v); 5 }
+        0x99 => { let a = cpu.addr_absolute_y_store(bus); let v=cpu.a; cpu.write(bus,a,v); 5 }
         0x81 => { let (a,_) = cpu.addr_indirect_x(bus);  let v=cpu.a; cpu.write(bus,a,v); 6 }
-        0x91 => { let (a,_) = cpu.addr_indirect_y(bus);  let v=cpu.a; cpu.write(bus,a,v); 6 }
+        0x91 => { let a = cpu.addr_indirect_y_store(bus); let v=cpu.a; cpu.write(bus,a,v); 6 }
 
         // --- STX ---
         0x86 => { let (a,_) = cpu.addr_zero_page(bus);   let v=cpu.x; cpu.write(bus,a,v); 3 }
@@ -249,8 +260,8 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, opcode: u8) -> u8 {
         0x07 => { let (a,_) = cpu.addr_zero_page(bus);   slo(cpu,bus,a); 5 }
         0x17 => { let (a,_) = cpu.addr_zero_page_x(bus); slo(cpu,bus,a); 6 }
         0x0F => { let (a,_) = cpu.addr_absolute(bus);    slo(cpu,bus,a); 6 }
-        0x1F => { let (a,_) = cpu.addr_absolute_x(bus);  slo(cpu,bus,a); 7 }
-        0x1B => { let (a,_) = cpu.addr_absolute_y(bus);  slo(cpu,bus,a); 7 }
+        0x1F => { let a = cpu.addr_absolute_x_rmw(bus);   slo(cpu,bus,a); 7 }
+        0x1B => { let a = cpu.addr_absolute_y_rmw(bus);   slo(cpu,bus,a); 7 }
         0x03 => { let (a,_) = cpu.addr_indirect_x(bus);  slo(cpu,bus,a); 8 }
         0x13 => { let (a,_) = cpu.addr_indirect_y(bus);  slo(cpu,bus,a); 8 }
 
@@ -258,8 +269,8 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, opcode: u8) -> u8 {
         0x27 => { let (a,_) = cpu.addr_zero_page(bus);   rla(cpu,bus,a); 5 }
         0x37 => { let (a,_) = cpu.addr_zero_page_x(bus); rla(cpu,bus,a); 6 }
         0x2F => { let (a,_) = cpu.addr_absolute(bus);    rla(cpu,bus,a); 6 }
-        0x3F => { let (a,_) = cpu.addr_absolute_x(bus);  rla(cpu,bus,a); 7 }
-        0x3B => { let (a,_) = cpu.addr_absolute_y(bus);  rla(cpu,bus,a); 7 }
+        0x3F => { let a = cpu.addr_absolute_x_rmw(bus);   rla(cpu,bus,a); 7 }
+        0x3B => { let a = cpu.addr_absolute_y_rmw(bus);   rla(cpu,bus,a); 7 }
         0x23 => { let (a,_) = cpu.addr_indirect_x(bus);  rla(cpu,bus,a); 8 }
         0x33 => { let (a,_) = cpu.addr_indirect_y(bus);  rla(cpu,bus,a); 8 }
 
@@ -267,8 +278,8 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, opcode: u8) -> u8 {
         0x47 => { let (a,_) = cpu.addr_zero_page(bus);   sre(cpu,bus,a); 5 }
         0x57 => { let (a,_) = cpu.addr_zero_page_x(bus); sre(cpu,bus,a); 6 }
         0x4F => { let (a,_) = cpu.addr_absolute(bus);    sre(cpu,bus,a); 6 }
-        0x5F => { let (a,_) = cpu.addr_absolute_x(bus);  sre(cpu,bus,a); 7 }
-        0x5B => { let (a,_) = cpu.addr_absolute_y(bus);  sre(cpu,bus,a); 7 }
+        0x5F => { let a = cpu.addr_absolute_x_rmw(bus);   sre(cpu,bus,a); 7 }
+        0x5B => { let a = cpu.addr_absolute_y_rmw(bus);   sre(cpu,bus,a); 7 }
         0x43 => { let (a,_) = cpu.addr_indirect_x(bus);  sre(cpu,bus,a); 8 }
         0x53 => { let (a,_) = cpu.addr_indirect_y(bus);  sre(cpu,bus,a); 8 }
 
@@ -276,8 +287,8 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, opcode: u8) -> u8 {
         0x67 => { let (a,_) = cpu.addr_zero_page(bus);   rra(cpu,bus,a); 5 }
         0x77 => { let (a,_) = cpu.addr_zero_page_x(bus); rra(cpu,bus,a); 6 }
         0x6F => { let (a,_) = cpu.addr_absolute(bus);    rra(cpu,bus,a); 6 }
-        0x7F => { let (a,_) = cpu.addr_absolute_x(bus);  rra(cpu,bus,a); 7 }
-        0x7B => { let (a,_) = cpu.addr_absolute_y(bus);  rra(cpu,bus,a); 7 }
+        0x7F => { let a = cpu.addr_absolute_x_rmw(bus);   rra(cpu,bus,a); 7 }
+        0x7B => { let a = cpu.addr_absolute_y_rmw(bus);   rra(cpu,bus,a); 7 }
         0x63 => { let (a,_) = cpu.addr_indirect_x(bus);  rra(cpu,bus,a); 8 }
         0x73 => { let (a,_) = cpu.addr_indirect_y(bus);  rra(cpu,bus,a); 8 }
 
@@ -305,8 +316,8 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, opcode: u8) -> u8 {
         0xC7 => { let (a,_) = cpu.addr_zero_page(bus);   dcp(cpu,bus,a); 5 }
         0xD7 => { let (a,_) = cpu.addr_zero_page_x(bus); dcp(cpu,bus,a); 6 }
         0xCF => { let (a,_) = cpu.addr_absolute(bus);    dcp(cpu,bus,a); 6 }
-        0xDF => { let (a,_) = cpu.addr_absolute_x(bus);  dcp(cpu,bus,a); 7 }
-        0xDB => { let (a,_) = cpu.addr_absolute_y(bus);  dcp(cpu,bus,a); 7 }
+        0xDF => { let a = cpu.addr_absolute_x_rmw(bus);   dcp(cpu,bus,a); 7 }
+        0xDB => { let a = cpu.addr_absolute_y_rmw(bus);   dcp(cpu,bus,a); 7 }
         0xC3 => { let (a,_) = cpu.addr_indirect_x(bus);  dcp(cpu,bus,a); 8 }
         0xD3 => { let (a,_) = cpu.addr_indirect_y(bus);  dcp(cpu,bus,a); 8 }
 
@@ -314,8 +325,8 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, opcode: u8) -> u8 {
         0xE7 => { let (a,_) = cpu.addr_zero_page(bus);   isc(cpu,bus,a); 5 }
         0xF7 => { let (a,_) = cpu.addr_zero_page_x(bus); isc(cpu,bus,a); 6 }
         0xEF => { let (a,_) = cpu.addr_absolute(bus);    isc(cpu,bus,a); 6 }
-        0xFF => { let (a,_) = cpu.addr_absolute_x(bus);  isc(cpu,bus,a); 7 }
-        0xFB => { let (a,_) = cpu.addr_absolute_y(bus);  isc(cpu,bus,a); 7 }
+        0xFF => { let a = cpu.addr_absolute_x_rmw(bus);   isc(cpu,bus,a); 7 }
+        0xFB => { let a = cpu.addr_absolute_y_rmw(bus);   isc(cpu,bus,a); 7 }
         0xE3 => { let (a,_) = cpu.addr_indirect_x(bus);  isc(cpu,bus,a); 8 }
         0xF3 => { let (a,_) = cpu.addr_indirect_y(bus);  isc(cpu,bus,a); 8 }
 
@@ -559,6 +570,12 @@ fn rti(cpu: &mut Cpu, bus: &mut dyn Bus) {
     let p = cpu.pop(bus);
     cpu.p = (p & !FLAG_B) | FLAG_U;
     cpu.pc = cpu.pop_u16(bus);
+    // RTI's FLAG_I restore takes effect immediately (unlike CLI/PLP which delay
+    // by one instruction). If RTI restores FLAG_I=1, block any pending deferred
+    // IRQ that would otherwise fire after the latency instruction.
+    if cpu.flag(FLAG_I) {
+        cpu.irq_deferred_blocked = true;
+    }
 }
 
 // ---------------------------------------------------------------------------

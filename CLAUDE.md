@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-A NES emulator written in Rust. The CPU (full 6502 instruction set including unofficial opcodes), a minimal PPU stub, and the full APU (all five channels plus frame counter) are implemented. 20 blargg ROM tests pass: all 17 `instr_test-v5` tests and `instr_timing`.
+A NES emulator written in Rust. The CPU (full 6502 instruction set including unofficial opcodes), a minimal PPU stub, and the full APU (all five channels plus frame counter) are implemented. 154 of 159 blargg ROM tests pass: all 17 `instr_test-v5` tests, `instr_timing`, all 5 `instr_misc` tests, and `cpu_interrupts_v2/1-cli_latency`. The remaining 5 failures require sub-instruction cycle-accurate CPU emulation (see Known gaps).
 
 ## Commands
 
@@ -51,26 +51,20 @@ cargo fmt            # format
 
 ## Known gaps
 
-These are confirmed missing features, each tied to at least one failing blargg ROM test. Tests that were previously passing are not affected.
+These are confirmed missing features tied to failing blargg ROM tests. The project currently passes **154 of 159** blargg tests.
 
-### 1. CLI / SEI interrupt-disable latency (`cpu_interrupts_v2/1-cli_latency`)
+### Fixed (previously listed here)
 
-On the real 6502, `CLI` and `SEI` modify `FLAG_I` at the *end* of the instruction, but the new value doesn't take effect for interrupt polling until *after* the following instruction completes. The current implementation sets `FLAG_I` immediately in `instructions.rs`. Test `1-cli_latency` fails with error code 3, which corresponds to wrong IRQ timing relative to `CLI`.
+1. **CLI/SEI/PLP interrupt-disable latency** — Fixed via `irq_inhibit_next` latch and deferred IRQ service. `cpu_interrupts_v2/1-cli_latency` now passes.
+2. **RMW and addressing-mode dummy/spurious reads** — Fixed by adding observable reads to `addr_absolute_x`, `addr_absolute_y`, `addr_indirect_x`, `addr_indirect_y` and their store/RMW variants. `instr_misc/03-dummy_reads` and `04-dummy_reads_apu` now pass.
+3. **`$2002` read side effects** — Already implemented correctly in the PPU stub.
+4. **DMC DMA stall** — 4-cycle CPU stall implemented in `bus.rs::tick_apu`; byte is fetched and supplied to DMC. `instr_misc/04-dummy_reads_apu` passes.
 
-### 2. Read-modify-write dummy reads (`instr_misc/03-dummy_reads`, `instr_misc/04-dummy_reads_apu`)
+### Remaining failures (all require sub-instruction cycle-accurate emulation)
 
-RMW instructions (`ASL`, `LSR`, `ROL`, `ROR`, `INC`, `DEC`) on memory addressing modes perform two bus cycles at the effective address: one read, then one write of the modified value. The intermediate read is architecturally observable (it triggers side effects on registers like `$2002`). The current `execute()` in `instructions.rs` calls `bus.read()` once to fetch the value and `bus.write()` once to store it, which is correct in count but the read must also happen at the *effective* address (not just via the operand fetch) to trigger side effects.
+The 5 remaining failures (`cpu_interrupts_v2` tests 2–5 plus the combined suite) exercise interrupt-sequencing behaviour that depends on *which cycle within a multi-cycle instruction* a signal arrives. Fixing them requires executing each instruction one bus-cycle at a time ("tick-based" CPU core) rather than returning a bulk cycle count — a significant architectural refactor.
 
-Specifically: `03-dummy_reads` iterates over RMW instructions aimed at PPU/APU addresses and checks that the dummy read side effect fires. `04-dummy_reads_apu` does the same for APU registers.
-
-### 3. `$2002` read side effects (`instr_misc/03-dummy_reads`)
-
-Reading `$2002` on real hardware clears bit 7 (VBlank flag) and resets the PPUADDR/PPUSCROLL write-toggle. `Ppu::read_status()` currently takes `&self` and returns a computed value without mutation (`ppu.rs:30`). The `Bus` trait already uses `&mut self` for reads, so the plumbing is ready — `read_status` just needs to become `&mut self` and clear the flag after returning it.
-
-### 4. DMC DMA stall (`instr_misc/04-dummy_reads_apu`, `cpu_interrupts_v2/4-irq_and_dma`)
-
-When the DMC reader needs a byte (`apu.dmc_needs_dma()` returns true), the CPU must be stalled for 4 cycles while the bus performs a read from `apu.dmc_dma_address()` and supplies it via `apu.dmc_supply_byte(data)`. The stall and DMA read are currently stubbed out with a TODO in `bus.rs::tick_apu`.
-
-### 5. NMI / IRQ timing accuracy (`cpu_interrupts_v2/*`)
-
-The `cpu_interrupts_v2` suite tests cycle-accurate interrupt sequencing: NMI-during-BRK, NMI-during-IRQ, branch-delay IRQ, and `$4017` write-jitter (the frame counter reset actually takes effect 2–3 CPU cycles after the write). These require sub-instruction interrupt polling precision that the current one-instruction-granularity model cannot provide.
+- **`cpu_interrupts_v2/2-nmi_and_brk`** — NMI arriving during BRK hijacks the vector fetch to $FFFA/$FFFB while still pushing PC+2 and P (B clear) as if servicing BRK. Requires detecting "NMI at cycle N of BRK."
+- **`cpu_interrupts_v2/3-nmi_and_irq`** — NMI hijacks a pending IRQ service mid-sequence.
+- **`cpu_interrupts_v2/4-irq_and_dma`** — IRQ timing relative to OAM-DMA / DMC-DMA. On hardware the CPU is halted mid-instruction; the IRQ is polled at a specific cycle within the halt.
+- **`cpu_interrupts_v2/5-branch_delays_irq`** — A page-crossing branch (4 cycles) aborts its "page-fix" cycle when IRQ is pending at cycle 3, taking only 3 cycles and pushing the unfixed PC to the stack.
