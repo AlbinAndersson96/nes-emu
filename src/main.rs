@@ -20,7 +20,32 @@ use winit::{
 const CYCLES_PER_FRAME: u64 = 29_781;
 const FRAME_DURATION: Duration = Duration::from_nanos(16_666_667);
 
+fn maybe_configure_wsl2_gpu() {
+    let version = match fs::read_to_string("/proc/version") {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    if !version.to_lowercase().contains("microsoft") {
+        return;
+    }
+    // SAFETY: called before any threads are spawned
+    unsafe {
+        if env::var("WGPU_BACKEND").is_err() {
+            env::set_var("WGPU_BACKEND", "vulkan");
+        }
+        if env::var("VK_ICD_FILENAMES").is_err() {
+            let lvp = "/usr/share/vulkan/icd.d/lvp_icd.json";
+            if std::path::Path::new(lvp).exists() {
+                env::set_var("VK_ICD_FILENAMES", lvp);
+            }
+        }
+        env::remove_var("WAYLAND_DISPLAY");
+    }
+}
+
 fn main() {
+    maybe_configure_wsl2_gpu();
+
     let args: Vec<String> = env::args().collect();
     if args.len() != 2 {
         eprintln!("Usage: {} <rom.nes>", args[0]);
