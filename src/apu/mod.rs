@@ -13,24 +13,26 @@ use triangle::TriangleChannel;
 
 /// NTSC frame-counter step sequences (CPU cycles from the last $4017 write).
 ///
-/// Each tuple is (cpu_cycle, quarter_frame, half_frame, set_irq).
-/// The final entry in each array is the reset point — no clocks, just resets
-/// frame_cycles to 0.
-const MODE0: [(u32, bool, bool, bool); 5] = [
-    (7_457,  true,  false, false),
-    (14_913, true,  true,  false),
-    (22_371, true,  false, false),
-    (29_829, true,  true,  true),
-    (29_830, false, false, false), // sequence restart
+/// Each tuple is (cpu_cycle, quarter_frame, half_frame, set_irq, reset).
+/// `reset` marks the end of the sequence — frame_cycles wraps to 0.
+/// The 4-step mode (MODE0) fires the IRQ flag on cycles 29828, 29829, AND 29830,
+/// which matches hardware behaviour (three consecutive IRQ assertions per frame).
+const MODE0: [(u32, bool, bool, bool, bool); 6] = [
+    (7_457,  true,  false, false, false),
+    (14_913, true,  true,  false, false),
+    (22_371, true,  false, false, false),
+    (29_828, false, false, true,  false), // IRQ (cycle before step 4)
+    (29_829, true,  true,  true,  false), // Q+H+IRQ (step 4)
+    (29_830, false, false, true,  true),  // IRQ + sequence restart
 ];
 
-const MODE1: [(u32, bool, bool, bool); 6] = [
-    (7_457,  true,  false, false),
-    (14_913, true,  true,  false),
-    (22_371, true,  false, false),
-    (29_829, false, false, false), // silent step
-    (37_281, true,  true,  false),
-    (37_282, false, false, false), // sequence restart
+const MODE1: [(u32, bool, bool, bool, bool); 6] = [
+    (7_457,  true,  false, false, false),
+    (14_913, true,  true,  false, false),
+    (22_371, true,  false, false, false),
+    (29_829, false, false, false, false), // silent step (no IRQ, no reset)
+    (37_281, true,  true,  false, false),
+    (37_282, false, false, false, true),  // sequence restart
 ];
 
 pub struct Apu {
@@ -77,10 +79,10 @@ impl Apu {
         let c = self.frame_cycles;
 
         // Frame counter — fire events and reset at the end of each sequence.
-        let steps: &[(u32, bool, bool, bool)] =
+        let steps: &[(u32, bool, bool, bool, bool)] =
             if self.frame_mode { &MODE1 } else { &MODE0 };
 
-        for &(at, quarter, half, irq) in steps {
+        for &(at, quarter, half, irq, reset) in steps {
             if c == at {
                 if quarter {
                     self.clock_quarter_frame();
@@ -91,8 +93,7 @@ impl Apu {
                 if irq && !self.irq_inhibit {
                     self.frame_irq_flag = true;
                 }
-                // The last entry in each table is the reset point.
-                if !quarter && !half && !irq {
+                if reset {
                     self.frame_cycles = 0;
                 }
                 break;
