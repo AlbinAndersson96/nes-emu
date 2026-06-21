@@ -11,6 +11,14 @@ pub struct Cpu {
     pub cycles: u64,
     nmi_pending: bool,
     irq_pending: bool,
+    /// Set by CLI/PLP when FLAG_I transitions 1→0. Suppresses the IRQ at the
+    /// START of the next instruction so that instruction executes first. After
+    /// that instruction, the IRQ fires with the current (possibly modified) P.
+    pub(in crate::cpu) irq_inhibit_next: bool,
+    /// Set by RTI when it restores FLAG_I=1. Prevents the deferred IRQ from
+    /// firing after the latency instruction, because RTI's P restore has
+    /// immediate effect on interrupt polling (unlike CLI/SEI/PLP which delay).
+    pub(in crate::cpu) irq_deferred_blocked: bool,
 }
 
 // P register flag masks
@@ -35,6 +43,8 @@ impl Cpu {
             cycles: 0,
             nmi_pending: false,
             irq_pending: false,
+            irq_inhibit_next: false,
+            irq_deferred_blocked: false,
         }
     }
 
@@ -67,11 +77,25 @@ impl Cpu {
         // step regardless of FLAG_I so a masked IRQ doesn't linger indefinitely.
         let irq = self.irq_pending;
         self.irq_pending = false;
-        if irq && !self.flag(FLAG_I) {
+        // CLI/PLP clear FLAG_I with a one-instruction delay: the change is written
+        // to the register immediately, but interrupt polling still sees the old value
+        // for one more instruction (irq_inhibit_next acts as the one-step latch).
+        let inhibit = self.irq_inhibit_next;
+        self.irq_inhibit_next = false;
+        if irq && !inhibit && !self.flag(FLAG_I) {
             return self.service_interrupt(bus, 0xFFFE);
         }
         let opcode = self.fetch(bus);
-        instructions::execute(self, bus, opcode)
+        let cycles = instructions::execute(self, bus, opcode);
+        // Deferred IRQ service: fire the pending IRQ after the latency instruction
+        // (the one that followed CLI/PLP). At this point P reflects the current
+        // state (e.g. FLAG_I=1 if SEI ran), which is what gets pushed to the stack.
+        let blocked = self.irq_deferred_blocked;
+        self.irq_deferred_blocked = false;
+        if inhibit && irq && !blocked {
+            return cycles + self.service_interrupt(bus, 0xFFFE);
+        }
+        cycles
     }
 
     fn service_interrupt(&mut self, bus: &mut dyn Bus, vector: u16) -> u8 {
@@ -186,19 +210,74 @@ impl Cpu {
     pub(in crate::cpu) fn addr_absolute_x(&mut self, bus: &mut dyn Bus) -> (u16, bool) {
         let base = self.fetch_u16(bus);
         let addr = base.wrapping_add(self.x as u16);
-        (addr, page_crossed(base, addr))
+        let crossed = page_crossed(base, addr);
+        if crossed {
+            let precarry = (base & 0xFF00) | (addr & 0x00FF);
+            let _ = bus.read(precarry);
+        }
+        (addr, crossed)
     }
 
     pub(in crate::cpu) fn addr_absolute_y(&mut self, bus: &mut dyn Bus) -> (u16, bool) {
         let base = self.fetch_u16(bus);
         let addr = base.wrapping_add(self.y as u16);
-        (addr, page_crossed(base, addr))
+        let crossed = page_crossed(base, addr);
+        if crossed {
+            let precarry = (base & 0xFF00) | (addr & 0x00FF);
+            let _ = bus.read(precarry);
+        }
+        (addr, crossed)
+    }
+
+    /// Absolute,X addressing for store instructions.
+    /// Always performs a dummy read at the pre-carry address (stores are always 5 cycles
+    /// regardless of page crossing; the spurious read happens on cycle 4 unconditionally).
+    pub(in crate::cpu) fn addr_absolute_x_store(&mut self, bus: &mut dyn Bus) -> u16 {
+        let base = self.fetch_u16(bus);
+        let addr = base.wrapping_add(self.x as u16);
+        let precarry = (base & 0xFF00) | (addr & 0x00FF);
+        let _ = bus.read(precarry);
+        addr
+    }
+
+    /// Absolute,Y addressing for store instructions.
+    /// Same unconditional pre-carry dummy read as addr_absolute_x_store.
+    pub(in crate::cpu) fn addr_absolute_y_store(&mut self, bus: &mut dyn Bus) -> u16 {
+        let base = self.fetch_u16(bus);
+        let addr = base.wrapping_add(self.y as u16);
+        let precarry = (base & 0xFF00) | (addr & 0x00FF);
+        let _ = bus.read(precarry);
+        addr
+    }
+
+    /// Absolute,X addressing for read-modify-write instructions.
+    /// Always performs a dummy read at the pre-carry address (observable side
+    /// effect — this read happens in cycle 4 even when no page is crossed).
+    pub(in crate::cpu) fn addr_absolute_x_rmw(&mut self, bus: &mut dyn Bus) -> u16 {
+        let base = self.fetch_u16(bus);
+        let addr = base.wrapping_add(self.x as u16);
+        let precarry = (base & 0xFF00) | (addr & 0x00FF);
+        let _ = bus.read(precarry);
+        addr
+    }
+
+    /// Absolute,Y addressing for read-modify-write instructions.
+    /// Same pre-carry dummy read as addr_absolute_x_rmw.
+    pub(in crate::cpu) fn addr_absolute_y_rmw(&mut self, bus: &mut dyn Bus) -> u16 {
+        let base = self.fetch_u16(bus);
+        let addr = base.wrapping_add(self.y as u16);
+        let precarry = (base & 0xFF00) | (addr & 0x00FF);
+        let _ = bus.read(precarry);
+        addr
     }
 
     pub(in crate::cpu) fn addr_indirect_x(&mut self, bus: &mut dyn Bus) -> (u16, bool) {
-        let ptr = self.fetch(bus).wrapping_add(self.x) as u16;
+        let base = self.fetch(bus) as u16;
+        // Spurious read at the non-indexed ZP address (cycle 3 of the sequence).
+        let _ = bus.read(base);
+        let ptr = (base + self.x as u16) & 0x00FF;
         let lo = bus.read(ptr) as u16;
-        let hi = bus.read(ptr.wrapping_add(1) & 0x00FF) as u16;
+        let hi = bus.read((ptr + 1) & 0x00FF) as u16;
         ((hi << 8) | lo, false)
     }
 
@@ -208,7 +287,29 @@ impl Cpu {
         let hi = bus.read(ptr.wrapping_add(1) & 0x00FF) as u16;
         let base = (hi << 8) | lo;
         let addr = base.wrapping_add(self.y as u16);
-        (addr, page_crossed(base, addr))
+        let crossed = page_crossed(base, addr);
+        if crossed {
+            // On a page crossing the 6502 reads the pre-carry address before
+            // fetching from the true effective address. The read is observable
+            // (e.g. it clears $2002's VBlank flag on a PPU address).
+            let precarry = (base & 0xFF00) | (addr & 0x00FF);
+            let _ = bus.read(precarry);
+        }
+        (addr, crossed)
+    }
+
+    /// (Indirect),Y addressing for store instructions.
+    /// Stores ALWAYS perform a dummy read at the pre-carry address (cycle 5),
+    /// regardless of whether a page is crossed.
+    pub(in crate::cpu) fn addr_indirect_y_store(&mut self, bus: &mut dyn Bus) -> u16 {
+        let ptr = self.fetch(bus) as u16;
+        let lo = bus.read(ptr) as u16;
+        let hi = bus.read(ptr.wrapping_add(1) & 0x00FF) as u16;
+        let base = (hi << 8) | lo;
+        let addr = base.wrapping_add(self.y as u16);
+        let precarry = (base & 0xFF00) | (addr & 0x00FF);
+        let _ = bus.read(precarry);
+        addr
     }
 }
 

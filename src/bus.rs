@@ -27,6 +27,8 @@ pub struct Bus {
     /// CPU cycles to stall after an OAM DMA write to $4014.
     /// 513 cycles normally; 514 on an odd CPU cycle. The run loop consumes this.
     oam_dma_stall: u16,
+    /// CPU cycles to stall when the DMC DMA fetches a sample byte (4 cycles).
+    dmc_dma_stall: u8,
 }
 
 impl Bus {
@@ -39,6 +41,7 @@ impl Bus {
             controller_latch: [0u8; 2],
             controller_shift: [0u8; 2],
             oam_dma_stall: 0,
+            dmc_dma_stall: 0,
         }
     }
 
@@ -66,16 +69,24 @@ impl Bus {
     }
 
     /// Advance the APU by `cpu_cycles`. Returns true if an IRQ should be raised.
+    /// If the DMC reader needs a byte, fetches it from CPU memory and supplies it;
+    /// sets `dmc_dma_stall` to 4 so the caller can stall the CPU accordingly.
     pub fn tick_apu(&mut self, cpu_cycles: u64) -> bool {
         let irq = self.apu.tick(cpu_cycles as u32);
-        // TODO: if the DMC needs a DMA byte, stall the CPU for 4 cycles and
-        // supply the read here:
-        //   if self.apu.dmc_needs_dma() {
-        //       let addr = self.apu.dmc_dma_address();
-        //       let data = self.read(addr);
-        //       self.apu.dmc_supply_byte(data);
-        //   }
+        if self.apu.dmc_needs_dma() {
+            let addr = self.apu.dmc_dma_address();
+            let data = self.read(addr);
+            self.apu.dmc_supply_byte(data);
+            self.dmc_dma_stall = 4;
+        }
         irq
+    }
+
+    /// Returns DMC DMA stall cycles accumulated since the last call, then resets.
+    pub fn take_dmc_dma_stall(&mut self) -> u8 {
+        let s = self.dmc_dma_stall;
+        self.dmc_dma_stall = 0;
+        s
     }
 
     /// Strobe the controller shift registers. Writing 1 to bit 0 of $4016
