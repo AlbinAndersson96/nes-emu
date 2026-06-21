@@ -3,10 +3,22 @@ mod bus;
 mod cartridge;
 mod cpu;
 mod ppu;
+mod renderer;
 #[cfg(test)]
 mod tests;
 
-use std::{env, fs, process};
+use std::{
+    env, fs, process,
+    time::{Duration, Instant},
+};
+use renderer::Renderer;
+use winit::{
+    event::{Event, WindowEvent},
+    event_loop::{ControlFlow, EventLoop},
+};
+
+const CYCLES_PER_FRAME: u64 = 29_781;
+const FRAME_DURATION: Duration = Duration::from_nanos(16_666_667);
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -37,23 +49,60 @@ fn main() {
     let mut cpu = cpu::Cpu::new();
     cpu.reset(&mut bus);
 
-    loop {
-        let cycles = cpu.step(&mut bus) as u64;
-
-        // OAM DMA stall: burn extra cycles (odd CPU cycle adds 1)
-        let dma_stall = bus.take_oam_dma_stall() as u64;
-        let extra = if dma_stall > 0 {
-            dma_stall + (cpu.cycles & 1)
-        } else {
-            0
-        };
-        let total = cycles + extra;
-
-        if bus.tick_ppu(total) {
-            cpu.nmi();
+    let event_loop = EventLoop::new();
+    let mut renderer = match Renderer::new(&event_loop) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: could not create window: {}", e);
+            process::exit(1);
         }
-        if bus.tick_apu(total) {
-            cpu.irq();
+    };
+
+    let mut next_frame = Instant::now();
+
+    event_loop.run(move |event, _, control_flow| {
+        *control_flow = ControlFlow::WaitUntil(next_frame);
+
+        match event {
+            Event::WindowEvent {
+                window_id,
+                event: WindowEvent::CloseRequested,
+            } if window_id == renderer.window_id() => {
+                *control_flow = ControlFlow::Exit;
+            }
+
+            Event::WindowEvent {
+                event: WindowEvent::Resized(size),
+                ..
+            } => {
+                renderer.resize(size.width, size.height);
+            }
+
+            Event::MainEventsCleared => {
+                if Instant::now() >= next_frame {
+                    next_frame += FRAME_DURATION;
+
+                    let mut elapsed = 0u64;
+                    while elapsed < CYCLES_PER_FRAME {
+                        let c = cpu.step(&mut bus) as u64;
+                        let dma = bus.take_oam_dma_stall() as u64;
+                        let extra = if dma > 0 { dma + (cpu.cycles & 1) } else { 0 };
+                        let total = c + extra;
+                        elapsed += total;
+                        if bus.tick_ppu(total) { cpu.nmi(); }
+                        if bus.tick_apu(total) { cpu.irq(); }
+                    }
+
+                    if bus.ppu.frame_ready {
+                        bus.ppu.frame_ready = false;
+                        renderer.present(&bus.ppu.frame).unwrap();
+                    }
+
+                    *control_flow = ControlFlow::WaitUntil(next_frame);
+                }
+            }
+
+            _ => {}
         }
-    }
+    });
 }
