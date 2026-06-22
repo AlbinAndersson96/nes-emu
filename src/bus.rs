@@ -115,9 +115,9 @@ impl Bus {
     }
 
     /// Initiate an OAM DMA transfer triggered by a write to $4014.
-    /// The 513-cycle transfer (read+write per byte plus 1 idle) is carried out
-    /// cycle-by-cycle by tick_dma(); the +1 for odd CPU cycles is handled by
-    /// the run loop before DMA starts (it calls tick_dma() one extra time).
+    /// The transfer is always 513 cycles (256 read/write pairs + 1 idle). On real
+    /// hardware the stall is 514 cycles when triggered on an odd CPU cycle, but
+    /// that +1 parity alignment is not currently implemented.
     fn oam_dma(&mut self, page: u8) {
         self.oam_dma_active = true;
         self.oam_dma_cycles_left = 513;

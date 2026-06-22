@@ -43,18 +43,15 @@ pub struct Cpu {
     pub(in crate::cpu) queue: [MicroOp; 8],
     pub(in crate::cpu) queue_len: u8,
     pub(in crate::cpu) queue_head: u8,
-    pub(in crate::cpu) scratch: [u8; 4],
-    pub(in crate::cpu) scratch_len: u8,
+    /// Low byte of the interrupt vector read by VectorFetch; consumed by VectorFetchHi.
+    pub(in crate::cpu) vector_lo: u8,
     pub(in crate::cpu) pending_nmi: bool,
     pub(in crate::cpu) pending_irq: bool,
     /// Correct high byte of the branch target when a page crossing occurs.
     /// Set by the branch() helper; consumed by BranchPageFix.
     pub(in crate::cpu) branch_target_hi: u8,
-    /// Set by VectorFetch when NMI hijacks an in-progress IRQ/BRK service.
-    /// Cleared by VectorFetchHi.
-    pub(in crate::cpu) nmi_redirect: bool,
-    /// Holds the address of the vector low byte chosen by VectorFetch (possibly
-    /// redirected from IRQ to NMI vector). VectorFetchHi reads addr+1 from here.
+    /// Address of the vector low byte chosen by VectorFetch (possibly redirected
+    /// from IRQ to NMI vector by NMI hijack). VectorFetchHi reads addr+1 from here.
     pub(in crate::cpu) vector_base: u16,
 }
 
@@ -86,12 +83,10 @@ impl Cpu {
             queue: [MicroOp::RunInstruction(0); 8],
             queue_len: 0,
             queue_head: 0,
-            scratch: [0u8; 4],
-            scratch_len: 0,
+            vector_lo: 0,
             pending_nmi: false,
             pending_irq: false,
             branch_target_hi: 0,
-            nmi_redirect: false,
             vector_base: 0,
         }
     }
@@ -117,6 +112,7 @@ impl Cpu {
     }
 
     pub(in crate::cpu) fn enqueue(&mut self, op: MicroOp) {
+        debug_assert!(self.queue_len < 8, "micro-op queue overflow");
         self.queue[(self.queue_head as usize + self.queue_len as usize) % 8] = op;
         self.queue_len += 1;
     }
@@ -259,25 +255,24 @@ impl Cpu {
                 // NMI can hijack any in-progress service sequence at T6.
                 let real_addr = if self.pending_nmi {
                     self.pending_nmi = false;
-                    self.nmi_redirect = true;
                     0xFFFA_u16
                 } else {
                     addr
                 };
                 self.vector_base = real_addr;
-                self.scratch[0] = bus.read(real_addr);
+                self.vector_lo = bus.read(real_addr);
             }
             MicroOp::VectorFetchHi => {
                 self.cycles += 1;
                 let hi = bus.read(self.vector_base.wrapping_add(1)) as u16;
-                let lo = self.scratch[0] as u16;
+                let lo = self.vector_lo as u16;
                 self.pc = (hi << 8) | lo;
-                self.nmi_redirect = false;
                 self.pending_irq = false;
             }
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn step(&mut self, bus: &mut dyn Bus) -> u8 {
         let cycles_before = self.cycles;
         // Advance one full instruction (or one interrupt service sequence).
