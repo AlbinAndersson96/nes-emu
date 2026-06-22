@@ -8,6 +8,15 @@ pub(in crate::cpu) enum MicroOp {
     /// unless an IRQ/NMI is pending — in which case the page fix is aborted
     /// and the interrupt is serviced with the page-wrong PC on the stack.
     BranchPageFix,
+    /// T3/T4/T5 of an interrupt service sequence: push PCH/PCL/P to stack.
+    PushPcHi,
+    PushPcLo,
+    PushP(u8), // carries the P value to push (FLAG_B already set or clear)
+    /// T6 of interrupt service: read vector low byte. Checks pending_nmi for
+    /// NMI hijack and redirects the address to 0xFFFA if so.
+    VectorFetch(u16), // address of the vector low byte
+    /// T7 of interrupt service: read vector high byte, set PC.
+    VectorFetchHi,
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +51,12 @@ pub struct Cpu {
     /// Correct high byte of the branch target when a page crossing occurs.
     /// Set by the branch() helper; consumed by BranchPageFix.
     pub(in crate::cpu) branch_target_hi: u8,
+    /// Set by VectorFetch when NMI hijacks an in-progress IRQ/BRK service.
+    /// Cleared by VectorFetchHi.
+    pub(in crate::cpu) nmi_redirect: bool,
+    /// Holds the address of the vector low byte chosen by VectorFetch (possibly
+    /// redirected from IRQ to NMI vector). VectorFetchHi reads addr+1 from here.
+    pub(in crate::cpu) vector_base: u16,
 }
 
 // P register flag masks
@@ -77,6 +92,8 @@ impl Cpu {
             pending_irq: false,
             pending_deferred_irq: false,
             branch_target_hi: 0,
+            nmi_redirect: false,
+            vector_base: 0,
         }
     }
 
@@ -105,15 +122,36 @@ impl Cpu {
         self.queue_len += 1;
     }
 
+    /// Queue the five micro-ops that form T3–T7 of an interrupt service sequence
+    /// (push PCH, PCL, P; then fetch vector lo and hi). The caller handles T1–T2.
+    pub(in crate::cpu) fn queue_interrupt_sequence(&mut self, vector: u16, push_p: u8) {
+        self.enqueue(MicroOp::PushPcHi);
+        self.enqueue(MicroOp::PushPcLo);
+        self.enqueue(MicroOp::PushP(push_p));
+        self.enqueue(MicroOp::VectorFetch(vector));
+        self.enqueue(MicroOp::VectorFetchHi);
+    }
+
     /// Advance exactly one bus cycle.
     pub fn tick(&mut self, bus: &mut dyn Bus) {
+        // Poll NMI at the start of every tick so that if NMI arrives while
+        // a BRK/IRQ service sequence is in the queue, VectorFetch can hijack it.
+        if self.nmi_pending {
+            self.nmi_pending = false;
+            self.pending_nmi = true;
+        }
+
         if self.queue_len == 0 {
-            if self.nmi_pending {
-                self.nmi_pending = false;
-                let c = self.service_interrupt(bus, 0xFFFA);
-                self.cycles += c as u64;
+            // NMI has highest priority. Service it directly (no instruction executes).
+            if self.pending_nmi {
+                self.pending_nmi = false;
+                let _ = bus.read(self.pc); self.cycles += 1; // T1 dummy
+                let _ = bus.read(self.pc); self.cycles += 1; // T2 dummy
+                let p = (self.p & !FLAG_B) | FLAG_U;
+                self.queue_interrupt_sequence(0xFFFA, p);
                 return;
             }
+
             // IRQ is level-triggered: consume the pending flag every step
             // regardless of FLAG_I so a masked IRQ doesn't linger.
             let irq = self.irq_pending;
@@ -141,11 +179,14 @@ impl Cpu {
                     self.pending_irq = true;
                 } else {
                     // Non-branch: IRQ fires before this instruction.
-                    // The opcode was already read (phantom T1 bus cycle); undo
-                    // the PC increment so service_interrupt pushes the right PC.
+                    // T1: the opcode fetch already happened (phantom read); count it.
+                    self.cycles += 1;
+                    // Undo PC so the pushed return address is the interrupted instruction.
                     self.pc = self.pc.wrapping_sub(1);
-                    let c = self.service_interrupt(bus, 0xFFFE);
-                    self.cycles += c as u64;
+                    // T2: dummy read at interrupted PC.
+                    let _ = bus.read(self.pc); self.cycles += 1;
+                    let p = (self.p & !FLAG_B) | FLAG_U;
+                    self.queue_interrupt_sequence(0xFFFE, p);
                     return;
                 }
             }
@@ -175,8 +216,10 @@ impl Cpu {
                         self.pending_deferred_irq = false;
                         self.pending_irq = false;
                         if !blocked {
-                            let c = self.service_interrupt(bus, 0xFFFE);
-                            self.cycles += c as u64;
+                            self.cycles += 1; // T1 phantom
+                            let _ = bus.read(self.pc); self.cycles += 1; // T2 dummy
+                            let p = (self.p & !FLAG_B) | FLAG_U;
+                            self.queue_interrupt_sequence(0xFFFE, p);
                         }
                     }
                 }
@@ -191,14 +234,52 @@ impl Cpu {
                     self.pending_deferred_irq = false;
                     self.pending_irq = false;
                     if !blocked {
-                        let c = self.service_interrupt(bus, 0xFFFE);
-                        self.cycles += c as u64;
+                        self.cycles += 1; // T1 phantom at page_wrong_pc
+                        let _ = bus.read(self.pc); self.cycles += 1; // T2 dummy
+                        let p = (self.p & !FLAG_B) | FLAG_U;
+                        self.queue_interrupt_sequence(0xFFFE, p);
                     }
                 } else {
                     // Normal page fix: T4 cycle + correct high byte.
                     self.cycles += 1;
                     self.pc = (self.pc & 0x00FF) | ((self.branch_target_hi as u16) << 8);
                 }
+            }
+            MicroOp::PushPcHi => {
+                self.cycles += 1;
+                let hi = (self.pc >> 8) as u8;
+                self.push(bus, hi);
+            }
+            MicroOp::PushPcLo => {
+                self.cycles += 1;
+                let lo = self.pc as u8;
+                self.push(bus, lo);
+            }
+            MicroOp::PushP(p) => {
+                self.cycles += 1;
+                self.push(bus, p);
+                self.set_flag(FLAG_I, true);
+            }
+            MicroOp::VectorFetch(addr) => {
+                self.cycles += 1;
+                // NMI can hijack any in-progress service sequence at T6.
+                let real_addr = if self.pending_nmi {
+                    self.pending_nmi = false;
+                    self.nmi_redirect = true;
+                    0xFFFA_u16
+                } else {
+                    addr
+                };
+                self.vector_base = real_addr;
+                self.scratch[0] = bus.read(real_addr);
+            }
+            MicroOp::VectorFetchHi => {
+                self.cycles += 1;
+                let hi = bus.read(self.vector_base.wrapping_add(1)) as u16;
+                let lo = self.scratch[0] as u16;
+                self.pc = (hi << 8) | lo;
+                self.nmi_redirect = false;
+                self.pending_irq = false;
             }
         }
     }
@@ -212,15 +293,6 @@ impl Cpu {
             self.tick(bus);
         }
         (self.cycles - cycles_before) as u8
-    }
-
-    fn service_interrupt(&mut self, bus: &mut dyn Bus, vector: u16) -> u8 {
-        self.push_u16(bus, self.pc);
-        let p = (self.p & !FLAG_B) | FLAG_U;
-        self.push(bus, p);
-        self.set_flag(FLAG_I, true);
-        self.pc = self.read_u16(bus, vector);
-        7
     }
 
     // --- flag helpers ---

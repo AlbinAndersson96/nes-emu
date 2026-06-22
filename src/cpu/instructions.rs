@@ -45,7 +45,14 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, opcode: u8) -> u8 {
         0x2C => { let (a,_) = cpu.addr_absolute(bus);  bit(cpu,bus,a); 4 }
 
         // --- BRK ---
-        0x00 => { brk(cpu, bus); 7 }
+        0x00 => {
+            // T2: fetch padding byte (discarded but PC advances to PC+2).
+            let _ = cpu.fetch(bus);
+            let p = cpu.p | FLAG_B | FLAG_U;
+            // T3–T7 come from micro-ops; VectorFetch may redirect to NMI vector.
+            cpu.queue_interrupt_sequence(0xFFFE, p);
+            2 // T1+T2
+        }
 
         // --- Flag clears / sets ---
         0x18 => { cpu.set_flag(FLAG_C, false); 2 } // CLC
@@ -557,15 +564,6 @@ fn branch(cpu: &mut Cpu, bus: &mut dyn Bus, taken: bool) -> u8 {
         cpu.pc = target;
         3 // T1+T2+T3
     }
-}
-
-fn brk(cpu: &mut Cpu, bus: &mut dyn Bus) {
-    cpu.pc = cpu.pc.wrapping_add(1); // skip padding byte
-    cpu.push_u16(bus, cpu.pc);
-    let p = cpu.p | FLAG_B | FLAG_U;
-    cpu.push(bus, p);
-    cpu.set_flag(FLAG_I, true);
-    cpu.pc = cpu.read_u16(bus, 0xFFFE);
 }
 
 fn jsr(cpu: &mut Cpu, bus: &mut dyn Bus) {
