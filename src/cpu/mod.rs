@@ -4,6 +4,10 @@ mod instructions;
 pub(in crate::cpu) enum MicroOp {
     // Placeholder: executes entire remaining instruction at once (transitional).
     RunInstruction(u8), // carries the opcode
+    /// T4 of a page-crossing branch. Applies the correct high byte to PC,
+    /// unless an IRQ/NMI is pending — in which case the page fix is aborted
+    /// and the interrupt is serviced with the page-wrong PC on the stack.
+    BranchPageFix,
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +39,9 @@ pub struct Cpu {
     /// Mirrors the deferred-IRQ path in the old step(): set when irq && inhibit,
     /// so the IRQ fires after the latency instruction rather than before it.
     pub(in crate::cpu) pending_deferred_irq: bool,
+    /// Correct high byte of the branch target when a page crossing occurs.
+    /// Set by the branch() helper; consumed by BranchPageFix.
+    pub(in crate::cpu) branch_target_hi: u8,
 }
 
 // P register flag masks
@@ -69,6 +76,7 @@ impl Cpu {
             pending_nmi: false,
             pending_irq: false,
             pending_deferred_irq: false,
+            branch_target_hi: 0,
         }
     }
 
@@ -100,8 +108,6 @@ impl Cpu {
     /// Advance exactly one bus cycle.
     pub fn tick(&mut self, bus: &mut dyn Bus) {
         if self.queue_len == 0 {
-            // Check for NMI/IRQ that preempt the next instruction fetch,
-            // mirroring the early-return paths in the old step().
             if self.nmi_pending {
                 self.nmi_pending = false;
                 let c = self.service_interrupt(bus, 0xFFFA);
@@ -115,24 +121,38 @@ impl Cpu {
             // CLI/PLP: irq_inhibit_next suppresses immediate IRQ for one step.
             let inhibit = self.irq_inhibit_next;
             self.irq_inhibit_next = false;
-            if irq && !inhibit && !self.flag(FLAG_I) {
-                let c = self.service_interrupt(bus, 0xFFFE);
-                self.cycles += c as u64;
-                return;
-            }
-            // Deferred IRQ: mirrors the old step() path where inhibit && irq
-            // causes the IRQ to fire AFTER the next instruction (latency).
+
+            // Deferred IRQ (CLI latency): set when irq && inhibit so the IRQ
+            // fires after the next instruction rather than before it.
             if irq && inhibit {
                 self.pending_deferred_irq = true;
             }
 
-            // Fetch opcode and queue a single RunInstruction op.
+            // Fetch opcode. For branch instructions we never fire the IRQ
+            // immediately (real hardware polls at T3, the penultimate cycle).
+            // Instead save the flag in pending_irq and let RunInstruction /
+            // BranchPageFix fire it at the correct point.
             let opcode = self.fetch(bus);
+
+            if irq && !inhibit && !self.flag(FLAG_I) {
+                if matches!(opcode, 0x10 | 0x30 | 0x50 | 0x70 | 0x90 | 0xB0 | 0xD0 | 0xF0) {
+                    // Branch: defer IRQ to BranchPageFix (page-cross case) or
+                    // end of RunInstruction (non-page-cross / not-taken case).
+                    self.pending_irq = true;
+                } else {
+                    // Non-branch: IRQ fires before this instruction.
+                    // The opcode was already read (phantom T1 bus cycle); undo
+                    // the PC increment so service_interrupt pushes the right PC.
+                    self.pc = self.pc.wrapping_sub(1);
+                    let c = self.service_interrupt(bus, 0xFFFE);
+                    self.cycles += c as u64;
+                    return;
+                }
+            }
+
             self.queue_head = 0;
             self.queue_len = 0;
             self.enqueue(MicroOp::RunInstruction(opcode));
-            // Do NOT add +1 here: execute() already returns the total cycle count
-            // including the opcode-fetch cycle.
             return;
         }
 
@@ -143,22 +163,41 @@ impl Cpu {
 
         match op {
             MicroOp::RunInstruction(opcode) => {
-                // Execute remaining cycles of this instruction all at once
-                // (transitional: will be replaced per-opcode in later tasks).
                 let cycles = instructions::execute(self, bus, opcode);
                 self.cycles += cycles as u64;
 
-                // Deferred IRQ service: fire the pending IRQ after the latency
-                // instruction (the one that followed CLI/PLP). Mirrors the
-                // `inhibit && irq && !blocked` path in the old step().
+                // Only fire pending IRQs when no follow-up micro-op was queued.
+                // If BranchPageFix was queued it will handle the abort decision.
+                if self.queue_len == 0 {
+                    let blocked = self.irq_deferred_blocked;
+                    self.irq_deferred_blocked = false;
+                    if self.pending_deferred_irq || self.pending_irq {
+                        self.pending_deferred_irq = false;
+                        self.pending_irq = false;
+                        if !blocked {
+                            let c = self.service_interrupt(bus, 0xFFFE);
+                            self.cycles += c as u64;
+                        }
+                    }
+                }
+            }
+            MicroOp::BranchPageFix => {
                 let blocked = self.irq_deferred_blocked;
                 self.irq_deferred_blocked = false;
-                if self.pending_deferred_irq {
+                if self.pending_deferred_irq || self.pending_irq {
+                    // IRQ aborts T4: page-fix cycle skipped, no +1 cycle.
+                    // cpu.pc is already the page-wrong address — that is what
+                    // gets pushed on the stack.
                     self.pending_deferred_irq = false;
+                    self.pending_irq = false;
                     if !blocked {
                         let c = self.service_interrupt(bus, 0xFFFE);
                         self.cycles += c as u64;
                     }
+                } else {
+                    // Normal page fix: T4 cycle + correct high byte.
+                    self.cycles += 1;
+                    self.pc = (self.pc & 0x00FF) | ((self.branch_target_hi as u16) << 8);
                 }
             }
         }

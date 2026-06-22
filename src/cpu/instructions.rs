@@ -536,14 +536,26 @@ fn ldx_m(cpu: &mut Cpu, bus: &mut dyn Bus, addr: u16) { let v = cpu.read(bus, ad
 fn ldy_m(cpu: &mut Cpu, bus: &mut dyn Bus, addr: u16) { let v = cpu.read(bus, addr); ldy(cpu, v); }
 
 fn branch(cpu: &mut Cpu, bus: &mut dyn Bus, taken: bool) -> u8 {
-    let offset = cpu.fetch(bus) as i8 as i16;
-    if taken {
-        let old_pc = cpu.pc;
-        cpu.pc = cpu.pc.wrapping_add(offset as u16);
-        let page_cross = (old_pc & 0xFF00) != (cpu.pc & 0xFF00);
-        3 + page_cross as u8
+    let offset = cpu.fetch(bus) as i8 as i16; // T2: fetch offset
+    if !taken {
+        return 2; // T1 + T2
+    }
+    let old_pc = cpu.pc;
+    let target = old_pc.wrapping_add(offset as u16);
+
+    if (old_pc & 0xFF00) != (target & 0xFF00) {
+        // Page cross: T3 spurious read at page-wrong address, then T4 (BranchPageFix).
+        let pcl = (old_pc as u8).wrapping_add(offset as u8) as u16;
+        let page_wrong_pc = (old_pc & 0xFF00) | pcl;
+        let _ = bus.read(page_wrong_pc); // T3 spurious read
+        cpu.pc = page_wrong_pc;
+        cpu.branch_target_hi = (target >> 8) as u8;
+        cpu.enqueue(super::MicroOp::BranchPageFix);
+        3 // T1+T2+T3; T4 comes from BranchPageFix micro-op
     } else {
-        2
+        // No page cross: set correct PC immediately (T3 implicit).
+        cpu.pc = target;
+        3 // T1+T2+T3
     }
 }
 
