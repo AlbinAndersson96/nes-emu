@@ -109,13 +109,19 @@ fn main() {
 
                     let mut elapsed = 0u64;
                     while elapsed < CYCLES_PER_FRAME {
-                        let c = cpu.step(&mut bus) as u64;
-                        let dma = bus.take_oam_dma_stall() as u64;
-                        let extra = if dma > 0 { dma + (cpu.cycles & 1) } else { 0 };
-                        let total = c + extra;
-                        elapsed += total;
-                        if bus.tick_ppu(total) { cpu.nmi(); }
-                        if bus.tick_apu(total) { cpu.irq(); }
+                        let cycles_before = cpu.cycles;
+                        if bus.dma_active() {
+                            bus.tick_dma();
+                            if bus.tick_ppu(1) { cpu.nmi(); }
+                            if bus.tick_apu(1) { cpu.irq(); }
+                            elapsed += 1;
+                        } else {
+                            cpu.tick(&mut bus);
+                            let delta = cpu.cycles - cycles_before;
+                            if bus.tick_ppu(delta) { cpu.nmi(); }
+                            if bus.tick_apu(delta) { cpu.irq(); }
+                            elapsed += delta;
+                        }
                     }
 
                     if bus.ppu.frame_ready {

@@ -24,11 +24,13 @@ pub struct Bus {
     pub apu: Apu,
     controller_latch: [u8; 2],
     controller_shift: [u8; 2],
-    /// CPU cycles to stall after an OAM DMA write to $4014.
-    /// 513 cycles normally; 514 on an odd CPU cycle. The run loop consumes this.
-    oam_dma_stall: u16,
-    /// CPU cycles to stall when the DMC DMA fetches a sample byte (4 cycles).
-    dmc_dma_stall: u8,
+    /// OAM DMA state: set when a write to $4014 triggers a 513-cycle DMA.
+    oam_dma_active: bool,
+    oam_dma_cycles_left: u16,
+    oam_dma_page: u8,
+    oam_dma_byte_idx: u16,
+    /// DMC DMA: counts down 4 cycles while the CPU is stalled for a sample fetch.
+    dmc_dma_cycles_left: u8,
 }
 
 impl Bus {
@@ -40,17 +42,42 @@ impl Bus {
             apu: Apu::new(),
             controller_latch: [0u8; 2],
             controller_shift: [0u8; 2],
-            oam_dma_stall: 0,
-            dmc_dma_stall: 0,
+            oam_dma_active: false,
+            oam_dma_cycles_left: 0,
+            oam_dma_page: 0,
+            oam_dma_byte_idx: 0,
+            dmc_dma_cycles_left: 0,
         }
     }
 
-    /// Returns the number of CPU cycles to stall after an OAM DMA, then clears it.
-    /// The caller is responsible for advancing PPU/APU by the stall amount.
-    pub fn take_oam_dma_stall(&mut self) -> u16 {
-        let s = self.oam_dma_stall;
-        self.oam_dma_stall = 0;
-        s
+    /// Returns true when OAM or DMC DMA is in progress (CPU must be stalled).
+    pub fn dma_active(&self) -> bool {
+        self.oam_dma_active || self.dmc_dma_cycles_left > 0
+    }
+
+    /// Advance one DMA cycle. OAM DMA copies one byte every two cycles;
+    /// DMC DMA simply counts down and fetches the byte on the last cycle.
+    pub fn tick_dma(&mut self) {
+        if self.oam_dma_active {
+            let cycle_num = 513u16.wrapping_sub(self.oam_dma_cycles_left);
+            if cycle_num % 2 == 1 && self.oam_dma_byte_idx < 256 {
+                let addr = ((self.oam_dma_page as u16) << 8) | self.oam_dma_byte_idx;
+                let data = self.read(addr);
+                self.ppu.oam_dma_write(self.oam_dma_byte_idx as u8, data);
+                self.oam_dma_byte_idx += 1;
+            }
+            self.oam_dma_cycles_left -= 1;
+            if self.oam_dma_cycles_left == 0 {
+                self.oam_dma_active = false;
+            }
+        } else if self.dmc_dma_cycles_left > 0 {
+            self.dmc_dma_cycles_left -= 1;
+            if self.dmc_dma_cycles_left == 0 && self.apu.dmc_needs_dma() {
+                let addr = self.apu.dmc_dma_address();
+                let data = self.read(addr);
+                self.apu.dmc_supply_byte(data);
+            }
+        }
     }
 
     pub fn insert_cartridge(&mut self, cartridge: Cartridge) {
@@ -69,24 +96,14 @@ impl Bus {
     }
 
     /// Advance the APU by `cpu_cycles`. Returns true if an IRQ should be raised.
-    /// If the DMC reader needs a byte, fetches it from CPU memory and supplies it;
-    /// sets `dmc_dma_stall` to 4 so the caller can stall the CPU accordingly.
+    /// If the DMC reader needs a byte, arms a 4-cycle DMA stall; tick_dma() will
+    /// fetch and supply the byte on the final cycle of the stall.
     pub fn tick_apu(&mut self, cpu_cycles: u64) -> bool {
         let irq = self.apu.tick(cpu_cycles as u32);
-        if self.apu.dmc_needs_dma() {
-            let addr = self.apu.dmc_dma_address();
-            let data = self.read(addr);
-            self.apu.dmc_supply_byte(data);
-            self.dmc_dma_stall = 4;
+        if self.apu.dmc_needs_dma() && self.dmc_dma_cycles_left == 0 {
+            self.dmc_dma_cycles_left = 4;
         }
         irq
-    }
-
-    /// Returns DMC DMA stall cycles accumulated since the last call, then resets.
-    pub fn take_dmc_dma_stall(&mut self) -> u8 {
-        let s = self.dmc_dma_stall;
-        self.dmc_dma_stall = 0;
-        s
     }
 
     /// Strobe the controller shift registers. Writing 1 to bit 0 of $4016
@@ -97,16 +114,15 @@ impl Bus {
         }
     }
 
-    /// Execute an OAM DMA transfer: copy 256 bytes from `page` of CPU RAM into OAM.
-    /// Sets oam_dma_stall so the run loop stalls the CPU for 513 cycles (the
-    /// extra +1 for odd CPU cycles is applied by the run loop when it consumes it).
+    /// Initiate an OAM DMA transfer triggered by a write to $4014.
+    /// The 513-cycle transfer (read+write per byte plus 1 idle) is carried out
+    /// cycle-by-cycle by tick_dma(); the +1 for odd CPU cycles is handled by
+    /// the run loop before DMA starts (it calls tick_dma() one extra time).
     fn oam_dma(&mut self, page: u8) {
-        let base = (page as u16) << 8;
-        for offset in 0u16..256 {
-            let data = self.read(base | offset);
-            self.ppu.oam_dma_write(offset as u8, data);
-        }
-        self.oam_dma_stall = 513;
+        self.oam_dma_active = true;
+        self.oam_dma_cycles_left = 513;
+        self.oam_dma_page = page;
+        self.oam_dma_byte_idx = 0;
     }
 }
 

@@ -70,33 +70,22 @@ fn run_until_complete(bus: &mut Bus, cpu: &mut Cpu) {
             panic!("timed out after {} cycles", total_cycles);
         }
 
-        let cycles = cpu.step(bus) as u64;
-
-        let dma_stall = bus.take_oam_dma_stall() as u64;
-        let extra = if dma_stall > 0 { dma_stall + (cpu.cycles & 1) } else { 0 };
-        let total = cycles + extra;
-
-        if bus.tick_ppu(total) {
-            cpu.nmi();
+        // Per-cycle execution: DMA stalls the CPU; one tick per clock.
+        // For CPU ticks, advance PPU/APU by however many cycles that tick consumed
+        // (RunInstruction is a bulk micro-op; fetch tick consumes 0 cycles).
+        let cycles_before = cpu.cycles;
+        if bus.dma_active() {
+            bus.tick_dma();
+            if bus.tick_ppu(1) { cpu.nmi(); }
+            if bus.tick_apu(1) { cpu.irq(); }
+            total_cycles += 1;
+        } else {
+            cpu.tick(bus);
+            let delta = cpu.cycles - cycles_before;
+            if bus.tick_ppu(delta) { cpu.nmi(); }
+            if bus.tick_apu(delta) { cpu.irq(); }
+            total_cycles += delta;
         }
-        if bus.tick_apu(total) {
-            cpu.irq();
-        }
-
-        // DMC DMA stall: the APU fetched a sample byte; tick PPU/APU by the stall
-        // cycles so timing stays consistent (approximate — stall is mid-instruction
-        // on real hardware, but whole-instruction emulation can't do better).
-        let dmc_stall = bus.take_dmc_dma_stall() as u64;
-        if dmc_stall > 0 {
-            if bus.tick_ppu(dmc_stall) {
-                cpu.nmi();
-            }
-            if bus.tick_apu(dmc_stall) {
-                cpu.irq();
-            }
-        }
-
-        total_cycles += total + dmc_stall;
     }
 }
 
