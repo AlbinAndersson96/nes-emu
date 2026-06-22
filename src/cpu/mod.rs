@@ -1,5 +1,11 @@
 mod instructions;
 
+#[derive(Debug, Clone, Copy)]
+pub(in crate::cpu) enum MicroOp {
+    // Placeholder: executes entire remaining instruction at once (transitional).
+    RunInstruction(u8), // carries the opcode
+}
+
 #[derive(Debug, Clone)]
 pub struct Cpu {
     pub a: u8,
@@ -19,6 +25,16 @@ pub struct Cpu {
     /// firing after the latency instruction, because RTI's P restore has
     /// immediate effect on interrupt polling (unlike CLI/SEI/PLP which delay).
     pub(in crate::cpu) irq_deferred_blocked: bool,
+    pub(in crate::cpu) queue: [MicroOp; 8],
+    pub(in crate::cpu) queue_len: u8,
+    pub(in crate::cpu) queue_head: u8,
+    pub(in crate::cpu) scratch: [u8; 4],
+    pub(in crate::cpu) scratch_len: u8,
+    pub(in crate::cpu) pending_nmi: bool,
+    pub(in crate::cpu) pending_irq: bool,
+    /// Mirrors the deferred-IRQ path in the old step(): set when irq && inhibit,
+    /// so the IRQ fires after the latency instruction rather than before it.
+    pub(in crate::cpu) pending_deferred_irq: bool,
 }
 
 // P register flag masks
@@ -45,6 +61,14 @@ impl Cpu {
             irq_pending: false,
             irq_inhibit_next: false,
             irq_deferred_blocked: false,
+            queue: [MicroOp::RunInstruction(0); 8],
+            queue_len: 0,
+            queue_head: 0,
+            scratch: [0u8; 4],
+            scratch_len: 0,
+            pending_nmi: false,
+            pending_irq: false,
+            pending_deferred_irq: false,
         }
     }
 
@@ -68,34 +92,87 @@ impl Cpu {
         self.cycles = 8;
     }
 
+    pub(in crate::cpu) fn enqueue(&mut self, op: MicroOp) {
+        self.queue[(self.queue_head as usize + self.queue_len as usize) % 8] = op;
+        self.queue_len += 1;
+    }
+
+    /// Advance exactly one bus cycle.
+    pub fn tick(&mut self, bus: &mut dyn Bus) {
+        if self.queue_len == 0 {
+            // Check for NMI/IRQ that preempt the next instruction fetch,
+            // mirroring the early-return paths in the old step().
+            if self.nmi_pending {
+                self.nmi_pending = false;
+                let c = self.service_interrupt(bus, 0xFFFA);
+                self.cycles += c as u64;
+                return;
+            }
+            // IRQ is level-triggered: consume the pending flag every step
+            // regardless of FLAG_I so a masked IRQ doesn't linger.
+            let irq = self.irq_pending;
+            self.irq_pending = false;
+            // CLI/PLP: irq_inhibit_next suppresses immediate IRQ for one step.
+            let inhibit = self.irq_inhibit_next;
+            self.irq_inhibit_next = false;
+            if irq && !inhibit && !self.flag(FLAG_I) {
+                let c = self.service_interrupt(bus, 0xFFFE);
+                self.cycles += c as u64;
+                return;
+            }
+            // Deferred IRQ: mirrors the old step() path where inhibit && irq
+            // causes the IRQ to fire AFTER the next instruction (latency).
+            if irq && inhibit {
+                self.pending_deferred_irq = true;
+            }
+
+            // Fetch opcode and queue a single RunInstruction op.
+            let opcode = self.fetch(bus);
+            self.queue_head = 0;
+            self.queue_len = 0;
+            self.enqueue(MicroOp::RunInstruction(opcode));
+            // Do NOT add +1 here: execute() already returns the total cycle count
+            // including the opcode-fetch cycle.
+            return;
+        }
+
+        // Pop the front micro-op.
+        let op = self.queue[self.queue_head as usize];
+        self.queue_head = (self.queue_head + 1) % 8;
+        self.queue_len -= 1;
+
+        match op {
+            MicroOp::RunInstruction(opcode) => {
+                // Execute remaining cycles of this instruction all at once
+                // (transitional: will be replaced per-opcode in later tasks).
+                let cycles = instructions::execute(self, bus, opcode);
+                self.cycles += cycles as u64;
+
+                // Deferred IRQ service: fire the pending IRQ after the latency
+                // instruction (the one that followed CLI/PLP). Mirrors the
+                // `inhibit && irq && !blocked` path in the old step().
+                let blocked = self.irq_deferred_blocked;
+                self.irq_deferred_blocked = false;
+                if self.pending_deferred_irq {
+                    self.pending_deferred_irq = false;
+                    if !blocked {
+                        let c = self.service_interrupt(bus, 0xFFFE);
+                        self.cycles += c as u64;
+                    }
+                }
+            }
+        }
+    }
+
     pub fn step(&mut self, bus: &mut dyn Bus) -> u8 {
-        if self.nmi_pending {
-            self.nmi_pending = false;
-            return self.service_interrupt(bus, 0xFFFA);
+        let cycles_before = self.cycles;
+        // Advance one full instruction (or one interrupt service sequence).
+        self.tick(bus); // either: services NMI/IRQ, OR fetches opcode + queues RunInstruction
+        // If queue is non-empty, the first tick fetched an opcode; now execute it.
+        while self.queue_len > 0 {
+            self.tick(bus);
         }
-        // IRQ is level-triggered on real hardware: consume the pending flag every
-        // step regardless of FLAG_I so a masked IRQ doesn't linger indefinitely.
-        let irq = self.irq_pending;
-        self.irq_pending = false;
-        // CLI/PLP clear FLAG_I with a one-instruction delay: the change is written
-        // to the register immediately, but interrupt polling still sees the old value
-        // for one more instruction (irq_inhibit_next acts as the one-step latch).
-        let inhibit = self.irq_inhibit_next;
-        self.irq_inhibit_next = false;
-        if irq && !inhibit && !self.flag(FLAG_I) {
-            return self.service_interrupt(bus, 0xFFFE);
-        }
-        let opcode = self.fetch(bus);
-        let cycles = instructions::execute(self, bus, opcode);
-        // Deferred IRQ service: fire the pending IRQ after the latency instruction
-        // (the one that followed CLI/PLP). At this point P reflects the current
-        // state (e.g. FLAG_I=1 if SEI ran), which is what gets pushed to the stack.
-        let blocked = self.irq_deferred_blocked;
-        self.irq_deferred_blocked = false;
-        if inhibit && irq && !blocked {
-            return cycles + self.service_interrupt(bus, 0xFFFE);
-        }
-        cycles
+        (self.cycles - cycles_before) as u8
     }
 
     fn service_interrupt(&mut self, bus: &mut dyn Bus, vector: u16) -> u8 {
