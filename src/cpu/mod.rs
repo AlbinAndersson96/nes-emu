@@ -30,13 +30,15 @@ pub struct Cpu {
     pub cycles: u64,
     nmi_pending: bool,
     irq_pending: bool,
-    /// Set by CLI/PLP when FLAG_I transitions 1→0. Suppresses the IRQ at the
-    /// START of the next instruction so that instruction executes first. After
-    /// that instruction, the IRQ fires with the current (possibly modified) P.
+    /// Set by CLI/PLP when FLAG_I transitions 1→0. Suppresses the IRQ check
+    /// at T1 of the next instruction (one-instruction latency). The APU is
+    /// level-triggered so irq_pending is re-asserted by the next tick_apu call,
+    /// and the IRQ fires naturally at T1 of the instruction after that.
     pub(in crate::cpu) irq_inhibit_next: bool,
-    /// Set by RTI when it restores FLAG_I=1. Prevents the deferred IRQ from
-    /// firing after the latency instruction, because RTI's P restore has
-    /// immediate effect on interrupt polling (unlike CLI/SEI/PLP which delay).
+    /// Set when an IRQ arrives during CLI/PLP latency (irq_inhibit_next was true).
+    /// Fires at the end of the latency instruction via the RunInstruction arm.
+    /// irq_deferred_blocked (set by RTI restoring FLAG_I=1) suppresses the fire.
+    pub(in crate::cpu) pending_deferred_irq: bool,
     pub(in crate::cpu) irq_deferred_blocked: bool,
     pub(in crate::cpu) queue: [MicroOp; 8],
     pub(in crate::cpu) queue_len: u8,
@@ -45,9 +47,6 @@ pub struct Cpu {
     pub(in crate::cpu) scratch_len: u8,
     pub(in crate::cpu) pending_nmi: bool,
     pub(in crate::cpu) pending_irq: bool,
-    /// Mirrors the deferred-IRQ path in the old step(): set when irq && inhibit,
-    /// so the IRQ fires after the latency instruction rather than before it.
-    pub(in crate::cpu) pending_deferred_irq: bool,
     /// Correct high byte of the branch target when a page crossing occurs.
     /// Set by the branch() helper; consumed by BranchPageFix.
     pub(in crate::cpu) branch_target_hi: u8,
@@ -82,6 +81,7 @@ impl Cpu {
             nmi_pending: false,
             irq_pending: false,
             irq_inhibit_next: false,
+            pending_deferred_irq: false,
             irq_deferred_blocked: false,
             queue: [MicroOp::RunInstruction(0); 8],
             queue_len: 0,
@@ -90,7 +90,6 @@ impl Cpu {
             scratch_len: 0,
             pending_nmi: false,
             pending_irq: false,
-            pending_deferred_irq: false,
             branch_target_hi: 0,
             nmi_redirect: false,
             vector_base: 0,
@@ -152,16 +151,16 @@ impl Cpu {
                 return;
             }
 
-            // IRQ is level-triggered: consume the pending flag every step
-            // regardless of FLAG_I so a masked IRQ doesn't linger.
+            // IRQ is level-triggered: consume the pending flag every fetch.
             let irq = self.irq_pending;
             self.irq_pending = false;
-            // CLI/PLP: irq_inhibit_next suppresses immediate IRQ for one step.
+
+            // CLI/PLP: irq_inhibit_next suppresses the IRQ check for one instruction.
             let inhibit = self.irq_inhibit_next;
             self.irq_inhibit_next = false;
 
-            // Deferred IRQ (CLI latency): set when irq && inhibit so the IRQ
-            // fires after the next instruction rather than before it.
+            // If the IRQ arrived during that latency window, defer it: fire at the
+            // end of the latency instruction (RunInstruction arm) rather than before.
             if irq && inhibit {
                 self.pending_deferred_irq = true;
             }
@@ -172,7 +171,7 @@ impl Cpu {
             // BranchPageFix fire it at the correct point.
             let opcode = self.fetch(bus);
 
-            if irq && !inhibit && !self.flag(FLAG_I) {
+            if !inhibit && irq && !self.flag(FLAG_I) {
                 if matches!(opcode, 0x10 | 0x30 | 0x50 | 0x70 | 0x90 | 0xB0 | 0xD0 | 0xF0) {
                     // Branch: defer IRQ to BranchPageFix (page-cross case) or
                     // end of RunInstruction (non-page-cross / not-taken case).
@@ -225,20 +224,15 @@ impl Cpu {
                 }
             }
             MicroOp::BranchPageFix => {
-                let blocked = self.irq_deferred_blocked;
-                self.irq_deferred_blocked = false;
-                if self.pending_deferred_irq || self.pending_irq {
+                if self.pending_irq {
                     // IRQ aborts T4: page-fix cycle skipped, no +1 cycle.
                     // cpu.pc is already the page-wrong address — that is what
                     // gets pushed on the stack.
-                    self.pending_deferred_irq = false;
                     self.pending_irq = false;
-                    if !blocked {
-                        self.cycles += 1; // T1 phantom at page_wrong_pc
-                        let _ = bus.read(self.pc); self.cycles += 1; // T2 dummy
-                        let p = (self.p & !FLAG_B) | FLAG_U;
-                        self.queue_interrupt_sequence(0xFFFE, p);
-                    }
+                    self.cycles += 1; // T1 phantom at page_wrong_pc
+                    let _ = bus.read(self.pc); self.cycles += 1; // T2 dummy
+                    let p = (self.p & !FLAG_B) | FLAG_U;
+                    self.queue_interrupt_sequence(0xFFFE, p);
                 } else {
                     // Normal page fix: T4 cycle + correct high byte.
                     self.cycles += 1;
@@ -284,7 +278,7 @@ impl Cpu {
         }
     }
 
-    pub fn step(&mut self, bus: &mut dyn Bus) -> u8 {
+    pub(crate) fn step(&mut self, bus: &mut dyn Bus) -> u8 {
         let cycles_before = self.cycles;
         // Advance one full instruction (or one interrupt service sequence).
         self.tick(bus); // either: services NMI/IRQ, OR fetches opcode + queues RunInstruction

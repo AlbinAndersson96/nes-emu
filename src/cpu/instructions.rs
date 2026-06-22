@@ -66,7 +66,7 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, opcode: u8) -> u8 {
         0xB8 => { cpu.set_flag(FLAG_V, false); 2 } // CLV
         0x38 => { cpu.set_flag(FLAG_C, true);  2 } // SEC
         0xF8 => { cpu.set_flag(super::FLAG_D, true);  2 } // SED
-        0x78 => { cpu.set_flag(FLAG_I, true);  2 } // SEI
+        0x78 => { cpu.set_flag(FLAG_I, true);  2 }                            // SEI
 
         // --- CMP ---
         0xC9 => { let v = cpu.fetch(bus);          cmp(cpu, cpu.a, v);     2 }
@@ -580,9 +580,9 @@ fn rti(cpu: &mut Cpu, bus: &mut dyn Bus) {
     let p = cpu.pop(bus);
     cpu.p = (p & !FLAG_B) | FLAG_U;
     cpu.pc = cpu.pop_u16(bus);
-    // RTI's FLAG_I restore takes effect immediately (unlike CLI/PLP which delay
-    // by one instruction). If RTI restores FLAG_I=1, block any pending deferred
-    // IRQ that would otherwise fire after the latency instruction.
+    // RTI's FLAG_I restore takes effect immediately (unlike CLI/SEI/PLP which
+    // delay by one instruction). If RTI restores FLAG_I=1, block any pending
+    // deferred IRQ — the 6502 does not re-fire the IRQ upon return from handler.
     if cpu.flag(FLAG_I) {
         cpu.irq_deferred_blocked = true;
     }
