@@ -29,7 +29,7 @@ fn load_rom(name: &str) -> Vec<u8> {
         .join("tests/roms")
         .join(name);
     std::fs::read(&path)
-        .unwrap_or_else(|_| panic!("ROM not found: {} — place it in tests/roms/", path.display()))
+        .unwrap_or_else(|_| panic!("ROM not found: {} — place it in tests/roms/cpu/ (or the appropriate subsystem subfolder)", path.display()))
 }
 
 fn read_output(bus: &mut Bus) -> String {
@@ -112,40 +112,40 @@ macro_rules! rom_test {
 // All ROM test files below were written by Shay Green <gblargg@gmail.com>.
 
 // instr_test-v5/rom_singles — one ROM per addressing mode / instruction group
-rom_test!(basics,     "01-basics.nes");
-rom_test!(implied,    "02-implied.nes");
-rom_test!(immediate,  "03-immediate.nes");
-rom_test!(zero_page,  "04-zero_page.nes");
-rom_test!(zp_xy,      "05-zp_xy.nes");
-rom_test!(absolute,   "06-absolute.nes");
-rom_test!(abs_xy,     "07-abs_xy.nes");
-rom_test!(ind_x,      "08-ind_x.nes");
-rom_test!(ind_y,      "09-ind_y.nes");
-rom_test!(branches,   "10-branches.nes");
-rom_test!(stack,      "11-stack.nes");
-rom_test!(jmp_jsr,    "12-jmp_jsr.nes");
-rom_test!(rts,        "13-rts.nes");
-rom_test!(rti,        "14-rti.nes");
-rom_test!(brk,        "15-brk.nes");
-rom_test!(special,    "16-special.nes");
+rom_test!(basics,     "cpu/01-basics.nes");
+rom_test!(implied,    "cpu/02-implied.nes");
+rom_test!(immediate,  "cpu/03-immediate.nes");
+rom_test!(zero_page,  "cpu/04-zero_page.nes");
+rom_test!(zp_xy,      "cpu/05-zp_xy.nes");
+rom_test!(absolute,   "cpu/06-absolute.nes");
+rom_test!(abs_xy,     "cpu/07-abs_xy.nes");
+rom_test!(ind_x,      "cpu/08-ind_x.nes");
+rom_test!(ind_y,      "cpu/09-ind_y.nes");
+rom_test!(branches,   "cpu/10-branches.nes");
+rom_test!(stack,      "cpu/11-stack.nes");
+rom_test!(jmp_jsr,    "cpu/12-jmp_jsr.nes");
+rom_test!(rts,        "cpu/13-rts.nes");
+rom_test!(rti,        "cpu/14-rti.nes");
+rom_test!(brk,        "cpu/15-brk.nes");
+rom_test!(special,    "cpu/16-special.nes");
 
 // instr_test-v5 — full suite (Mapper 1 / MMC1, 256 KB PRG-ROM)
-rom_test!(official_only, "official_only.nes");
+rom_test!(official_only, "cpu/official_only.nes");
 
 // cpu_interrupts_v2 — interrupt timing and sequencing
-rom_test!(cpu_interrupts_v2_cli_latency,      "cpu_interrupts_v2/rom_singles/1-cli_latency.nes");
-rom_test!(cpu_interrupts_v2_nmi_and_brk,      "cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes");
-rom_test!(cpu_interrupts_v2_nmi_and_irq,      "cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes");
-rom_test!(cpu_interrupts_v2_irq_and_dma,      "cpu_interrupts_v2/rom_singles/4-irq_and_dma.nes");
-rom_test!(cpu_interrupts_v2_branch_delays_irq, "cpu_interrupts_v2/rom_singles/5-branch_delays_irq.nes");
-rom_test!(cpu_interrupts_v2_all,              "cpu_interrupts_v2/cpu_interrupts.nes");
+rom_test!(cpu_interrupts_v2_cli_latency,      "cpu/cpu_interrupts_v2/rom_singles/1-cli_latency.nes");
+rom_test!(cpu_interrupts_v2_nmi_and_brk,      "cpu/cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes");
+rom_test!(cpu_interrupts_v2_nmi_and_irq,      "cpu/cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes");
+rom_test!(cpu_interrupts_v2_irq_and_dma,      "cpu/cpu_interrupts_v2/rom_singles/4-irq_and_dma.nes");
+rom_test!(cpu_interrupts_v2_branch_delays_irq, "cpu/cpu_interrupts_v2/rom_singles/5-branch_delays_irq.nes");
+rom_test!(cpu_interrupts_v2_all,              "cpu/cpu_interrupts_v2/cpu_interrupts.nes");
 
 // instr_misc — instruction behaviour edge cases
-rom_test!(instr_misc_abs_x_wrap,    "instr_misc/rom_singles/01-abs_x_wrap.nes");
-rom_test!(instr_misc_branch_wrap,   "instr_misc/rom_singles/02-branch_wrap.nes");
-rom_test!(instr_misc_dummy_reads,   "instr_misc/rom_singles/03-dummy_reads.nes");
-rom_test!(instr_misc_dummy_reads_apu, "instr_misc/rom_singles/04-dummy_reads_apu.nes");
-rom_test!(instr_misc_all,           "instr_misc/instr_misc.nes");
+rom_test!(instr_misc_abs_x_wrap,    "cpu/instr_misc/rom_singles/01-abs_x_wrap.nes");
+rom_test!(instr_misc_branch_wrap,   "cpu/instr_misc/rom_singles/02-branch_wrap.nes");
+rom_test!(instr_misc_dummy_reads,   "cpu/instr_misc/rom_singles/03-dummy_reads.nes");
+rom_test!(instr_misc_dummy_reads_apu, "cpu/instr_misc/rom_singles/04-dummy_reads_apu.nes");
+rom_test!(instr_misc_all,           "cpu/instr_misc/instr_misc.nes");
 
 // instr_timing — cycle-accurate instruction timing (Mapper 1 / MMC1)
-rom_test!(instr_timing, "instr_timing/instr_timing.nes");
+rom_test!(instr_timing, "cpu/instr_timing/instr_timing.nes");

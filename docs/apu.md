@@ -439,6 +439,9 @@ takes effect 2 cycles later (if the write occurs on an even APU cycle) or 3 cycl
 
 ### DMC DMA stall
 
-When the DMC needs a byte it halts the CPU for 4 cycles (3 if the preceding instruction is
-a `write`, fewer in some edge cases). This stall is observable as an extra delay inserted
-into the CPU execution stream and must be modelled to pass DMC timing tests.
+When the DMC needs a byte it halts the CPU for 4 cycles. This is implemented in
+`Bus::tick_apu()` / `Bus::tick_dma()`: `tick_apu()` arms a 4-cycle stall counter when
+`dmc.needs_dma()` is true; the run loop then calls `tick_dma()` instead of `cpu.tick()`
+for those cycles, fetching the byte from `dmc.dma_address()` and supplying it via
+`dmc.supply_dma_byte()` on the final stall cycle. The 2–4 cycle alignment jitter (fewer
+cycles when the stall begins on a `write` cycle) is not currently modelled.

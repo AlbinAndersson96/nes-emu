@@ -131,9 +131,9 @@ is bit 6 (producing metallic percussion tones).
 
 The DMC reader fetches bytes from CPU address space and delta-decodes them
 into a 7-bit output level. Each byte drives 8 output steps. When the buffer
-empties the channel signals a DMA need; the bus is expected to stall the CPU
-for 4 cycles, read the next byte from `dma_address()`, and supply it via
-`supply_dma_byte()`. This stall is not yet implemented.
+empties the channel signals a DMA need; `Bus::tick_apu()` arms a 4-cycle
+stall counter, and `Bus::tick_dma()` fetches the byte from `dma_address()` and
+supplies it via `supply_dma_byte()` on the final stall cycle.
 
 ### $4015 — APU Status (R/W)
 
@@ -257,8 +257,9 @@ The cartridge ROM supplies all three vectors in its final 6 bytes:
   clears the VBlank flag; $2007 auto-increments the VRAM address; controller
   reads shift out bits). The `&mut self` signature handles this without needing
   `Cell`/`RefCell`.
-- OAM DMA ($4014) will need special handling in the CPU step loop: the bus
-  triggers a 513/514-cycle copy from a CPU RAM page into OAM; this is not a
-  normal memory read and must suspend the CPU for the duration.
+- OAM DMA ($4014) is handled cycle-by-cycle: writing $4014 sets `oam_dma_active`
+  and arms a 513-cycle counter. While active, the run loop calls `Bus::tick_dma()`
+  instead of `cpu.tick()`, copying one byte per two cycles from the source page
+  into PPU OAM. (The +1 parity cycle for odd-cycle triggers is not yet modelled.)
 - Controller reads shift out bits LSB-first. After 8 bits the remaining reads
   return 1 (open bus / pull-up).
