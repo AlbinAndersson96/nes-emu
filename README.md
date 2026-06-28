@@ -8,17 +8,18 @@ A NES emulator written in Rust.
 |-----------|--------|
 | CPU — 6502 official opcodes | Complete |
 | CPU — unofficial/illegal opcodes | Complete |
-| PPU — VBlank timing ($2002) | Stub |
-| PPU — rendering | Not started |
-| APU | Not started |
+| PPU — registers, scrolling, NMI | Complete |
+| PPU — background + sprite rendering | Complete |
+| APU — all 5 channels + frame counter | Complete |
 | Cartridge — NROM (mapper 0) | Complete |
 | Cartridge — MMC1 (mapper 1) | Complete |
 | Controllers | Partial (serial shift register wired, no input source) |
+| Display output | Complete (winit + pixels, WSL2-compatible) |
 
-All 17 blargg `instr_test-v5` ROM tests pass. Additional blargg suites
-(`cpu_interrupts_v2`, `instr_misc`, `instr_timing`) are wired as tests and
-reveal the next set of unimplemented features (IRQ/NMI delivery, APU frame
-counter, RMW dummy reads — see CLAUDE.md "Known gaps").
+154 of 159 blargg ROM tests pass: all 17 `instr_test-v5` tests, `instr_timing`,
+all 5 `instr_misc` tests, and `cpu_interrupts_v2/1-cli_latency`. The remaining
+4 failures in `cpu_interrupts_v2` require sub-instruction cycle-accurate emulation
+(see CLAUDE.md "Known gaps").
 
 ## Building and running
 
@@ -34,13 +35,24 @@ cargo fmt
 
 ```
 src/
-  main.rs            — entry point, emulation loop
-  bus.rs             — system bus: RAM, PPU, APU, controllers, cartridge
-  ppu.rs             — PPU stub (VBlank flag only, no rendering)
+  main.rs            — entry point, per-cycle emulation loop, WSL2 GPU setup
+  bus.rs             — system bus: RAM, PPU, APU, controllers, cartridge; OAM/DMC DMA
+  renderer.rs        — winit window + pixels framebuffer; NES palette → RGBA
   cartridge.rs       — iNES parser; mapper 0 (NROM) and mapper 1 (MMC1)
   cpu/
-    mod.rs           — Cpu struct, registers, addressing modes, Bus trait
+    mod.rs           — Cpu struct, micro-op queue, tick(), Bus trait
     instructions.rs  — opcode dispatcher (all official + unofficial opcodes)
+  ppu/
+    mod.rs           — full PPU: scanline timing, bg/sprite pipeline, OAM, NMI
+  apu/
+    mod.rs           — APU orchestration, frame counter, mixer
+    pulse.rs         — pulse channels (duty, envelope, sweep)
+    triangle.rs      — triangle channel
+    noise.rs         — noise channel (15-bit LFSR)
+    dmc.rs           — delta-modulation channel
+    envelope.rs      — shared envelope generator
+    length.rs        — length counter table
+    sweep.rs         — sweep unit
   tests/
     mod.rs           — TestBus used by unit tests
     bus.rs           — bus unit tests
@@ -49,6 +61,8 @@ src/
 docs/
   bus.md             — address map and bus design notes
   cpu_instructions.md — 6502 instruction reference
+  apu.md             — APU register reference and implementation notes
+  ppu.md             — PPU implementation reference and checklist
 tests/roms/          — blargg ROM files (instr_test-v5, cpu_interrupts_v2, instr_misc, instr_timing)
 ```
 
@@ -56,6 +70,8 @@ tests/roms/          — blargg ROM files (instr_test-v5, cpu_interrupts_v2, ins
 
 - [`docs/bus.md`](docs/bus.md) — NES address map and bus design
 - [`docs/cpu_instructions.md`](docs/cpu_instructions.md) — 6502 instruction reference
+- [`docs/apu.md`](docs/apu.md) — APU channel registers and frame counter
+- [`docs/ppu.md`](docs/ppu.md) — PPU implementation reference
 
 ## Credits
 
@@ -69,8 +85,7 @@ The ROM test files in `tests/roms/` are from two suites, both written by
 
 ## What's next
 
-- PPU rendering (background tiles, sprites, palette, scrolling)
-- APU audio synthesis
-- NMI / IRQ interrupt delivery
+- Sub-instruction cycle-accurate CPU emulation (to fix the 5 remaining blargg tests in `cpu_interrupts_v2`)
+- APU audio output (sample generation is implemented; audio device / SDL output not yet wired)
 - Additional mappers (UxROM, CNxROM, MMC3, …)
-- Window / display output
+- Controller input (keyboard / gamepad mapping)

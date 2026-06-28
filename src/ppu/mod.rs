@@ -514,6 +514,11 @@ impl Ppu {
     }
 
     /// Returns true (and clears the latch) if an NMI is pending.
+    /// Read a raw byte from nametable 0 by tile coordinates (row 0–29, col 0–31).
+    pub(crate) fn nt0_tile(&self, row: usize, col: usize) -> u8 {
+        self.vram[row * 32 + col]
+    }
+
     pub fn take_nmi(&mut self) -> bool {
         let v = self.nmi_pending;
         self.nmi_pending = false;

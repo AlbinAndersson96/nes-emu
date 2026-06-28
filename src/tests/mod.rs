@@ -1,6 +1,7 @@
 mod bus;
 mod cpu;
 mod ppu;
+mod ppu_roms;
 mod roms;
 
 use crate::cpu::Bus as CpuBus;
