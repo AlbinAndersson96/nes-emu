@@ -1046,3 +1046,131 @@ tokens on this specific angle. `cargo test`: 161/7, zero regressions, all new wo
 diagnostic-only.
 
 ---
+
+### 2026-07-03 (new session) — got the primary hardware reference this log asked for; confirmed T6-check is correct as-is; found and fixed a stale diagnostic tracer that was actively misleading; read real blargg source for tests 2 and 5; found a concrete, non-physical numeric lead for test 5's `frame_reset_delay` (not applied — needs mechanistic derivation, not curve-fitting)
+
+Picked up exactly where the previous entry parked: needed the primary 6502 hardware reference
+for NMI/IRQ hijack semantics. Fetched nesdev wiki's `CPU_interrupts` page directly (raw HTML,
+not just an AI-summarized fetch — verified byte-for-byte via a second, "reproduce verbatim"
+fetch, since precision matters here).
+
+**Ground truth, verbatim from nesdev:** "if NMI is asserted during the first four ticks of a
+BRK instruction, the BRK instruction will execute normally at first ... but execution will
+branch to the NMI vector." The tick-by-tick table places `*** At this point, the signal status
+determines which interrupt vector is used ***` directly **before** line 5 (`push P on stack`)
+— i.e. the checkpoint is the T4/T5 boundary, sampled using state as of the end of T4. This
+matches CLAUDE.md/this log's long-standing characterization exactly.
+
+**Tested moving the hijack check from `VectorFetch` (T6, current code) to `PushP` (T5),
+matching this literally.** Result: **regressed** test 2 from 8/10 rows to 7/10 — row 7 (`36 00
+00`, correctly hijacking before this change) flipped to non-hijacking. Root-caused precisely
+via a corrected micro-trace (see next finding): our harness's NMI-edge delivery already has
+**two compounding delay stages** baked in — (1) the outer loop's own structural ordering
+(`cpu.tick()` runs, *then* the corresponding PPU dots are ticked and `cpu.nmi()` is called,
+for the *same* iteration — so an edge delivered this iteration can never be seen by code
+running earlier in this same `cpu.tick()` call), and (2) the "universal defer" (every micro-op
+is exactly 1 cycle, so every edge gets the last-cycle-defer treatment, adding one more tick).
+Together these add **two** ticks of latency between an edge's geometric arrival and its
+visibility as `pending_nmi`, not one. Checking at T6 (existing code) happens to land exactly
+on the tick where a T4-arriving edge becomes visible, given this two-stage delay — i.e. **the
+existing T6 check is already correctly compensating for the harness's own delivery mechanics
+for this specific case; nesdev's idealized cycle numbers don't map 1:1 onto our tick count.**
+**Reverted** the PushP-based check; kept only an expanded comment on `VectorFetch` explaining
+why T6 (not T5) is correct here, referencing this entry.
+
+**Found the tracer that led to the wrong initial diagnosis was stale.** While investigating
+the regression, `nmi_brk_micro_trace` was giving self-contradictory results (showed row 7's
+PC landing at the NMI vector — hijack — while the *real* test harness's own output showed
+non-hijack for the same row). Found why: `nmi_brk_micro_trace` still had the
+`instruction_finished &&` gate on its defer logic that an *earlier* session's "universal
+defer" refinement (see the "refinement: universal defer" entry above) removed from the real
+shared harness (`run_until_complete_trace`) — this tracer has its own independent copy of the
+run loop (same issue `nmi_brk_row_trace` had, previously fixed) and was never updated to
+match. **Fixed** (removed the stale gate, `src/tests/roms.rs`) — this is a real, standalone
+improvement: the tracer was actively producing misleading output before this fix. Kept.
+
+**Tested demoting a leftover `pending_nmi` at `VectorFetchHi`** (candidate fix #1 from the
+"refinement: universal defer" entry's two open directions) — if an NMI arrived too late to
+hijack (missed the T6 check) and is still sitting in `pending_nmi` at T7, demote it back to
+`nmi_pending` so it gets one more promotion cycle before it's eligible to preempt anything,
+instead of immediately preempting the interrupt handler's first instruction. **No effect on
+test 2's output whatsoever.** Traced why with the now-fixed tracer: for row 9 specifically,
+the edge doesn't arrive early enough to be sitting in `pending_nmi` *at* `VectorFetchHi`'s own
+tick at all — it arrives right around T6/T7's own last cycle, gets deferred, and only becomes
+`pending_nmi` at the very top of the **next** instruction's own dispatch tick (`$E316`'s T1),
+where it's consumed immediately by the *same* tick's `if self.pending_nmi` check before my
+`VectorFetchHi` demotion code ever had anything to catch. **Reverted** (no effect either way,
+but wrong mechanism — nothing to keep).
+
+**Read the real blargg source for test 2** (`tests/roms/cpu/cpu_interrupts_v2/source/2-nmi_and_brk.s`,
+confirmed available in-repo, not previously read carefully this deep). This nails down exactly
+what rows 8-9 need: the `irq:` handler's **first instruction is literally `SEC`**
+(`irq: sec / sta <irq_temp / pla / pha / sta <irq_flag / lda <irq_temp / rti`), and the
+readme's row 8-9 comment "NMI after SEC at beginning of IRQ handler" means the handler's own
+`SEC` must fully execute before NMI preempts the **second** instruction (`sta <irq_temp`) —
+not that NMI preempts the handler's dispatch entirely. This is a **third, distinct timing
+rule** — a normal "instruction boundary" edge should preempt the very next instruction it's
+visible before, but this specific case needs the vector target's first instruction to run
+anyway despite the edge already being visible. No mechanically-justified model for this was
+found or implemented this session (candidate #1 from the earlier entry, tested above, doesn't
+produce it; a working model would need to explain *why* only the vector-target's very first
+instruction gets this extra grace and nothing else does). **Genuinely a distinct open
+question** — recommend chasing with the same "primary reference or the C source's expected
+behavior stated as unambiguous fact" approach that worked for the hijack-window question above
+(this session found that reference; a similarly authoritative one for *this* sub-question would
+probably resolve it quickly) rather than more guess-and-trace cycles.
+
+**Read the real blargg source + full expected tables for test 5** (`5-branch_delays_irq.s`,
+readme comment header has all 4 sub-tests' exact expected `T+ CK PC` tables — previously this
+log only had `test_jmp`'s table via readme excerpts; now have all 4, plus the source). Current
+`test_jmp` output has 3 bogus leading rows (`PC=03` where hardware never produces that) before
+matching the readme exactly for the remaining 7 — a shift, not scattered noise.
+
+**`begin`'s setup routine calls `jsr sync_apu` before its own `$4017` writes.** Read
+`sync_apu.s`: its entire documented purpose (comment: "so that an STA $4017 immediately after
+... will start the frame counter without an extra clock delay") is to guarantee a
+**deterministic, jitter-free** parity for whatever `$4017` write follows it — i.e. tests using
+it (test 5 here, and test 3 via `sync_vbl`) should always land on the same one of the two
+possible `frame_reset_delay` values, not whichever the earlier (disproven) parity-toggle
+experiment was modeling. Our code hardcodes `frame_reset_delay = 4` unconditionally.
+
+**Swept `frame_reset_delay` from 3 to 7 (test 5's `test_jmp`), tracking how the leading bogus-row
+count changes:** 3→4 leading bad rows, 4(baseline)→3, 5→2, 6→1, **7→0 (`PC` column now matches
+the readme exactly, all 10 rows)**. But at `frame_reset_delay=7`, the `CK` column is then
+**uniformly off by a constant −4** from the readme's values (e.g. ours `0xFE=-2` where readme
+wants `2` — `-2 = 2-4` — checked across all 10 rows, exact constant offset, not row-varying).
+
+**Did NOT apply `frame_reset_delay=7`, reverted to 4.** Real hardware's documented jitter for
+this write is only 3-4 cycles (`docs` and this log's own earlier sourced comment); `7` isn't a
+physically real value for this specific mechanism. Getting `PC` to match by pushing this one
+knob to a non-physical value, while `CK` stays broken by a suspiciously round constant (−4),
+strongly suggests there's a **separate, genuine ~3-4-cycle fixed-cost bug** somewhere in the
+setup/measurement chain (`shell.inc`'s `setb`/`print_a`/`loop_n_times` macros, or the `irq:`
+handler's own `ldx #7: dex / delay(29831-13) / bit $4015 / bit $4015 / bvc` polling loop, none
+of which have been hand-verified this session) that, if found and fixed properly, would let
+`frame_reset_delay` stay at its physically-correct value while *also* fixing `CK`. Applying 7
+now would be exactly the "curve-fit a constant without understanding the mechanism" trap this
+log's own discipline notes warn against (see the disproven parity-jitter experiment above —
+same lesson).
+
+**Concrete next step for test 5 (not yet done):** hand-derive the exact cycle cost of
+`shell.inc`'s `setb`/`print_a`/`loop_n_times` macros and the `irq:` handler's own delay/poll
+chain (same rigor as the `$E442`/`$E458` cross-validation earlier in this log — isolated
+`TestBus` measurement + independent hand-trace, cross-checked) to find where the real ~4-cycle
+discrepancy lives, rather than adjusting `frame_reset_delay`. `sync_apu.s` and `2-nmi_and_brk.s`
+are both now fully read this session; `shell.inc`, `shell_misc.s`, `print.s`, and `testing.s`
+(where `setb`/`print_a`/`loop_n_times` presumably live) have not been read yet.
+
+**Session status:** `cargo test`: 177 passed / 9 failed (baseline unchanged from session
+start — `power_up_palette` + all 5 `cpu_interrupts_v2` sub-tests, pre-existing). Net code
+change: one real fix (stale tracer gate removed) + one comment expansion (`VectorFetch`,
+explaining why T6 not T5) — zero behavior change to production code. All hijack-check and
+`frame_reset_delay` experiments tested, root-caused, and reverted with reasoning recorded
+above so a future session doesn't retry the same disproven paths. Two genuinely new, sourced
+findings to build from: (1) rows 8-9 of test 2 need a third distinct timing rule (vector
+target's first instruction always executes before a just-missed hijack can preempt) that
+isn't modeled yet and has no working hypothesis; (2) test 5's `frame_reset_delay` is very
+likely *not* the actual bug — the real ~4-cycle discrepancy is probably in unread shell
+macros or the IRQ handler's own delay chain.
+
+---

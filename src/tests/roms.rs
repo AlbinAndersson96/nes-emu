@@ -481,7 +481,6 @@ fn nmi_brk_micro_trace() {
             cpu.tick(&mut bus);
             let delta = cpu.cycles - cycles_before;
             let (pn_after, np_after, ql_after) = cpu.debug_nmi_state();
-            let instruction_finished = ql_after == 0;
 
             let (extra, extra_nmi) = bus.take_ppu_preadvance();
             let mut got_nmi = extra_nmi;
@@ -489,7 +488,7 @@ fn nmi_brk_micro_trace() {
             let mut new_deferred = false;
             for i in 0..remaining {
                 if bus.tick_ppu(1) {
-                    if instruction_finished && i + 1 == remaining {
+                    if i + 1 == remaining {
                         new_deferred = true;
                     } else {
                         got_nmi = true;

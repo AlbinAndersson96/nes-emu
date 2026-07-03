@@ -302,7 +302,16 @@ impl Cpu {
             }
             MicroOp::VectorFetch(addr) => {
                 self.cycles += 1;
-                // NMI can hijack any in-progress service sequence at T6.
+                // NMI can hijack any in-progress service sequence at T6. (nesdev's
+                // CPU_interrupts page documents real hardware's checkpoint as the
+                // T4/T5 boundary — "first four ticks" — but our harness's NMI-edge
+                // delivery already has its own one-tick defer baked in (to model
+                // edges landing on an instruction's own last cycle correctly), and
+                // empirically checking here at T6 is what reproduces the readme's
+                // expected table; checking one tick earlier at T5/PushP instead
+                // requires an edge to have arrived a full tick earlier than
+                // hardware's rule to hijack — tested and reverted, see
+                // docs/investigations/cpu_interrupt_debug_log.md.)
                 let real_addr = if self.pending_nmi {
                     self.pending_nmi = false;
                     0xFFFA_u16
