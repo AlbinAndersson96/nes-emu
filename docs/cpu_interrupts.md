@@ -1,0 +1,159 @@
+# CPU Interrupt Handling Reference
+
+How NMI, IRQ, and BRK are dispatched, how NMI can hijack an in-progress BRK or IRQ
+service sequence, and the polling-granularity subtlety that governs exactly when an
+interrupt signal becomes "visible" to the CPU. This document describes confirmed,
+verified behavior. For the full investigation history (hypotheses tried, ruled out,
+and still-open questions), see `docs/investigations/cpu_interrupt_debug_log.md`.
+
+## Micro-op model
+
+`src/cpu/mod.rs` executes instructions and interrupt sequences one bus cycle at a
+time via a micro-op queue (`MicroOp`, `src/cpu/mod.rs`). An interrupt service
+sequence — whether entered via BRK, a genuine NMI, or a genuine IRQ — always takes
+the same 7-cycle shape:
+
+```
+T1  opcode fetch (BRK only — NMI/IRQ preempt in place of a fetch, see below)
+T2  padding byte fetch (BRK) / dummy read (NMI, IRQ)
+T3  PushPcHi
+T4  PushPcLo
+T5  PushP        — pushes P; FLAG_B set for BRK, clear for NMI/IRQ
+T6  VectorFetch  — reads the vector low byte; checks pending_nmi for hijack
+T7  VectorFetchHi — reads the vector high byte, sets PC
+```
+
+`PushP`'s B-flag value is fixed by *which* event initiated the sequence (BRK sets
+it, NMI/IRQ clear it) and is **not** touched by any later hijack — see below.
+
+## NMI hijacking BRK or IRQ
+
+Real 6502 hardware doesn't special-case "NMI during BRK" — the interrupt sequence
+above is generic. NMI hijacking a BRK or IRQ that's already begun servicing only
+ever redirects the **vector fetch (T6)** to `$FFFA`; it never un-does the push that
+already happened at T3-T5. Concretely:
+
+- If NMI's edge is detected (`pending_nmi == true`) by the time `VectorFetch` (T6)
+  runs, the vector address is redirected from `$FFFE`/whatever to `$FFFA`, and
+  `pending_nmi` is consumed.
+- The **pushed P retains whatever B value the original event set** — B=1 if the
+  hijacked sequence was BRK, B=0 if it was IRQ. This is confirmed against
+  `cpu_interrupts_v2/2-nmi_and_brk`'s own `readme.txt`, which documents
+  `36 00 00 — NMI interrupting BRK, with B bit set on stack` as the *correct*
+  result, not a bug. (Fixing this was a mistake in an earlier session — see the
+  debug log's first entry for the retraction.)
+
+### NMI hijacking an in-progress IRQ dispatch (not just BRK)
+
+`cpu_interrupts_v2/3-nmi_and_irq` exercises a related but distinct case: NMI
+arriving while a *genuine IRQ* (not BRK) is mid-dispatch. Traced and confirmed for
+this ROM's row 0/row 1 (`docs/investigations/cpu_interrupt_debug_log.md`, the
+`nmi_irq_row0_arbitration_trace` entries):
+
+1. The IRQ line (`irq_pending`) becomes visible at a CPU instruction's dispatch
+   check. If unmasked (`FLAG_I` clear) and the queue is empty, the CPU performs two
+   dummy reads (T1-T2) *instead of* fetching the pending opcode — the interrupted
+   instruction is not executed and its address is preserved on the stack (PC isn't
+   advanced during a dummy read).
+2. The interrupt sequence proceeds normally: `PushPcHi`/`PushPcLo`/`PushP` (T3-T5),
+   pushing the *original, not-yet-executed* instruction's return address and P
+   (with B=0, since this is an IRQ dispatch).
+3. If NMI's edge lands anywhere in T3-T6 (verified: T3 in the traced case), it
+   hijacks the vector fetch exactly as it would for BRK — `$FFFE`'s target is
+   swapped for `$FFFA`. **The IRQ handler's own code never executes** — only the
+   NMI handler runs, and it reads whatever P the IRQ dispatch already pushed.
+4. NMI's own handler eventually `RTI`s back to the address that was pushed —
+   which is the *original preempted instruction*, not the IRQ handler — so that
+   instruction finally executes for real, for the first time, after the interrupt
+   round-trip.
+
+This means a single readable byte captured shortly after such a sequence (e.g. via
+`PLA`/`PHA` inside the NMI handler, `cpu_interrupts_v2/3-nmi_and_irq.s`) reflects
+flags from *before* the originally-preempted instruction ran, not after — because
+the push already happened before NMI hijacked anything. **Open question:** applying
+this mechanism uniformly across all 12 rows of that test predicts the same
+captured byte for every row where the hijack lands within the T1-T6 window (since
+this ROM's IRQ dispatch timing doesn't vary by row) — but the ROM's own
+`readme.txt` documents different bytes for different rows in that range. This is a
+confirmed, unresolved contradiction between the mechanically-verified behavior
+above and the expected output; see the debug log's final entries for detail. It
+likely means real hardware allows NMI to fully take over (not just hijack the
+vector) even a cycle or two into an already-dispatched IRQ's dummy-read/push phase
+— a claim that needs an external hardware reference to confirm, not derivable from
+this ROM alone.
+
+## Interrupt-polling granularity (the deferred-edge fix)
+
+Real 6502 hardware samples the interrupt lines going into an instruction's *last*
+cycle, using line state from *before* that cycle begins. An edge that occurs
+exactly on that last cycle is therefore invisible to that poll — it can only
+affect the dispatch *after* the next one, not the very next one.
+
+Before this was modeled, this emulator made an edge landing on an instruction's
+last cycle visible immediately (one dispatch too early). The fix
+(`run_until_complete_trace`, `src/tests/roms.rs`) ticks the PPU one cycle at a
+time after each CPU tick and defers delivery of `cpu.nmi()` by exactly one extra
+tick when the edge lands on the final sub-cycle of that tick's delta:
+
+```rust
+for i in 0..remaining {
+    if bus.tick_ppu(1) {
+        if i + 1 == remaining {
+            new_deferred = true;   // last cycle: defer one more tick
+        } else {
+            got_nmi = true;        // any earlier cycle: visible now
+        }
+    }
+}
+if deferred_nmi { got_nmi = true; }
+deferred_nmi = new_deferred;
+if got_nmi { cpu.nmi(); }
+```
+
+This is NMI-specific and deliberately **not** applied to IRQ. NMI is edge-triggered
+and the defer models exactly when that edge becomes externally visible. IRQ is
+level-triggered and already re-sampled fresh every tick (`bus.tick_apu(delta)`
+once per instruction) — applying the same one-tick defer to IRQ was tried and
+**confirmed to regress** a previously-correct case
+(`cpu_interrupts_v2/3-nmi_and_irq` row 0): delaying IRQ's visibility by one cycle
+let an instruction that should have been preempted by IRQ execute cleanly instead,
+changing which mechanism (IRQ-dispatch-then-NMI-hijack vs. plain NMI preempt) fired
+and producing the wrong captured byte. See the debug log for the full trace.
+
+Verified impact of the NMI defer fix: `ppu/vbl_clear_time` now passes outright
+(same underlying mechanism — VBL flag clear timing is NMI-adjacent), and
+`cpu_interrupts_v2/2-nmi_and_brk` went from ~2/10 to 8-9/10 rows matching the
+ROM's expected table, with zero regressions across the rest of the suite.
+
+## VBlank sync (`sync_vbl`) and fixed-cycle delay routines
+
+The blargg `cpu_interrupts_v2` test ROMs use a shared framework
+(`tests/roms/cpu/cpu_interrupts_v2/source/common/`) with two building blocks worth
+knowing if debugging these tests further:
+
+- **`delay_a_25_clocks`** (`common/delay.s`, mapped to `$E442` in these ROMs) —
+  delays exactly `A + 25` CPU cycles (including its own `JSR`/`RTS` overhead), for
+  any `A` from 0 to 255. Verified two independent ways this session: an isolated
+  `TestBus`-only measurement (`isolate_delay_routines` test,
+  `src/tests/roms.rs`) and an independent hand-trace of the actual 6502
+  instruction sequence — both agree exactly for every value tested, including
+  large loop-heavy ones (`A=215` → 234 cycles). Not a source of any known bug.
+- **`delay_256a_11_clocks_`** (mapped to `$E458`) — a coarser delay built by
+  looping `delay_a_25_clocks` calls; costs `256·A + 5` cycles. Also verified exact.
+- **`sync_vbl`** (`common/sync_vbl.s`, mapped to `$E200`) — a sophisticated
+  multi-iteration precision convergence loop (not a simple "poll once" loop; see
+  the source file's own comments), documented to guarantee: *reading `PPUSTATUS`
+  29768+ clocks after `sync_vbl` returns will see the VBlank flag set; reading it
+  immediately will see it clear.* Verified this contract holds across 10 different
+  starting PPU phases, including several straddling VBlank onset exactly
+  (`verify_sync_vbl_contract` test, `src/tests/roms.rs`) — not a source of any
+  known bug either.
+- The APU's frame-IRQ fires at exactly the documented absolute cycle (`4017`
+  write-jitter delay + first `MODE0` step = 29832 cycles after the write),
+  verified in total isolation from the CPU/PPU (`isolate_apu_frame_irq_timing`
+  test). Also not a source of any known bug.
+
+These three subsystems being independently proven correct is *why* the
+`3-nmi_and_irq` contradiction above is genuinely unresolved rather than just
+under-investigated — the pieces that would normally explain a timing bug have all
+individually checked out.
