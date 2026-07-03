@@ -34,7 +34,7 @@ pub(crate) fn nes_to_rgba(frame: &[u8; 256 * 240], buf: &mut [u8]) {
     }
 }
 
-const PLACEHOLDER_TEXT: &str = "DROP .NES ROM HERE";
+const PLACEHOLDER_TEXT: &str = "DROP .NES ROM OR PRESS CTRL+O";
 const PLACEHOLDER_BG_INDEX: u8 = 0x0F; // black
 const PLACEHOLDER_FG_INDEX: u8 = 0x30; // white
 
@@ -42,7 +42,7 @@ const PLACEHOLDER_FG_INDEX: u8 = 0x30; // white
 /// Pure and window-independent so it can be unit tested directly.
 pub(crate) fn render_placeholder_frame(font: &fontdue::Font) -> [u8; 256 * 240] {
     let mut frame = [PLACEHOLDER_BG_INDEX; 256 * 240];
-    let px_size = 16.0;
+    let px_size = 12.0;
 
     // First pass: rasterize each glyph and measure total width to center the line.
     let mut glyphs: Vec<(fontdue::Metrics, Vec<u8>)> = Vec::with_capacity(PLACEHOLDER_TEXT.len());
@@ -186,5 +186,27 @@ mod tests {
             .expect("embedded font must parse");
         let frame = render_placeholder_frame(&font);
         assert_eq!(frame.len(), 256 * 240);
+    }
+
+    #[test]
+    fn placeholder_frame_text_does_not_clip_at_edges() {
+        let font_bytes = include_bytes!("../assets/fonts/DejaVuSansMono.ttf") as &[u8];
+        let font = fontdue::Font::from_bytes(font_bytes, fontdue::FontSettings::default())
+            .expect("embedded font must parse");
+        let frame = render_placeholder_frame(&font);
+        // If the text were wider than the canvas, rendering would silently drop
+        // the overflow pixels (see the bounds check in render_placeholder_frame),
+        // which would show up as foreground pixels reaching all the way to the
+        // left/right edge columns. Confirm there's still margin on both sides.
+        for row in 0..240 {
+            assert_eq!(
+                frame[row * 256], PLACEHOLDER_BG_INDEX,
+                "text must not reach the leftmost column (row {row})"
+            );
+            assert_eq!(
+                frame[row * 256 + 255], PLACEHOLDER_BG_INDEX,
+                "text must not reach the rightmost column (row {row})"
+            );
+        }
     }
 }

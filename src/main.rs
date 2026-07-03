@@ -17,7 +17,7 @@ use std::{
 };
 use renderer::Renderer;
 use winit::{
-    event::{Event, WindowEvent},
+    event::{ElementState, Event, ModifiersState, VirtualKeyCode, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
 };
 
@@ -74,6 +74,7 @@ fn main() {
     }
 
     let mut next_frame = Instant::now();
+    let mut modifiers = ModifiersState::default();
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::WaitUntil(next_frame);
@@ -94,11 +95,37 @@ fn main() {
             }
 
             Event::WindowEvent {
+                event: WindowEvent::ModifiersChanged(state),
+                ..
+            } => {
+                modifiers = state;
+            }
+
+            Event::WindowEvent {
                 event: WindowEvent::DroppedFile(path),
                 ..
             } => {
                 if let Err(e) = app.load_rom(&path) {
                     eprintln!("error: cannot load dropped ROM: {}", e);
+                }
+            }
+
+            Event::WindowEvent {
+                event: WindowEvent::KeyboardInput { input, .. },
+                ..
+            } => {
+                let is_ctrl_o = input.state == ElementState::Pressed
+                    && input.virtual_keycode == Some(VirtualKeyCode::O)
+                    && modifiers.ctrl();
+                if is_ctrl_o {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("NES ROM", &["nes"])
+                        .pick_file()
+                    {
+                        if let Err(e) = app.load_rom(&path) {
+                            eprintln!("error: cannot load ROM: {}", e);
+                        }
+                    }
                 }
             }
 
