@@ -53,6 +53,11 @@ pub struct Cpu {
     /// Address of the vector low byte chosen by VectorFetch (possibly redirected
     /// from IRQ to NMI vector by NMI hijack). VectorFetchHi reads addr+1 from here.
     pub(in crate::cpu) vector_base: u16,
+    /// Set when a taken non-page-crossing branch (3-cycle) just completed.
+    /// A taken branch ignores IRQ on its last clock (T3): if an IRQ arrives
+    /// during the branch's RunInstruction, it is deferred until after the
+    /// NEXT instruction executes. This flag marks that deferral window.
+    pub(in crate::cpu) branch_delay_irq: bool,
 }
 
 // P register flag masks
@@ -88,6 +93,7 @@ impl Cpu {
             pending_irq: false,
             branch_target_hi: 0,
             vector_base: 0,
+            branch_delay_irq: false,
         }
     }
 
@@ -99,6 +105,12 @@ impl Cpu {
     /// Signal a maskable interrupt. Serviced at the top of the next step() if FLAG_I is clear.
     pub fn irq(&mut self) {
         self.irq_pending = true;
+    }
+
+    /// Diagnostic accessor for interrupt-timing tracers: (pending_nmi, nmi_pending, queue_len).
+    #[cfg(test)]
+    pub(crate) fn debug_nmi_state(&self) -> (bool, bool, u8) {
+        (self.pending_nmi, self.nmi_pending, self.queue_len)
     }
 
     pub fn reset(&mut self, bus: &mut dyn Bus) {
@@ -161,11 +173,25 @@ impl Cpu {
                 self.pending_deferred_irq = true;
             }
 
+            // Branch last-cycle IRQ delay: a taken non-page-crossing branch ignores
+            // IRQ at its last clock (T3). If an IRQ arrived during that branch's
+            // RunInstruction, defer it to after the NEXT instruction instead of
+            // firing immediately here. Consume the flag and treat irq as absent.
+            let branch_delay = self.branch_delay_irq;
+            self.branch_delay_irq = false;
+            let irq = if branch_delay && irq && !inhibit && !self.flag(FLAG_I) {
+                self.pending_deferred_irq = true;
+                false
+            } else {
+                irq
+            };
+
             // Fetch opcode. For branch instructions we never fire the IRQ
             // immediately (real hardware polls at T3, the penultimate cycle).
             // Instead save the flag in pending_irq and let RunInstruction /
             // BranchPageFix fire it at the correct point.
             let opcode = self.fetch(bus);
+            self.cycles += 1; // T1: opcode fetch cycle
 
             if !inhibit && irq && !self.flag(FLAG_I) {
                 if matches!(opcode, 0x10 | 0x30 | 0x50 | 0x70 | 0x90 | 0xB0 | 0xD0 | 0xF0) {
@@ -174,9 +200,8 @@ impl Cpu {
                     self.pending_irq = true;
                 } else {
                     // Non-branch: IRQ fires before this instruction.
-                    // T1: the opcode fetch already happened (phantom read); count it.
-                    self.cycles += 1;
-                    // Undo PC so the pushed return address is the interrupted instruction.
+                    // T1 already counted above. Undo PC so the pushed return address
+                    // is the interrupted instruction's address.
                     self.pc = self.pc.wrapping_sub(1);
                     // T2: dummy read at interrupted PC.
                     let _ = bus.read(self.pc); self.cycles += 1;
@@ -200,7 +225,17 @@ impl Cpu {
         match op {
             MicroOp::RunInstruction(opcode) => {
                 let cycles = instructions::execute(self, bus, opcode);
-                self.cycles += cycles as u64;
+                // T1 (opcode fetch) was already counted in the queue-empty path.
+                self.cycles += (cycles - 1) as u64;
+
+                // A taken non-page-crossing branch (3 cycles, no BranchPageFix queued)
+                // ignores IRQ at its last clock (T3). If an IRQ arrives during this
+                // RunInstruction, mark that the IRQ must be deferred by one instruction.
+                let is_branch = matches!(opcode,
+                    0x10 | 0x30 | 0x50 | 0x70 | 0x90 | 0xB0 | 0xD0 | 0xF0);
+                if is_branch && cycles == 3 && self.queue_len == 0 {
+                    self.branch_delay_irq = true;
+                }
 
                 // Only fire pending IRQs when no follow-up micro-op was queued.
                 // If BranchPageFix was queued it will handle the abort decision.
@@ -220,11 +255,19 @@ impl Cpu {
                 }
             }
             MicroOp::BranchPageFix => {
-                if self.pending_irq {
+                // pending_irq: set at opcode-fetch time (IRQ was visible before the
+                //   branch opcode was read — T+0/T+1 in the test table).
+                // irq_pending: set after RunInstruction (IRQ fired during T2/T3 of
+                //   the branch — T+2/T+3 in the test table).
+                // Both abort T4 if the IRQ line is not masked.
+                let irq_abort = self.pending_irq
+                    || (!self.flag(FLAG_I) && self.irq_pending);
+                if irq_abort {
                     // IRQ aborts T4: page-fix cycle skipped, no +1 cycle.
                     // cpu.pc is already the page-wrong address — that is what
                     // gets pushed on the stack.
                     self.pending_irq = false;
+                    self.irq_pending = false;
                     self.cycles += 1; // T1 phantom at page_wrong_pc
                     let _ = bus.read(self.pc); self.cycles += 1; // T2 dummy
                     let p = (self.p & !FLAG_B) | FLAG_U;
