@@ -1,3 +1,4 @@
+mod app;
 mod apu;
 mod bus;
 mod cartridge;
@@ -7,8 +8,11 @@ mod renderer;
 #[cfg(test)]
 mod tests;
 
+use app::App;
 use std::{
-    env, fs, process,
+    env, fs,
+    path::PathBuf,
+    process,
     time::{Duration, Instant},
 };
 use renderer::Renderer;
@@ -17,7 +21,6 @@ use winit::{
     event_loop::{ControlFlow, EventLoop},
 };
 
-const CYCLES_PER_FRAME: u64 = 29_781;
 const FRAME_DURATION: Duration = Duration::from_nanos(16_666_667);
 
 fn maybe_configure_wsl2_gpu() {
@@ -47,41 +50,28 @@ fn main() {
     maybe_configure_wsl2_gpu();
 
     let args: Vec<String> = env::args().collect();
-    if args.len() != 2 {
-        eprintln!("Usage: {} <rom.nes>", args[0]);
+    if args.len() > 2 {
+        eprintln!("Usage: {} [rom.nes]", args[0]);
         process::exit(1);
     }
 
-    let data = match fs::read(&args[1]) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("error: cannot read '{}': {}", args[1], e);
-            process::exit(1);
-        }
-    };
-
-    let cartridge = match cartridge::Cartridge::from_ines(&data) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("error: invalid ROM: {}", e);
-            process::exit(1);
-        }
-    };
-
-    let mut bus = bus::Bus::new();
-    bus.insert_cartridge(cartridge);
-
-    let mut cpu = cpu::Cpu::new();
-    cpu.reset(&mut bus);
-
     let event_loop = EventLoop::new();
-    let mut renderer = match Renderer::new(&event_loop) {
+    let renderer = match Renderer::new(&event_loop) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: could not create window: {}", e);
             process::exit(1);
         }
     };
+
+    let mut app = App::new(renderer);
+
+    if let Some(rom_path) = args.get(1) {
+        if let Err(e) = app.load_rom(&PathBuf::from(rom_path)) {
+            eprintln!("error: invalid ROM: {}", e);
+            process::exit(1);
+        }
+    }
 
     let mut next_frame = Instant::now();
 
@@ -92,7 +82,7 @@ fn main() {
             Event::WindowEvent {
                 window_id,
                 event: WindowEvent::CloseRequested,
-            } if window_id == renderer.window_id() => {
+            } if window_id == app.renderer.window_id() => {
                 *control_flow = ControlFlow::Exit;
             }
 
@@ -100,41 +90,22 @@ fn main() {
                 event: WindowEvent::Resized(size),
                 ..
             } => {
-                renderer.resize(size.width, size.height);
+                app.renderer.resize(size.width, size.height);
+            }
+
+            Event::WindowEvent {
+                event: WindowEvent::DroppedFile(path),
+                ..
+            } => {
+                if let Err(e) = app.load_rom(&path) {
+                    eprintln!("error: cannot load dropped ROM: {}", e);
+                }
             }
 
             Event::MainEventsCleared => {
                 if Instant::now() >= next_frame {
                     next_frame += FRAME_DURATION;
-
-                    let mut elapsed = 0u64;
-                    while elapsed < CYCLES_PER_FRAME {
-                        let cycles_before = cpu.cycles;
-                        if bus.dma_active() {
-                            bus.tick_dma();
-                            if bus.tick_ppu(1) { cpu.nmi(); }
-                            if bus.tick_apu(1) { cpu.irq(); }
-                            elapsed += 1;
-                        } else {
-                            cpu.tick(&mut bus);
-                            let delta = cpu.cycles - cycles_before;
-                            let (extra, extra_nmi) = bus.take_ppu_preadvance();
-                            let mut got_nmi = extra_nmi;
-                            let remaining = delta.saturating_sub(extra as u64);
-                            for _ in 0..remaining {
-                                if bus.tick_ppu(1) { got_nmi = true; }
-                            }
-                            if got_nmi { cpu.nmi(); }
-                            if bus.tick_apu(delta) { cpu.irq(); }
-                            elapsed += delta;
-                        }
-                    }
-
-                    if bus.ppu.frame_ready {
-                        bus.ppu.frame_ready = false;
-                        renderer.present(&bus.ppu.frame).unwrap();
-                    }
-
+                    app.step_frame();
                     *control_flow = ControlFlow::WaitUntil(next_frame);
                 }
             }
