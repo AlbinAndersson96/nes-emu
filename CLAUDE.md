@@ -40,8 +40,10 @@ cargo fmt            # format
 - **`src/tests/ppu_roms.rs`** — Blargg PPU ROM test harness. Runs each ROM for 300 frames (~5 s NES time), then reads the result code from the nametable (the ROMs render `$XX` in ASCII tiles at nametable-0 row 5, col 2–4) and looks up its meaning from the per-ROM table in the README. On failure the panic message includes the result code and its description. Also saves a PNG screenshot to `tests/screenshots/ppu/output/` and pixel-compares against a golden in `tests/screenshots/ppu/golden/` if one exists. To bless a new golden: `cp tests/screenshots/ppu/output/<name>.png tests/screenshots/ppu/golden/<name>.png`.
 - **`docs/bus.md`** — NES address map and bus design notes.
 - **`docs/cpu_instructions.md`** — 6502 instruction reference (official opcodes, addressing modes, cycle counts).
+- **`docs/cpu_interrupts.md`** — NMI/IRQ/BRK dispatch, the micro-op interrupt-service sequence, NMI hijacking BRK or an in-progress IRQ, and the interrupt-polling-granularity (deferred-edge) fix. Start here before touching interrupt timing; links to the full investigation log for anything not yet resolved.
 - **`docs/apu.md`** — APU channel register reference, frame counter sequences, mixer formula, and implementation notes.
 - **`docs/ppu.md`** — Full PPU implementation reference: memory map, registers, OAM, Loopy registers, rendering pipeline, scrolling, pixel priority, hardware quirks, and implementation checklist.
+- **`docs/investigations/cpu_interrupt_debug_log.md`** — chronological investigation log for the `cpu_interrupts_v2` ROM tests: hypotheses tried, what was ruled out and why, and open questions. Reference material, not a maintained doc — read `docs/cpu_interrupts.md` first for the current understanding.
 
 ## Key design notes
 
@@ -80,20 +82,29 @@ These are confirmed missing features tied to failing blargg ROM tests. The proje
 
 The 5 remaining failures (`cpu_interrupts_v2` tests 2–5 plus the combined suite) exercise interrupt-sequencing behaviour that depends on *which cycle within a multi-cycle instruction* a signal arrives.
 
-- **`cpu_interrupts_v2/2-nmi_and_brk`** — the ROM's own `readme.txt` documents B=1 (not B=0) as
-  correct when NMI hijacks BRK (only the vector fetch is redirected; BRK's own P push, already
-  done by then, is untouched) — a previous version of this note had that backwards. Root cause
-  is about *interrupt-polling granularity*: real 6502 hardware samples interrupt lines going
-  into an instruction/micro-op's last cycle, using state from before that cycle begins, so an
-  edge arriving on the exact last cycle is invisible until one dispatch later than an edge on
-  an earlier cycle. A fix for the common case (deferred NMI-edge delivery in the test harness,
-  `src/tests/roms.rs`) is implemented and took this test from ~2/10 to 8-9/10 correct rows
-  (verified against the readme's expected table) with zero regressions elsewhere — see
-  `docs/cpu_interrupt_debug_log.md` for the full derivation and the one remaining known defect
-  (a single stray flag bit on the last two rows, tied to `pending_nmi` surviving past
-  `VectorFetchHi` into the next instruction).
+- **`cpu_interrupts_v2/2-nmi_and_brk`** — see `docs/cpu_interrupts.md` for the confirmed
+  NMI-hijacks-BRK mechanics (B=1 is preserved, not cleared — a previous version of this note
+  had that backwards) and the interrupt-polling-granularity fix (deferred NMI-edge delivery,
+  `src/tests/roms.rs`) that took this test from ~2/10 to 8-9/10 correct rows (verified against
+  the readme's expected table), zero regressions elsewhere. One remaining known defect: a
+  single stray flag bit on the last two rows, tied to `pending_nmi` surviving past
+  `VectorFetchHi` into the next instruction — see the investigation log for detail.
 
-- **`cpu_interrupts_v2/3-nmi_and_irq`** — NMI hijacking an in-progress IRQ service sequence. The IRQ service already pushes P with B=0 (correct), and `VectorFetch` does check `pending_nmi` for hijack. The failure is more subtle: the ROM tests specific cycle offsets at which NMI arrives relative to the IRQ push sequence, and some offsets produce wrong P values or wrong handler dispatch. Root cause is likely that `pending_nmi` is moved from `nmi_pending` at the *start* of the tick that runs the micro-op — so NMI arriving in the APU window *between* two ticks only takes effect one tick later, causing off-by-one behaviour at some push-cycle boundaries.
+- **`cpu_interrupts_v2/3-nmi_and_irq`** — NMI hijacking an in-progress *IRQ* (not BRK) service
+  sequence; see `docs/cpu_interrupts.md` for the confirmed dispatch/hijack mechanics. This
+  session traced the exact mechanism (IRQ preempts the pending instruction, pushes PC/P, NMI
+  hijacks the vector fetch within the T1-T6 window) and confirmed it's mechanically identical
+  across every row of this test — which is itself the problem: the mechanism as understood
+  predicts the same captured byte for every row where the hijack applies, but the ROM's own
+  `readme.txt` documents different bytes for different rows. Three independent subsystems
+  (the delay routines, `sync_vbl`'s contract, and the APU frame-IRQ's absolute timing) were
+  each rigorously proven correct in isolation this session, so this isn't an under-investigated
+  gap — the confirmed facts mechanically contradict the expected output, which needs an
+  external hardware reference to resolve rather than more guessing. Also confirmed: applying
+  the same interrupt-polling-granularity fix used for NMI to the IRQ line is wrong and
+  regresses an otherwise-correct row (IRQ is level-triggered and already correctly
+  re-sampled every tick; it doesn't have the edge-triggered NMI's "last cycle invisible"
+  problem). See the investigation log for the full trace evidence.
 
 - **`cpu_interrupts_v2/4-irq_and_dma`** — During OAM-DMA, the run loop calls `bus.tick_dma()` and then `cpu.irq()` on every DMA cycle, but `cpu.irq()` only sets `irq_pending = true`. That flag is not consumed until the next `cpu.tick()` call, which does not happen while DMA is active. The result is that every IRQ that fires during DMA is indistinguishable to the CPU: they all appear to have arrived at the moment DMA ended. On real hardware the CPU samples the IRQ line at a specific DMA cycle, so the number of cycles between the IRQ signal and the start of the interrupt service depends on *when during the DMA* the signal was asserted. ROM output shows a `53 +N` table of per-offset IRQ latency measurements; values go wrong at `+4` onwards (first offset where the IRQ reaches the CPU one DMA cycle later than expected).
 
@@ -106,5 +117,5 @@ The 5 remaining failures (`cpu_interrupts_v2` tests 2–5 plus the combined suit
 - **`ppu/sprite_ram`** — result code 7: *$4014 DMA copy should start at value in $2003 and wrap*. OAM DMA ignores the starting offset in $2003; it always copies from OAM byte 0 instead of wrapping around from the value in $2003.
 - **`ppu/power_up_palette`** — result code 2: *Palette differs from table*. Power-up palette contents don't match the specific values on the test author's NES (this test is hardware-specific and may not be fixable in a general emulator).
 
-`ppu/vbl_clear_time` now passes (fixed as a side effect of the deferred NMI-edge-delivery fix
-described below — see `docs/cpu_interrupt_debug_log.md`).
+`ppu/vbl_clear_time` now passes (fixed as a side effect of the deferred NMI-edge-delivery fix —
+see `docs/cpu_interrupts.md`).

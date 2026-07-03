@@ -906,3 +906,143 @@ next attempt should start from finding #2 above (VectorFetchHi/pending_nmi leaka
 fresh `nmi_brk_micro_trace` run focused specifically on the T6→T7→next-instruction boundary.
 
 ---
+
+### 2026-07-03 (new session, PR #12 merged) — followed the test 3 IRQ-defer thread: traced row 0 precisely, confirmed IRQ-defer is wrong, found row 0's real mechanism, row 1 still unexplained
+
+PR #12 (the deferred-NMI-edge fix) merged to `develop`. New branch
+`fix/nmi-irq-race-row0-trace` off the updated `develop` for this continuation.
+
+**Built `nmi_irq_row0_arbitration_trace`** (`src/tests/roms.rs`, `#[ignore]`) — runs a chosen
+row twice (baseline vs. the IRQ-defer experiment from the previous entry), tracing
+`pending_nmi`/`nmi_pending`/`irq_pending`/`pending_irq`/`queue_len`/`FLAG_I` together across
+the `$E357`ˋ(CLI)`-$E364`(capture) window. Added `Cpu::debug_irq_state()`
+(`#[cfg(test)] pub(crate)`, `src/cpu/mod.rs`) to expose the needed IRQ-side fields.
+
+**Row 0, baseline (no IRQ-defer) — fully explained, and it's correct:**
+1. `SEC`'s own T2 (cycle 712349) is when `irq_pending` becomes true (IRQ line was already
+   asserted; this is just the CPU's own next check of it).
+2. **`LDA #1`'s own dispatch, the very next queue-empty opportunity, gets preempted by IRQ**
+   (`ql:0→5, delta=2` — the "non-branch IRQ fires before this instruction" dummy-read path,
+   *not* NMI's Path A). IRQ begins its own 7-cycle service sequence: pushes PC=`$E360`
+   (`LDA #1`'s un-executed address) and P with B=0, using flags as of *before* `LDA #1` ran
+   (Z=1, C=1).
+3. **NMI's edge arrives 2 cycles into this IRQ service** (during `PushPcHi`, T3) and
+   **hijacks the vector fetch at T6** — `pending_nmi` flips true→false exactly at
+   `VectorFetch`, redirecting `$FFFE`'s target to `$FFFA`. IRQ's own handler code (`$E316`)
+   *never executes* — the NMI handler (`$E308`) runs instead, but reads the *already-pushed*
+   P (IRQ's own, Z=1/C=1) since only the vector was redirected, not the push.
+4. NMI's RTI returns to `$E360` (IRQ's originally-pushed, never-advanced PC) — `LDA #1`
+   *finally* executes for real, cleanly, uninterrupted, followed by `CLC`/`NOP`/capture.
+
+Result: `$1F=$23` (from the hijacked-but-IRQ-pushed P, Z=1/C=1), `$1D=$00` (IRQ handler code
+never ran) — **exactly matches the readme's row 0.** This is genuinely correct, non-obvious,
+multi-mechanism behavior (IRQ dispatch + NMI hijack-of-IRQ, not the simpler BRK-hijack from
+test 2), and our emulator gets it right.
+
+**Confirmed the IRQ-defer experiment is wrong, precisely.** Re-ran the same trace with the
+IRQ-defer patch applied: IRQ's visibility shifts from cycle 712349 to 712350 (1 cycle later,
+by design of the defer). That 1-cycle shift is enough for `LDA #1` to slip through its
+dispatch check *before* `irq_pending` becomes visible — so `LDA #1` executes normally instead
+of being preempted. NMI then preempts the *following* instruction (`CLC`) directly via Path A
+instead of hijacking an in-progress IRQ sequence — a different mechanism entirely, capturing
+P with Z=0 (`LDA #1` already ran) instead of Z=1, giving `$1F=$21` — the observed regression,
+now fully explained rather than just observed. **Conclusion: IRQ must NOT get the same
+last-cycle-defer treatment as NMI.** Real 6502 hardware polls IRQ and NMI similarly in terms
+of granularity, but NMI is edge-triggered (needs the defer to correctly model "one dispatch
+too early") while IRQ is level-triggered and already re-sampled every tick — the existing
+simple `bus.tick_apu(delta)`-once-per-instruction check is apparently already at the right
+precision for IRQ, and the earlier apparent "improvement" in rows 1-6's value *family* was
+likely a side effect of the same change that broke row 0, not evidence of a real fix. This
+experimental code was investigation-only (in the new test, not the shared run loop) — nothing
+to revert in production code this time.
+
+**Row 1, baseline — same mechanism, same wrong-for-row-1 result.** Traced row 1 the same way:
+IRQ preempts `LDA #1` at the identical relative point (`SEC`'s T2 immediately precedes
+`LDA #1`'s dispatch, same as row 0 — confirming IRQ's pending-time doesn't shift by row,
+as expected since `delay 29805` is row-invariant). NMI again hijacks the IRQ service's vector
+fetch. Result: `$1F=$23` again — **should be `$21`** per the readme (row 1 = "NMI occurs
+after LDA #1, Z clear"). Since IRQ's preempt-of-`LDA #1` timing is fixed and doesn't vary by
+row, and NMI's hijack-of-IRQ mechanism doesn't depend on *which* row's NMI-position it is (as
+long as NMI arrives anywhere within IRQ's T1-T6 window, which it does for many consecutive
+rows), **this mechanism alone can't produce the readme's row-by-row transition at all** — it
+would produce the same `$23` for every row where NMI arrives within that window, which
+contradicts both the readme (which wants `21`→`21`→`20`×7→`25`×2) and our own actual full-row
+output (which does eventually change, to `$27`, around row 5). There's a piece of this puzzle
+not yet accounted for — most likely: at some row, NMI's own position moves *early enough* to
+preempt *before* IRQ gets its chance (a pure NMI Path-A capture, no IRQ dispatch at all,
+which would naturally vary with `LDA #1`/`CLC` position exactly as the readme's `21`/`20`
+progression implies) — meaning the row-0/row-1 mechanism just traced might not even be the
+*primary* one degrading the readme's row-1-through-9 expectations; it may only be relevant
+at the specific boundary rows. Have not yet traced where/when NMI stops hijacking IRQ
+mid-service and starts preempting it directly instead (analogous to test 2's row 3↔4 Path
+A/B boundary) — that's the concrete next step.
+
+**Session status:** `cargo test` unchanged (161/7, zero regressions) — all new work is
+diagnostic-only (`#[ignore]`d tests, `#[cfg(test)]` accessors). No production code changes
+this session (the IRQ-defer experiment lives only in the throwaway trace test).
+
+---
+
+### 2026-07-03 (same session) — searched for the Path-A/hijack boundary across all 12 rows, found a genuine unresolved contradiction between the confirmed mechanism and the readme
+
+**Built `nmi_irq_all_rows_summary`** (`src/tests/roms.rs`, `#[ignore]`) — single pass through
+all 12 rows, identifying at each row whether `LDA #1`/`CLC`/`NOP` gets preempted by IRQ
+(`irq_pending` already true at dispatch) or NMI (`pending_nmi` already true at dispatch), plus
+the captured `$1F`/`$1D`. Result:
+
+```
+row  0: preempt=IRQ(irq_pending already true) at pc=0xe360  $1F=0x23 $1D=0x00
+row  1: preempt=IRQ(irq_pending already true) at pc=0xe360  $1F=0x23 $1D=0x00
+row  2: preempt=IRQ(irq_pending already true) at pc=0xe360  $1F=0x23 $1D=0x00
+row  3: preempt=IRQ(irq_pending already true) at pc=0xe360  $1F=0x23 $1D=0x00
+row  4: preempt=IRQ(irq_pending already true) at pc=0xe360  $1F=0x27 $1D=0x23
+row  5-10: preempt=IRQ(irq_pending already true) at pc=0xe360  $1F=0x27 $1D=0x23
+```
+
+**IRQ preempts `LDA #1` identically for every single row, 0 through 10** — confirms IRQ's
+timing relative to `LDA #1` genuinely doesn't shift with row (as established earlier: `delay
+29805` is fixed, so this is expected and mechanically consistent). The actual transition
+(row 3→4) is in whether NMI's hijack lands within IRQ's T1-T6 window (rows 0-3: yes, `$1D`
+stays `$00`, IRQ handler code never runs) or misses it (rows 4+: no, IRQ's own handler runs
+to completion, writing `$1D=$23`, and NMI ends up interrupting something later giving
+`$1F=$27`). This is internally consistent with the row-shift rate established earlier in the
+session (NMI's edge arrives ~1 cycle later per row relative to the fixed IRQ-dispatch point:
+gap is +2 cycles at row 0, +3 at row 1, etc., eventually exceeding the ~6-cycle T1-T6 window
+around row 4).
+
+**The genuine problem: this mechanism cannot produce the readme's row 0→1 transition at
+all.** Readme wants `23`(row 0)→`21`(row 1, "Z clear" — i.e. *after* `LDA #1` executed)→`21`→
+`20`×7→`25`×2. But since IRQ preempts `LDA #1` at the *identical* relative point for every
+row (proven above), and the flags going into `LDA #1` are provably identical every row (`Z=1`
+is established once by `LDA #0` several instructions earlier and nothing between there and
+`LDA #1` touches `Z`), **the P value captured by this mechanism must be identical for every
+row where it applies — it cannot legitimately produce `$23` for row 0 and `$21` for row 1.**
+Confirmed row 1's hijack lands at the identical micro-op (T6, `VectorFetch`) as row 0's, via
+the same fine-grained trace technique, ruling out a mechanical difference between the two.
+
+**This directly contradicts what's mechanically possible given the confirmed, dot-exact
+correct facts:** IRQ's absolute firing time (proven, cycle 29832), NMI's absolute timing
+(proven, dot-exact contract test), and the row-to-row linear delay sweep (proven, exact
+`A+19`/`256·A+5` formulas). All three individually check out, and their *documented*
+interaction (IRQ dispatches, NMI hijacks the vector if it arrives within T1-T6) is exactly
+what CLAUDE.md predicted as the known gap for this test — but even granting that mechanism
+is right, it cannot reproduce the readme's actual row 0/row 1 distinction. Either:
+1. Real hardware's actual rule for "how late can NMI arrive and still fully preempt (not
+   merely hijack the vector)" is more permissive than what's modeled — e.g. maybe NMI can
+   fully take over (re-doing its own push) even a cycle or two into the dummy-read/push phase,
+   not just up to the vector-fetch cycle. This would need external verification (real 6502
+   documentation beyond what's derivable from this ROM's `readme.txt`+source) to pin down
+   precisely, since it's a claim about mid-sequence NMI takeover semantics, not something the
+   `sync_vbl`-style "test the contract" trick can verify without a hardware reference.
+2. There's a real emulator bug in this specific interaction that hasn't been found despite
+   three independent rigorous checks of the surrounding pieces — possible but increasingly
+   unlikely given how much has been individually verified.
+
+**Genuinely stuck here** — this isn't "haven't looked hard enough," it's "the confirmed facts
+mechanically contradict the expected output," which per systematic-debugging discipline means
+stop guessing and get better reference data (real hardware trace, or the actual NMI/IRQ
+arbitration timing diagrams from a primary 6502 hardware reference) before spending more
+tokens on this specific angle. `cargo test`: 161/7, zero regressions, all new work
+diagnostic-only.
+
+---

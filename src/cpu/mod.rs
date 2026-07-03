@@ -113,6 +113,13 @@ impl Cpu {
         (self.pending_nmi, self.nmi_pending, self.queue_len)
     }
 
+    /// Diagnostic accessor for the NMI-vs-IRQ arbitration tracer:
+    /// (irq_pending, pending_irq, irq_inhibit_next, flag(FLAG_I)).
+    #[cfg(test)]
+    pub(crate) fn debug_irq_state(&self) -> (bool, bool, bool, bool) {
+        (self.irq_pending, self.pending_irq, self.irq_inhibit_next, self.flag(FLAG_I))
+    }
+
     pub fn reset(&mut self, bus: &mut dyn Bus) {
         self.a = 0;
         self.x = 0;
