@@ -46,8 +46,11 @@ pub struct Apu {
     frame_mode: bool,   // false = 4-step (mode 0), true = 5-step (mode 1)
     irq_inhibit: bool,
     frame_irq_flag: bool,
-    /// CPU cycles elapsed since the last $4017 write or sequence restart.
+    /// CPU cycles elapsed since the last frame counter reset.
     frame_cycles: u32,
+    /// Cycles remaining until a $4017-triggered frame counter reset takes effect.
+    /// Writing $4017 sets this to 3; each tick decrements it; at 0 frame_cycles resets.
+    frame_reset_delay: u8,
 }
 
 impl Apu {
@@ -62,6 +65,7 @@ impl Apu {
             irq_inhibit: false,
             frame_irq_flag: false,
             frame_cycles: 0,
+            frame_reset_delay: 0,
         }
     }
 
@@ -76,6 +80,15 @@ impl Apu {
 
     fn tick_one(&mut self) {
         self.frame_cycles += 1;
+
+        // $4017 write jitter: reset takes effect 3 CPU cycles after the write.
+        if self.frame_reset_delay > 0 {
+            self.frame_reset_delay -= 1;
+            if self.frame_reset_delay == 0 {
+                self.frame_cycles = 0;
+            }
+        }
+
         let c = self.frame_cycles;
 
         // Frame counter — fire events and reset at the end of each sequence.
@@ -198,12 +211,10 @@ impl Apu {
                 if self.irq_inhibit {
                     self.frame_irq_flag = false;
                 }
-                // Reset the frame counter.
-                // TODO: the reset actually takes effect 2–3 CPU cycles after the
-                // write (the "write jitter" tested by cpu_interrupts_v2). For now
-                // we apply it immediately.
-                self.frame_cycles = 0;
-                // In 5-step mode an immediate half/quarter-frame fires on write.
+                // On real hardware the frame counter reset takes effect 3–4 CPU
+                // cycles after the write (write jitter). Use 4 cycles.
+                self.frame_reset_delay = 4;
+                // 5-step mode: immediate quarter/half-frame fires at write time.
                 if self.frame_mode {
                     self.clock_quarter_frame();
                     self.clock_half_frame();

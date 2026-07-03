@@ -118,7 +118,13 @@ fn main() {
                         } else {
                             cpu.tick(&mut bus);
                             let delta = cpu.cycles - cycles_before;
-                            if bus.tick_ppu(delta) { cpu.nmi(); }
+                            let (extra, extra_nmi) = bus.take_ppu_preadvance();
+                            let mut got_nmi = extra_nmi;
+                            let remaining = delta.saturating_sub(extra as u64);
+                            for _ in 0..remaining {
+                                if bus.tick_ppu(1) { got_nmi = true; }
+                            }
+                            if got_nmi { cpu.nmi(); }
                             if bus.tick_apu(delta) { cpu.irq(); }
                             elapsed += delta;
                         }

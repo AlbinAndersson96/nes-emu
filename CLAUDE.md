@@ -67,7 +67,7 @@ tests/screenshots/
 
 ## Known gaps
 
-These are confirmed missing features tied to failing blargg ROM tests. The project currently passes **154 of 159** blargg CPU tests and **2 of 5** blargg PPU tests.
+These are confirmed missing features tied to failing blargg ROM tests. The project currently passes **154 of 159** blargg CPU tests and **3 of 5** blargg PPU tests.
 
 ### Fixed (previously listed here)
 
@@ -78,15 +78,33 @@ These are confirmed missing features tied to failing blargg ROM tests. The proje
 
 ### Remaining failures (all require sub-instruction cycle-accurate emulation)
 
-The 5 remaining failures (`cpu_interrupts_v2` tests 2–5 plus the combined suite) exercise interrupt-sequencing behaviour that depends on *which cycle within a multi-cycle instruction* a signal arrives. Fixing them requires executing each instruction one bus-cycle at a time ("tick-based" CPU core) rather than returning a bulk cycle count — a significant architectural refactor.
+The 5 remaining failures (`cpu_interrupts_v2` tests 2–5 plus the combined suite) exercise interrupt-sequencing behaviour that depends on *which cycle within a multi-cycle instruction* a signal arrives.
 
-- **`cpu_interrupts_v2/2-nmi_and_brk`** — NMI arriving during BRK hijacks the vector fetch to $FFFA/$FFFB while still pushing PC+2 and P (B clear) as if servicing BRK. Requires detecting "NMI at cycle N of BRK."
-- **`cpu_interrupts_v2/3-nmi_and_irq`** — NMI hijacks a pending IRQ service mid-sequence.
-- **`cpu_interrupts_v2/4-irq_and_dma`** — IRQ timing relative to OAM-DMA / DMC-DMA. On hardware the CPU is halted mid-instruction; the IRQ is polled at a specific cycle within the halt.
-- **`cpu_interrupts_v2/5-branch_delays_irq`** — A page-crossing branch (4 cycles) aborts its "page-fix" cycle when IRQ is pending at cycle 3, taking only 3 cycles and pushing the unfixed PC to the stack.
+- **`cpu_interrupts_v2/2-nmi_and_brk`** — the ROM's own `readme.txt` documents B=1 (not B=0) as
+  correct when NMI hijacks BRK (only the vector fetch is redirected; BRK's own P push, already
+  done by then, is untouched) — a previous version of this note had that backwards. Root cause
+  is about *interrupt-polling granularity*: real 6502 hardware samples interrupt lines going
+  into an instruction/micro-op's last cycle, using state from before that cycle begins, so an
+  edge arriving on the exact last cycle is invisible until one dispatch later than an edge on
+  an earlier cycle. A fix for the common case (deferred NMI-edge delivery in the test harness,
+  `src/tests/roms.rs`) is implemented and took this test from ~2/10 to 8-9/10 correct rows
+  (verified against the readme's expected table) with zero regressions elsewhere — see
+  `docs/cpu_interrupt_debug_log.md` for the full derivation and the one remaining known defect
+  (a single stray flag bit on the last two rows, tied to `pending_nmi` surviving past
+  `VectorFetchHi` into the next instruction).
+
+- **`cpu_interrupts_v2/3-nmi_and_irq`** — NMI hijacking an in-progress IRQ service sequence. The IRQ service already pushes P with B=0 (correct), and `VectorFetch` does check `pending_nmi` for hijack. The failure is more subtle: the ROM tests specific cycle offsets at which NMI arrives relative to the IRQ push sequence, and some offsets produce wrong P values or wrong handler dispatch. Root cause is likely that `pending_nmi` is moved from `nmi_pending` at the *start* of the tick that runs the micro-op — so NMI arriving in the APU window *between* two ticks only takes effect one tick later, causing off-by-one behaviour at some push-cycle boundaries.
+
+- **`cpu_interrupts_v2/4-irq_and_dma`** — During OAM-DMA, the run loop calls `bus.tick_dma()` and then `cpu.irq()` on every DMA cycle, but `cpu.irq()` only sets `irq_pending = true`. That flag is not consumed until the next `cpu.tick()` call, which does not happen while DMA is active. The result is that every IRQ that fires during DMA is indistinguishable to the CPU: they all appear to have arrived at the moment DMA ended. On real hardware the CPU samples the IRQ line at a specific DMA cycle, so the number of cycles between the IRQ signal and the start of the interrupt service depends on *when during the DMA* the signal was asserted. ROM output shows a `53 +N` table of per-offset IRQ latency measurements; values go wrong at `+4` onwards (first offset where the IRQ reaches the CPU one DMA cycle later than expected).
+
+- **`cpu_interrupts_v2/5-branch_delays_irq`** — A page-crossing branch should abort its T4 page-fix cycle when IRQ is pending at T3, taking only 3 cycles total and pushing the page-wrong PC. `BranchPageFix` already handles the case where `pending_irq` was set at opcode-fetch time. The remaining bug: `pending_irq` is only set in the opcode-fetch path (queue empty, IRQ visible before the branch opcode is read). If the APU fires during the branch's *RunInstruction* tick (which consumes T1+T2+T3 all at once), `cpu.irq()` is called after that tick completes with `delta=3`, but at that point the queue is non-empty so the irq-to-`pending_irq` promotion never happens. `BranchPageFix` then sees `pending_irq=false` and applies the page fix instead of aborting it. ROM output (`T+ CK PC` table): T+0 and T+1 are correct (IRQ was pending before opcode fetch → `pending_irq` set → abort works, PC=`$0E`); T+2 onwards are wrong (IRQ arrives during RunInstruction, page fix completes, PC=`$03`).
+
+- **`cpu_interrupts_v2` combined suite** — fails because the individual tests above fail.
 
 ### Failing PPU tests
 
 - **`ppu/sprite_ram`** — result code 7: *$4014 DMA copy should start at value in $2003 and wrap*. OAM DMA ignores the starting offset in $2003; it always copies from OAM byte 0 instead of wrapping around from the value in $2003.
-- **`ppu/vbl_clear_time`** — result code 3: *VBL flag cleared too late*. The VBL flag in $2002 is being cleared later than the ~2270 CPU clocks after NMI that hardware requires.
 - **`ppu/power_up_palette`** — result code 2: *Palette differs from table*. Power-up palette contents don't match the specific values on the test author's NES (this test is hardware-specific and may not be fixable in a general emulator).
+
+`ppu/vbl_clear_time` now passes (fixed as a side effect of the deferred NMI-edge-delivery fix
+described below — see `docs/cpu_interrupt_debug_log.md`).

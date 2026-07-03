@@ -31,6 +31,11 @@ pub struct Bus {
     oam_dma_byte_idx: u16,
     /// DMC DMA: counts down 4 cycles while the CPU is stalled for a sample fetch.
     dmc_dma_cycles_left: u8,
+    /// CPU cycles by which the PPU was pre-advanced during a $2002 read (to
+    /// simulate T4-read timing). Consumed by the run loop to avoid double-advancing.
+    ppu_preadvance_cycles: u32,
+    /// NMI that fired during a $2002 pre-advance; the run loop must deliver it.
+    ppu_preadvance_nmi: bool,
 }
 
 impl Bus {
@@ -47,6 +52,8 @@ impl Bus {
             oam_dma_page: 0,
             oam_dma_byte_idx: 0,
             dmc_dma_cycles_left: 0,
+            ppu_preadvance_cycles: 0,
+            ppu_preadvance_nmi: false,
         }
     }
 
@@ -83,6 +90,18 @@ impl Bus {
     pub fn insert_cartridge(&mut self, cartridge: Cartridge) {
         self.ppu.set_mirroring(cartridge.mirroring());
         self.cartridge = Some(cartridge);
+    }
+
+    /// Consume pre-advanced PPU cycles and any NMI that fired during a $2002 read.
+    /// Returns `(cycles_already_advanced, nmi_pending)`. The run loop must subtract
+    /// `cycles_already_advanced` from its post-tick `tick_ppu` call and deliver the
+    /// NMI if `nmi_pending` is true.
+    pub fn take_ppu_preadvance(&mut self) -> (u32, bool) {
+        let c = self.ppu_preadvance_cycles;
+        let n = self.ppu_preadvance_nmi;
+        self.ppu_preadvance_cycles = 0;
+        self.ppu_preadvance_nmi = false;
+        (c, n)
     }
 
     /// Tick the PPU by `cycles` CPU cycles. Returns true if an NMI should fire.
@@ -133,7 +152,26 @@ impl CpuBus for Bus {
             0x0000..=0x1FFF => self.ram[(addr & 0x07FF) as usize],
 
             // PPU registers + mirrors (every 8 bytes)
-            0x2000..=0x3FFF => self.ppu.read_register((addr & 0x0007) as u8, self.cartridge.as_ref()),
+            0x2000..=0x3FFF => {
+                let reg = (addr & 0x0007) as u8;
+                if reg == 2 {
+                    // $2002 is read at T4 on real hardware (3 CPU cycles after T1).
+                    // Pre-advance the PPU so the read sees the T4 state, not T1.
+                    // We advance 3 cycles to reach T4 start; an extra cycle accounts
+                    // for the read occurring at the trailing edge of T4 (PPU-side
+                    // sampling happens 1 dot into T4 on real hardware).
+                    // The run loop subtracts these cycles to avoid double-advancing.
+                    if let Some(ref cart) = self.cartridge {
+                        self.ppu.set_mirroring(cart.mirroring());
+                    }
+                    self.ppu.tick(3, self.cartridge.as_mut());
+                    if self.ppu.take_nmi() {
+                        self.ppu_preadvance_nmi = true;
+                    }
+                    self.ppu_preadvance_cycles = self.ppu_preadvance_cycles.saturating_add(3);
+                }
+                self.ppu.read_register(reg, self.cartridge.as_ref())
+            }
 
             // APU / I/O
             0x4000..=0x4015 => self.apu.read(addr),
