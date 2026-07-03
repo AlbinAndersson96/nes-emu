@@ -34,9 +34,58 @@ pub(crate) fn nes_to_rgba(frame: &[u8; 256 * 240], buf: &mut [u8]) {
     }
 }
 
+const PLACEHOLDER_TEXT: &str = "DROP .NES ROM HERE";
+const PLACEHOLDER_BG_INDEX: u8 = 0x0F; // black
+const PLACEHOLDER_FG_INDEX: u8 = 0x30; // white
+
+/// Rasterizes `PLACEHOLDER_TEXT` centered in a 256x240 palette-index buffer.
+/// Pure and window-independent so it can be unit tested directly.
+pub(crate) fn render_placeholder_frame(font: &fontdue::Font) -> [u8; 256 * 240] {
+    let mut frame = [PLACEHOLDER_BG_INDEX; 256 * 240];
+    let px_size = 16.0;
+
+    // First pass: rasterize each glyph and measure total width to center the line.
+    let mut glyphs: Vec<(fontdue::Metrics, Vec<u8>)> = Vec::with_capacity(PLACEHOLDER_TEXT.len());
+    let mut total_width = 0i32;
+    for ch in PLACEHOLDER_TEXT.chars() {
+        let (metrics, bitmap) = font.rasterize(ch, px_size);
+        total_width += metrics.advance_width.round() as i32;
+        glyphs.push((metrics, bitmap));
+    }
+
+    let start_x = (256 - total_width).max(0) / 2;
+    let baseline_y = 240 / 2;
+    let mut pen_x = start_x;
+
+    for (metrics, bitmap) in &glyphs {
+        let glyph_x = pen_x + metrics.xmin;
+        let glyph_y = baseline_y - metrics.ymin - metrics.height as i32;
+        for gy in 0..metrics.height {
+            for gx in 0..metrics.width {
+                let coverage = bitmap[gy * metrics.width + gx];
+                if coverage == 0 {
+                    continue;
+                }
+                let px = glyph_x + gx as i32;
+                let py = glyph_y + gy as i32;
+                if px < 0 || py < 0 || px >= 256 || py >= 240 {
+                    continue;
+                }
+                if coverage > 127 {
+                    frame[py as usize * 256 + px as usize] = PLACEHOLDER_FG_INDEX;
+                }
+            }
+        }
+        pen_x += metrics.advance_width.round() as i32;
+    }
+
+    frame
+}
+
 pub struct Renderer {
     window: Window,
     pixels: Pixels,
+    placeholder_frame: [u8; 256 * 240],
 }
 
 impl Renderer {
@@ -48,11 +97,21 @@ impl Renderer {
         let size = window.inner_size();
         let surface_texture = SurfaceTexture::new(size.width, size.height, &window);
         let pixels = Pixels::new(256, 240, surface_texture)?;
-        Ok(Self { window, pixels })
+        let font_bytes = include_bytes!("../assets/fonts/DejaVuSansMono.ttf") as &[u8];
+        let font = fontdue::Font::from_bytes(font_bytes, fontdue::FontSettings::default())
+            .expect("embedded font must parse");
+        let placeholder_frame = render_placeholder_frame(&font);
+        Ok(Self { window, pixels, placeholder_frame })
     }
 
     pub fn present(&mut self, frame: &[u8; 256 * 240]) -> Result<(), pixels::Error> {
         nes_to_rgba(frame, self.pixels.frame_mut());
+        self.pixels.render()
+    }
+
+    pub fn present_placeholder(&mut self) -> Result<(), pixels::Error> {
+        let frame = self.placeholder_frame;
+        nes_to_rgba(&frame, self.pixels.frame_mut());
         self.pixels.render()
     }
 
@@ -107,5 +166,25 @@ mod tests {
         nes_to_rgba(&frame, &mut buf);
         let (r, g, b) = NES_PALETTE[0x30];
         assert_eq!(&buf[last * 4..last * 4 + 4], &[r, g, b, 255]);
+    }
+
+    #[test]
+    fn placeholder_frame_draws_visible_text() {
+        let font_bytes = include_bytes!("../assets/fonts/DejaVuSansMono.ttf") as &[u8];
+        let font = fontdue::Font::from_bytes(font_bytes, fontdue::FontSettings::default())
+            .expect("embedded font must parse");
+        let frame = render_placeholder_frame(&font);
+        // Background is palette index 0x0F (black); text must paint at least
+        // some pixels to a different (lighter) index somewhere in the buffer.
+        assert!(frame.iter().any(|&p| p != 0x0F), "expected some non-background pixels from rasterized text");
+    }
+
+    #[test]
+    fn placeholder_frame_is_full_size() {
+        let font_bytes = include_bytes!("../assets/fonts/DejaVuSansMono.ttf") as &[u8];
+        let font = fontdue::Font::from_bytes(font_bytes, fontdue::FontSettings::default())
+            .expect("embedded font must parse");
+        let frame = render_placeholder_frame(&font);
+        assert_eq!(frame.len(), 256 * 240);
     }
 }
