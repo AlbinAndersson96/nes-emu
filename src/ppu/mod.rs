@@ -61,12 +61,20 @@ pub struct Ppu {
 
     // ── Sprite pipeline ──────────────────────────────────────────────────────
     secondary_oam: [u8; 32],            // up to 8 sprites for next scanline
-    sprite_count: usize,                // sprites found for next scanline (0–8)
+    sprite_count: usize,                // sprites loaded for the scanline THIS DOT is rendering
     sprite_shift_lo: [u8; 8],          // pattern plane 0 shift registers
     sprite_shift_hi: [u8; 8],          // pattern plane 1 shift registers
     sprite_attr: [u8; 8],              // attribute bytes for active sprites
     sprite_x: [u8; 8],                 // X counters for active sprites
-    sprite0_in_secondary: bool,        // sprite 0 was copied into secondary OAM
+    sprite0_in_secondary: bool,        // sprite 0 is among the sprites THIS DOT is rendering
+    // Evaluation (dots 65–256) writes into these instead of the render-facing
+    // fields above, which output_pixel() is still reading for dots 65–256 of
+    // the SAME scanline (rendering data prepared during the PREVIOUS
+    // scanline's evaluation). They're copied into the render-facing fields
+    // once evaluation finishes, at the start of the sprite-fetch window
+    // (dot 257) — see fetch_sprites().
+    sprite_eval_count: usize,
+    sprite0_eval: bool,
 
     // ── Framebuffer ──────────────────────────────────────────────────────────
     // 256 × 240 pixels, each an index into the NES master palette (0x00–0x3F).
@@ -121,6 +129,8 @@ impl Ppu {
             sprite_attr: [0; 8],
             sprite_x: [0; 8],
             sprite0_in_secondary: false,
+            sprite_eval_count: 0,
+            sprite0_eval: false,
             frame: Box::new([0u8; 256 * 240]),
             frame_ready: false,
         }
@@ -168,17 +178,22 @@ impl Ppu {
             _ => {}
         }
 
-        // ── Pixel output (visible scanlines, dots 1–256) ─────────────────────
-        if visible && self.dot >= 1 && self.dot <= 256 {
-            self.output_pixel();
-        }
-
         // ── Background shift register clock (dots 1–256, 321–336) ────────────
+        // Must run BEFORE pixel output below: a tile's pattern bit finishes
+        // its 8-dot walk from the low byte (where reload_bg_shifters() puts
+        // it) up to bit 15 (what the fine_x mux reads) on the very same dot
+        // the next tile reloads — this dot's shift is what lands it there.
+        // Reading the mux before shifting sees last dot's state, off by one.
         if render && is_render_scanline {
             match self.dot {
                 1..=256 | 321..=336 => self.shift_bg_shifters(),
                 _ => {}
             }
+        }
+
+        // ── Pixel output (visible scanlines, dots 1–256) ─────────────────────
+        if visible && self.dot >= 1 && self.dot <= 256 {
+            self.output_pixel();
         }
 
         // ── Background tile fetch (visible + pre-render, dots 1–256, 321–336) ─
@@ -189,13 +204,18 @@ impl Ppu {
             }
         }
 
-        // ── Sprite evaluation (visible scanlines) ────────────────────────────
-        if render && visible {
+        // ── Sprite evaluation (visible + pre-render scanlines) ───────────────
+        // Pre-render evaluates for scanline 0 of the upcoming frame — skip it
+        // and output_pixel()'s render-facing sprite_count/sprite0_in_secondary
+        // go a full scanline stale at the top of every frame, still holding
+        // whatever scanline 239 last evaluated (for the scanline that never
+        // gets rendered, scanline 240) instead of scanline 0's real sprites.
+        if render && is_render_scanline {
             self.evaluate_sprites();
         }
 
-        // ── Sprite fetch (visible scanlines, dots 257–320) ──────────────────
-        if render && visible {
+        // ── Sprite fetch (visible + pre-render scanlines, dots 257–320) ──────
+        if render && is_render_scanline {
             self.fetch_sprites(cart);
         }
 
@@ -356,16 +376,19 @@ impl Ppu {
 
     /// Evaluate sprites for the NEXT scanline; runs during dots 65–256 of visible scanlines.
     fn evaluate_sprites(&mut self) {
-        // Clear secondary OAM at dot 65 (after clearing cycle 1–64)
+        // Clear secondary OAM at dot 65 (after clearing cycle 1–64). Note this
+        // must NOT touch sprite_count/sprite0_in_secondary — output_pixel()
+        // is still reading those every dot through 256 to render sprites
+        // found during the PREVIOUS scanline's evaluation.
         if self.dot == 65 {
             self.secondary_oam = [0xFF; 32];
-            self.sprite_count = 0;
-            self.sprite0_in_secondary = false;
+            self.sprite_eval_count = 0;
+            self.sprite0_eval = false;
         }
         if self.dot < 65 || self.dot > 256 {
             return;
         }
-        if self.sprite_count >= 8 {
+        if self.sprite_eval_count >= 8 {
             // Already found 8 sprites; check overflow (simplified — no hardware bug)
             return;
         }
@@ -374,23 +397,33 @@ impl Ppu {
         if self.dot != 256 {
             return;
         }
-        let next_scanline = self.scanline + 1;
-        let height = self.sprite_height() as u8;
+        // Pre-render's "next scanline" wraps around to scanline 0 of the new
+        // frame, not 262 (which doesn't exist).
+        let next_scanline = if self.scanline == PRERENDER_SCANLINE { 0 } else { self.scanline + 1 };
+        let height = self.sprite_height() as i32;
         let mut n = 0usize;
-        while n < 64 && self.sprite_count < 8 {
+        while n < 64 && self.sprite_eval_count < 8 {
             let y = self.oam[n * 4];
-            let in_range = (next_scanline as u8).wrapping_sub(y) < height;
+            // OAM Y is the sprite's top row minus 1 (hardware delays sprite
+            // rendering by one scanline) — matches fetch_sprites()'s row calc,
+            // which already subtracts this same 1. Plain (non-wrapping)
+            // distance: a sprite with Y near 255 (a common "hide it"
+            // convention, since y+1 already exceeds every valid scanline)
+            // must never wrap around to become visible at the top of the
+            // screen — wrapping_sub would do that for small next_scanline.
+            let row = next_scanline as i32 - y as i32 - 1;
+            let in_range = (0..height).contains(&row);
             if in_range {
-                let dst = self.sprite_count * 4;
+                let dst = self.sprite_eval_count * 4;
                 self.secondary_oam[dst..dst + 4].copy_from_slice(&self.oam[n * 4..n * 4 + 4]);
                 if n == 0 {
-                    self.sprite0_in_secondary = true;
+                    self.sprite0_eval = true;
                 }
-                self.sprite_count += 1;
+                self.sprite_eval_count += 1;
             }
             n += 1;
         }
-        if n < 64 && self.sprite_count == 8 {
+        if n < 64 && self.sprite_eval_count == 8 {
             self.sprite_overflow = true;
         }
     }
@@ -399,6 +432,13 @@ impl Ppu {
     fn fetch_sprites(&mut self, cart: Option<&Cartridge>) {
         if self.dot < 257 || self.dot > 320 {
             return;
+        }
+        // Evaluation for this scanline finished at dot 256; hand its results
+        // off to the render-facing fields now, before output_pixel() needs
+        // them on the very next scanline's dot 1.
+        if self.dot == 257 {
+            self.sprite_count = self.sprite_eval_count;
+            self.sprite0_in_secondary = self.sprite0_eval;
         }
         let idx = ((self.dot - 257) / 8) as usize;
         if idx >= self.sprite_count {
@@ -478,11 +518,14 @@ impl Ppu {
         let (sp_pal, sp_col, sp_priority, sp_is_zero) = if sp_enabled && !sp_left_clip {
             let mut result = (0u8, 0u8, false, false);
             for i in 0..self.sprite_count {
-                let x_dist = (x as u8).wrapping_sub(self.sprite_x[i]);
-                if x_dist >= 8 {
+                // Plain (non-wrapping) distance: a sprite at X close to 255
+                // is clipped by the right edge of the screen, not wrapped
+                // around to reappear at x=0 — wrapping_sub would do that.
+                let x_dist = x as i32 - self.sprite_x[i] as i32;
+                if !(0..8).contains(&x_dist) {
                     continue;
                 }
-                let bit = 7 - x_dist;
+                let bit = 7 - x_dist as u8;
                 let lo = (self.sprite_shift_lo[i] >> bit) & 1;
                 let hi = (self.sprite_shift_hi[i] >> bit) & 1;
                 let col = (hi << 1) | lo;

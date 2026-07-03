@@ -3,6 +3,7 @@ mod cpu;
 mod ppu;
 mod ppu_roms;
 mod roms;
+mod sprite_hit_roms;
 
 use crate::cpu::Bus as CpuBus;
 
