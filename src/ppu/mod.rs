@@ -675,7 +675,8 @@ impl Ppu {
     }
 
     /// Write a single byte to OAM at offset `offset` (used by OAM DMA via $4014).
+    /// DMA starts at the current OAMADDR ($2003) and wraps mod 256.
     pub fn oam_dma_write(&mut self, offset: u8, data: u8) {
-        self.oam[offset as usize] = data;
+        self.oam[self.oam_addr.wrapping_add(offset) as usize] = data;
     }
 }

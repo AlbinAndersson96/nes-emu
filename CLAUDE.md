@@ -60,7 +60,8 @@ cargo fmt            # format
 ```
 tests/roms/
   cpu/                      # blargg CPU test ROMs (instr_test-v5, instr_misc, instr_timing, cpu_interrupts_v2)
-  ppu/                      # blargg PPU test ROMs (palette_ram, sprite_ram, vbl_clear_time, vram_access, power_up_palette)
+  ppu/
+    blargg_ppu_tests_2005.09.15b/   # blargg PPU test ROMs (palette_ram, sprite_ram, vbl_clear_time, vram_access, power_up_palette) + source/ (assembly sources)
 tests/screenshots/
   ppu/
     output/                 # generated each test run (gitignored)
@@ -69,7 +70,7 @@ tests/screenshots/
 
 ## Known gaps
 
-These are confirmed missing features tied to failing blargg ROM tests. The project currently passes **154 of 159** blargg CPU tests and **3 of 5** blargg PPU tests.
+These are confirmed missing features tied to failing blargg ROM tests. The project currently passes **154 of 159** blargg CPU tests and **4 of 5** blargg PPU tests.
 
 ### Fixed (previously listed here)
 
@@ -77,6 +78,7 @@ These are confirmed missing features tied to failing blargg ROM tests. The proje
 2. **RMW and addressing-mode dummy/spurious reads** — Fixed by adding observable reads to `addr_absolute_x`, `addr_absolute_y`, `addr_indirect_x`, `addr_indirect_y` and their store/RMW variants. `instr_misc/03-dummy_reads` and `04-dummy_reads_apu` now pass.
 3. **`$2002` read side effects** — Already implemented correctly in the PPU.
 4. **DMC DMA stall** — 4-cycle CPU stall implemented in `Bus::tick_dma()`; byte is fetched and supplied to the DMC on the final stall cycle. `instr_misc/04-dummy_reads_apu` passes.
+5. **OAM DMA start offset/wrap** — `Ppu::oam_dma_write` now indexes OAM at `oam_addr.wrapping_add(offset)` instead of raw `offset`, so the DMA copy starts at the value in `$2003` and wraps mod 256 (and leaves `$2003` itself intact). `ppu/sprite_ram` now passes.
 
 ### Remaining failures (all require sub-instruction cycle-accurate emulation)
 
@@ -114,7 +116,6 @@ The 5 remaining failures (`cpu_interrupts_v2` tests 2–5 plus the combined suit
 
 ### Failing PPU tests
 
-- **`ppu/sprite_ram`** — result code 7: *$4014 DMA copy should start at value in $2003 and wrap*. OAM DMA ignores the starting offset in $2003; it always copies from OAM byte 0 instead of wrapping around from the value in $2003.
 - **`ppu/power_up_palette`** — result code 2: *Palette differs from table*. Power-up palette contents don't match the specific values on the test author's NES (this test is hardware-specific and may not be fixable in a general emulator).
 
 `ppu/vbl_clear_time` now passes (fixed as a side effect of the deferred NMI-edge-delivery fix —
