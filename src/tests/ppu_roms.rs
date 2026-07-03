@@ -14,9 +14,11 @@ struct RomOutput {
     result_code: u8,
 }
 
+const ROM_DIR: &str = "tests/roms/ppu/blargg_ppu_tests_2005.09.15b";
+
 fn run_ppu_rom(filename: &str) -> RomOutput {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/roms")
+        .join(ROM_DIR)
         .join(filename);
     let data = std::fs::read(&path)
         .unwrap_or_else(|_| panic!("ROM not found: {}", path.display()));
@@ -137,7 +139,7 @@ fn verify(name: &str, filename: &str, meanings: &[&str]) {
 
 #[test]
 fn palette_ram() {
-    verify("palette_ram", "ppu/palette_ram.nes", &[
+    verify("palette_ram", "palette_ram.nes", &[
         "Palette read shouldn't be buffered like other VRAM",
         "Palette write/read doesn't work",
         "Palette should be mirrored within $3f00-$3fff",
@@ -148,14 +150,14 @@ fn palette_ram() {
 
 #[test]
 fn power_up_palette() {
-    verify("power_up_palette", "ppu/power_up_palette.nes", &[
+    verify("power_up_palette", "power_up_palette.nes", &[
         "Palette differs from table",
     ]);
 }
 
 #[test]
 fn sprite_ram() {
-    verify("sprite_ram", "ppu/sprite_ram.nes", &[
+    verify("sprite_ram", "sprite_ram.nes", &[
         "Basic read/write doesn't work",
         "Address should increment on $2004 write",
         "Address should not increment on $2004 read",
@@ -168,7 +170,7 @@ fn sprite_ram() {
 
 #[test]
 fn vbl_clear_time() {
-    verify("vbl_clear_time", "ppu/vbl_clear_time.nes", &[
+    verify("vbl_clear_time", "vbl_clear_time.nes", &[
         "VBL flag cleared too soon",
         "VBL flag cleared too late",
     ]);
@@ -176,7 +178,7 @@ fn vbl_clear_time() {
 
 #[test]
 fn vram_access() {
-    verify("vram_access", "ppu/vram_access.nes", &[
+    verify("vram_access", "vram_access.nes", &[
         "VRAM reads should be delayed in a buffer",
         "Basic write/read doesn't work",
         "Read buffer shouldn't be affected by VRAM write",
