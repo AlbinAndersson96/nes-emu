@@ -1,3 +1,4 @@
+mod app;
 mod apu;
 mod bus;
 mod cartridge;
