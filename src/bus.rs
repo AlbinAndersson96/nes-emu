@@ -167,19 +167,34 @@ impl CpuBus for Bus {
                 let reg = (addr & 0x0007) as u8;
                 if reg == 2 {
                     // $2002 is read at T4 on real hardware (3 CPU cycles after T1).
-                    // Pre-advance the PPU so the read sees the T4 state, not T1.
-                    // We advance 3 cycles to reach T4 start; an extra cycle accounts
-                    // for the read occurring at the trailing edge of T4 (PPU-side
-                    // sampling happens 1 dot into T4 on real hardware).
-                    // The run loop subtracts these cycles to avoid double-advancing.
+                    // Pre-advance the PPU so the read sees the T4 state, not T1:
+                    // 8 dots before sampling and 1 after, so the value is captured
+                    // ON the read cycle's final dot rather than one dot past it,
+                    // while the 9-dot total keeps PPU-CPU alignment from drifting.
+                    // The run loop subtracts these 3 cycles to avoid
+                    // double-advancing. The sampling dot is a sub-cycle alignment
+                    // constant: sync_vbl dot-locks blargg test code to VBlank
+                    // onset through this read, and because a frame is a
+                    // non-integer 29780⅔ CPU cycles, a one-dot sampling error
+                    // shows up only after multi-frame delays (test 3 of
+                    // cpu_interrupts_v2 spans 2 frames; its whole table was one
+                    // row early at the old one-dot-later sampling point, while
+                    // 1-frame tests were unaffected). See
+                    // docs/investigations/cpu_interrupt_debug_log.md (2026-07-04).
                     if let Some(ref cart) = self.cartridge {
                         self.ppu.set_mirroring(cart.mirroring());
                     }
-                    self.ppu.tick(3, self.cartridge.as_mut());
+                    self.ppu.tick_dots(8, self.cartridge.as_mut());
                     if self.ppu.take_nmi() {
                         self.ppu_preadvance_nmi = true;
                     }
                     self.ppu_preadvance_cycles = self.ppu_preadvance_cycles.saturating_add(3);
+                    let value = self.ppu.read_register(reg, self.cartridge.as_ref());
+                    self.ppu.tick_dots(1, self.cartridge.as_mut());
+                    if self.ppu.take_nmi() {
+                        self.ppu_preadvance_nmi = true;
+                    }
+                    return value;
                 }
                 self.ppu.read_register(reg, self.cartridge.as_ref())
             }
@@ -204,8 +219,27 @@ impl CpuBus for Bus {
 
             // PPU registers + mirrors
             0x2000..=0x3FFF => {
-                self.ppu
-                    .write_register((addr & 0x0007) as u8, data, self.cartridge.as_mut())
+                let reg = (addr & 0x0007) as u8;
+                if reg == 0 {
+                    // $2000 is written on the store's 4th/last cycle on real
+                    // hardware, but this write is applied while the PPU still
+                    // sits at the start of the instruction. Pre-advance the PPU
+                    // 3 cycles (same mechanism as the $2002 read) so the write
+                    // — in particular the NMI-enable mid-VBlank instant-fire
+                    // quirk — takes effect at the correct dot. The instant-fire
+                    // NMI edge then lands on the instruction's last cycle, where
+                    // the run loop's deferred-edge rule correctly keeps it from
+                    // affecting the very next dispatch.
+                    if let Some(ref cart) = self.cartridge {
+                        self.ppu.set_mirroring(cart.mirroring());
+                    }
+                    self.ppu.tick(3, self.cartridge.as_mut());
+                    if self.ppu.take_nmi() {
+                        self.ppu_preadvance_nmi = true;
+                    }
+                    self.ppu_preadvance_cycles = self.ppu_preadvance_cycles.saturating_add(3);
+                }
+                self.ppu.write_register(reg, data, self.cartridge.as_mut())
             }
 
             // APU registers

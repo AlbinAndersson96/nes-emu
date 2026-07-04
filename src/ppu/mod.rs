@@ -144,9 +144,15 @@ impl Ppu {
 
     /// Advance PPU by `cpu_cycles` CPU cycles (= 3× PPU dots each).
     pub fn tick(&mut self, cpu_cycles: u64, cart: Option<&mut Cartridge>) {
+        self.tick_dots(cpu_cycles * 3, cart);
+    }
+
+    /// Advance PPU by raw dots. Used by the bus's $2002-read pre-advance to
+    /// position the sampling point within (not just at the end of) the read
+    /// cycle; callers must keep whole-instruction totals a multiple of 3 so
+    /// the PPU-CPU dot alignment never drifts.
+    pub fn tick_dots(&mut self, dots: u64, cart: Option<&mut Cartridge>) {
         // Split borrow: we need &mut self and &Cartridge simultaneously.
-        // Collect dots first, then clock them.
-        let dots = cpu_cycles * 3;
         // Safety: we pass cart as Option<&Cartridge> (shared ref) to helpers
         // that only read it; ppu_write can take &mut Cartridge but that's CHR-RAM
         // which happens only via register writes, not during tick.

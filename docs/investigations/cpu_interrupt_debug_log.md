@@ -1301,3 +1301,61 @@ consistent with alternating 513/514 because the edge condition moves in steps of
 DMA-adjacent tests unaffected). Remaining in scope: tests 3, 5, combined.
 
 ---
+
+### 2026-07-04 (same session) — test 3 (nmi_and_irq) FIXED AND PASSING: $2002 read sampling dot moved one dot earlier (onto the read cycle's last dot); previous sessions' mechanism model corrected
+
+**First, corrections to earlier entries, from finally reading `3-nmi_and_irq.s` properly:**
+- Test 3's NMI is a **real VBL edge**, not the `$2000` mid-VBlank instant-fire quirk (the
+  `sta PPUCTRL` arm lands ~80 cycles *before* the second VBL onset after `sync_vbl`; the
+  earlier "arm NMI (relies on the mid-VBlank instant-fire quirk)" reading of the disassembly
+  was wrong).
+- Rows 0-9 show `$1D=00` not because of hijack subtleties but because the NMI handler's
+  `bit SNDCHN` **acks the APU frame IRQ** — after any NMI-first row, the IRQ line drops
+  before the IRQ can ever be dispatched.
+- The readme's rows 0-2 boundaries (`23→21→21→20`) are therefore governed purely by
+  **NMI-vs-code** position (which instruction boundary the edge precedes), not by any
+  NMI-vs-IRQ arbitration. Rows 3-9 (`20`) are NMI preempting the NOP or hijacking the IRQ
+  dispatch that always begins there ("IRQ always occurs here" — at the NOP, not at
+  `LDA #1`); either way the pushed P is `$20`. Rows 10-11 (`25` / `$1D=20`) are the IRQ
+  handler winning, executing its first instruction `sec` (this needs the
+  interrupt-sequences-don't-poll rule fixed earlier today!), then NMI preempting the second
+  instruction. The "confirmed contradiction" recorded by previous sessions dissolves
+  completely under this reading — no exotic mid-dispatch NMI takeover semantics needed.
+
+**The residual defect after the `frame_reset_delay=7` fix:** every row exactly one cycle
+early (our table = readme's shifted up one row). Ruled out first: PPU-CPU power-up dot
+alignment (swept the start position by ±1-2 dots via `debug_set_position` — output
+byte-identical, because `sync_vbl` dot-locks the test code to VBL onset each row and
+absorbs any static phase shift; also, `frame_reset_delay=8`/parity stories can't work
+because rows 0-2 don't involve IRQ at all, and the $4017 write parity provably alternates
+row-to-row in this test while the readme table is smooth).
+
+**Root cause: the dot within the $2002 read cycle at which our emulator samples PPU state.**
+The old pre-advance sampled at instruction-start +12 dots — one dot *past* the read cycle
+(cycle 4 spans dots +9..+11). `sync_vbl` locks code position to VBL onset *through this
+read*, so a one-dot sampling error shifts the code lock by one dot. A frame is a
+non-integer 29780⅔ CPU cycles, so that one dot only crosses a CPU-cycle boundary after
+multi-frame accumulation: test 2 (1 frame from sync to its edge) was unaffected; test 3
+(2 frames) came out exactly one cycle off. This explains the previously-baffling "test 2
+exact, test 3 uniformly 1 late" split with one constant.
+
+**Change (`src/bus.rs` + new `Ppu::tick_dots`):** the $2002 pre-advance now ticks 8 dots,
+samples the register, then ticks the 9th dot — value captured ON the read cycle's final dot,
+total still 9 dots so PPU-CPU alignment never drifts. (NMI edges from both segments feed
+`ppu_preadvance_nmi` as before.)
+
+**Result: `cpu_interrupts_v2/3-nmi_and_irq` PASSES — table matches the readme exactly.**
+Full `cargo test`: **180 passed / 6 failed, zero regressions** — `vbl_clear_time` (the most
+$2002-timing-sensitive previously-passing test) still passes, tests 1/2/4 still pass.
+Re-ran the ignored diagnostics: `verify_sync_vbl_contract` holds at every starting phase;
+`sweep_single_2002_read`'s observable boundary moved 82171→82172, exactly one dot, as
+predicted. Also kept from this session's test-3 work: a `$2000` write pre-advance in
+`src/bus.rs` (writes apply at the store's last cycle, mirroring the $2002 read mechanism) —
+tested no-effect on all current tests (test 3's NMI turned out not to be instant-fire) but
+mechanistically correct and harmless; and the earlier PPU-alignment sweep tooling note that
+`debug_set_position` shifts ARE effective (verified) — the null result was real
+self-calibration by `sync_vbl`, not a broken knob.
+
+Remaining in scope: test 5 (`branch_delays_irq`) and the combined suite.
+
+---
