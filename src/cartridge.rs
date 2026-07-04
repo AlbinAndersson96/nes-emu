@@ -135,9 +135,13 @@ trait Mapper {
     fn prg_offset(&self, rom_len: usize, addr: u16) -> usize;
     fn write_prg(&mut self, addr: u16, data: u8);
     /// CHR address → byte offset into CHR-ROM. Default: identity (no banking).
-    fn chr_offset(&self, addr: u16) -> usize { (addr & 0x1FFF) as usize }
+    fn chr_offset(&self, addr: u16) -> usize {
+        (addr & 0x1FFF) as usize
+    }
     /// Dynamic mirroring override. Returns None to use the header's mirroring value.
-    fn mirroring(&self) -> Option<Mirroring> { None }
+    fn mirroring(&self) -> Option<Mirroring> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -264,7 +268,7 @@ impl Mapper for Mmc1 {
                 0x8000..=0x9FFF => self.control = value,
                 0xA000..=0xBFFF => self.chr_bank_0 = value,
                 0xC000..=0xDFFF => self.chr_bank_1 = value,
-                _ =>               self.prg_bank = value,
+                _ => self.prg_bank = value,
             }
         }
     }

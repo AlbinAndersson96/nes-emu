@@ -18,21 +18,21 @@ use triangle::TriangleChannel;
 /// The 4-step mode (MODE0) fires the IRQ flag on cycles 29828, 29829, AND 29830,
 /// which matches hardware behaviour (three consecutive IRQ assertions per frame).
 const MODE0: [(u32, bool, bool, bool, bool); 6] = [
-    (7_457,  true,  false, false, false),
-    (14_913, true,  true,  false, false),
-    (22_371, true,  false, false, false),
-    (29_828, false, false, true,  false), // IRQ (cycle before step 4)
-    (29_829, true,  true,  true,  false), // Q+H+IRQ (step 4)
-    (29_830, false, false, true,  true),  // IRQ + sequence restart
+    (7_457, true, false, false, false),
+    (14_913, true, true, false, false),
+    (22_371, true, false, false, false),
+    (29_828, false, false, true, false), // IRQ (cycle before step 4)
+    (29_829, true, true, true, false),   // Q+H+IRQ (step 4)
+    (29_830, false, false, true, true),  // IRQ + sequence restart
 ];
 
 const MODE1: [(u32, bool, bool, bool, bool); 6] = [
-    (7_457,  true,  false, false, false),
-    (14_913, true,  true,  false, false),
-    (22_371, true,  false, false, false),
+    (7_457, true, false, false, false),
+    (14_913, true, true, false, false),
+    (22_371, true, false, false, false),
     (29_829, false, false, false, false), // silent step (no IRQ, no reset)
-    (37_281, true,  true,  false, false),
-    (37_282, false, false, false, true),  // sequence restart
+    (37_281, true, true, false, false),
+    (37_282, false, false, false, true), // sequence restart
 ];
 
 pub struct Apu {
@@ -43,7 +43,7 @@ pub struct Apu {
     pub dmc: DmcChannel,
 
     // Frame counter
-    frame_mode: bool,   // false = 4-step (mode 0), true = 5-step (mode 1)
+    frame_mode: bool, // false = 4-step (mode 0), true = 5-step (mode 1)
     irq_inhibit: bool,
     frame_irq_flag: bool,
     /// CPU cycles elapsed since the last frame counter reset.
@@ -92,8 +92,7 @@ impl Apu {
         let c = self.frame_cycles;
 
         // Frame counter — fire events and reset at the end of each sequence.
-        let steps: &[(u32, bool, bool, bool, bool)] =
-            if self.frame_mode { &MODE1 } else { &MODE0 };
+        let steps: &[(u32, bool, bool, bool, bool)] = if self.frame_mode { &MODE1 } else { &MODE0 };
 
         for &(at, quarter, half, irq, reset) in steps {
             if c == at {
@@ -165,13 +164,27 @@ impl Apu {
 
     fn status_byte(&self) -> u8 {
         let mut s = 0u8;
-        if self.pulse1.length_active()   { s |= 0x01; }
-        if self.pulse2.length_active()   { s |= 0x02; }
-        if self.triangle.length_active() { s |= 0x04; }
-        if self.noise.length_active()    { s |= 0x08; }
-        if self.dmc.active()             { s |= 0x10; }
-        if self.frame_irq_flag           { s |= 0x40; }
-        if self.dmc.irq_flag             { s |= 0x80; }
+        if self.pulse1.length_active() {
+            s |= 0x01;
+        }
+        if self.pulse2.length_active() {
+            s |= 0x02;
+        }
+        if self.triangle.length_active() {
+            s |= 0x04;
+        }
+        if self.noise.length_active() {
+            s |= 0x08;
+        }
+        if self.dmc.active() {
+            s |= 0x10;
+        }
+        if self.frame_irq_flag {
+            s |= 0x40;
+        }
+        if self.dmc.irq_flag {
+            s |= 0x80;
+        }
         s
     }
 
@@ -252,11 +265,11 @@ impl Apu {
     ///
     /// Returns 0.0 until the channels are fully implemented.
     pub fn output(&self) -> f32 {
-        let p1    = f32::from(self.pulse1.output());
-        let p2    = f32::from(self.pulse2.output());
-        let tri   = f32::from(self.triangle.output());
+        let p1 = f32::from(self.pulse1.output());
+        let p2 = f32::from(self.pulse2.output());
+        let tri = f32::from(self.triangle.output());
         let noise = f32::from(self.noise.output());
-        let dmc   = f32::from(self.dmc.output());
+        let dmc = f32::from(self.dmc.output());
 
         let pulse_out = if p1 + p2 > 0.0 {
             95.88 / (8128.0 / (p1 + p2) + 100.0)

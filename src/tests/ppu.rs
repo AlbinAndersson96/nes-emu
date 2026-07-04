@@ -1,5 +1,5 @@
-use crate::ppu::Ppu;
 use crate::cartridge::Mirroring;
+use crate::ppu::Ppu;
 
 // Helper: tick the PPU by N CPU cycles (no cartridge)
 fn tick(ppu: &mut Ppu, cpu_cycles: u64) {
@@ -36,11 +36,19 @@ fn vblank_set_at_scanline_241_dot_1() {
     // At n = 27395 the state is (241, 4) and vblank IS set.
     tick(&mut ppu, 27394);
     let status_before = ppu.read_register(2, None);
-    assert_eq!(status_before & 0x80, 0, "VBlank should not be set before dot 1 is processed");
+    assert_eq!(
+        status_before & 0x80,
+        0,
+        "VBlank should not be set before dot 1 is processed"
+    );
 
     tick(&mut ppu, 1); // 27395 total cycles: processes (241,1)(241,2)(241,3), sets VBlank
     let status_after = ppu.read_register(2, None);
-    assert_eq!(status_after & 0x80, 0x80, "VBlank should be set after scanline 241 dot 1");
+    assert_eq!(
+        status_after & 0x80,
+        0x80,
+        "VBlank should be set after scanline 241 dot 1"
+    );
 }
 
 #[test]
@@ -60,7 +68,11 @@ fn vblank_cleared_at_prerender_scanline() {
     tick(&mut ppu, 6820 / 3 + 1);
     // After pre-render clears VBlank, read_register(2) bit 7 should be 0
     let status = ppu.read_register(2, None);
-    assert_eq!(status & 0x80, 0, "VBlank should be cleared at pre-render scanline");
+    assert_eq!(
+        status & 0x80,
+        0,
+        "VBlank should be cleared at pre-render scanline"
+    );
 }
 
 // ── NMI generation ───────────────────────────────────────────────────────────
@@ -71,7 +83,10 @@ fn nmi_fires_when_ctrl_nmi_set_and_vblank_starts() {
     ppu.write_register(0, 0x80, None); // NMI enable
     tick_to(&mut ppu, 241, 1);
     tick(&mut ppu, 1);
-    assert!(ppu.take_nmi(), "NMI should fire at VBlank with NMI enable set");
+    assert!(
+        ppu.take_nmi(),
+        "NMI should fire at VBlank with NMI enable set"
+    );
 }
 
 #[test]
@@ -80,7 +95,10 @@ fn nmi_suppressed_when_ctrl_nmi_clear() {
     // NMI bit NOT set in PPUCTRL
     tick_to(&mut ppu, 241, 1);
     tick(&mut ppu, 1);
-    assert!(!ppu.take_nmi(), "NMI must not fire when NMI enable bit is clear");
+    assert!(
+        !ppu.take_nmi(),
+        "NMI must not fire when NMI enable bit is clear"
+    );
 }
 
 #[test]
@@ -92,7 +110,10 @@ fn enabling_nmi_mid_vblank_fires_immediately() {
     assert!(!ppu.take_nmi(), "NMI must be clear before we enable it");
     // Now enable NMI while still in VBlank
     ppu.write_register(0, 0x80, None);
-    assert!(ppu.take_nmi(), "Enabling NMI mid-VBlank should fire NMI immediately");
+    assert!(
+        ppu.take_nmi(),
+        "Enabling NMI mid-VBlank should fire NMI immediately"
+    );
 }
 
 // ── $2002 side effects ───────────────────────────────────────────────────────
@@ -126,7 +147,10 @@ fn read_status_clears_write_toggle() {
     ppu.write_register(6, 0x00, None);
     let _ = ppu.read_register(7, None); // discard buffer
     let val = ppu.read_register(7, None);
-    assert_eq!(val, 0xAB, "PPUADDR after $2002 read should address $2100 correctly");
+    assert_eq!(
+        val, 0xAB,
+        "PPUADDR after $2002 read should address $2100 correctly"
+    );
 }
 
 #[test]
@@ -199,7 +223,10 @@ fn ppudata_read_is_buffered_for_nametable() {
     ppu.write_register(6, 0x00, None);
     // First read returns stale buffer (0), not 0x42
     let first = ppu.read_register(7, None);
-    assert_eq!(first, 0x00, "first PPUDATA read from VRAM must return old buffer");
+    assert_eq!(
+        first, 0x00,
+        "first PPUDATA read from VRAM must return old buffer"
+    );
     // Second read returns the value
     let second = ppu.read_register(7, None);
     assert_eq!(second, 0x42);
@@ -319,7 +346,10 @@ fn horizontal_mirroring_nt0_eq_nt1() {
     ppu.write_register(6, 0x10, None);
     let _ = ppu.read_register(7, None);
     let val = ppu.read_register(7, None);
-    assert_eq!(val, 0xAA, "NT0 and NT1 must share bank in horizontal mirroring");
+    assert_eq!(
+        val, 0xAA,
+        "NT0 and NT1 must share bank in horizontal mirroring"
+    );
 }
 
 #[test]
@@ -335,7 +365,10 @@ fn horizontal_mirroring_nt2_eq_nt3() {
     ppu.write_register(6, 0x05, None);
     let _ = ppu.read_register(7, None);
     let val = ppu.read_register(7, None);
-    assert_eq!(val, 0xBB, "NT2 and NT3 must share bank in horizontal mirroring");
+    assert_eq!(
+        val, 0xBB,
+        "NT2 and NT3 must share bank in horizontal mirroring"
+    );
 }
 
 #[test]
@@ -358,7 +391,10 @@ fn horizontal_mirroring_nt0_ne_nt2() {
     ppu.write_register(6, 0x00, None);
     let _ = ppu.read_register(7, None);
     let nt2 = ppu.read_register(7, None);
-    assert_ne!(nt0, nt2, "NT0 and NT2 must be different banks in horizontal mirroring");
+    assert_ne!(
+        nt0, nt2,
+        "NT0 and NT2 must be different banks in horizontal mirroring"
+    );
 }
 
 #[test]
@@ -373,7 +409,10 @@ fn vertical_mirroring_nt0_eq_nt2() {
     ppu.write_register(6, 0x20, None);
     let _ = ppu.read_register(7, None);
     let val = ppu.read_register(7, None);
-    assert_eq!(val, 0xCC, "NT0 and NT2 must share bank in vertical mirroring");
+    assert_eq!(
+        val, 0xCC,
+        "NT0 and NT2 must share bank in vertical mirroring"
+    );
 }
 
 #[test]
@@ -387,7 +426,10 @@ fn vertical_mirroring_nt1_eq_nt3() {
     ppu.write_register(6, 0x00, None);
     let _ = ppu.read_register(7, None);
     let val = ppu.read_register(7, None);
-    assert_eq!(val, 0xDD, "NT1 and NT3 must share bank in vertical mirroring");
+    assert_eq!(
+        val, 0xDD,
+        "NT1 and NT3 must share bank in vertical mirroring"
+    );
 }
 
 // ── Sprite evaluation ────────────────────────────────────────────────────────
@@ -417,15 +459,19 @@ fn sprite_overflow_flag_set_when_more_than_8() {
     ppu.write_register(1, 0x18, None);
     // Place 9 sprites all at Y=10
     for i in 0..9u8 {
-        ppu.oam_dma_write(i * 4,     10); // Y
-        ppu.oam_dma_write(i * 4 + 1, i);  // tile
-        ppu.oam_dma_write(i * 4 + 2, 0);  // attr
+        ppu.oam_dma_write(i * 4, 10); // Y
+        ppu.oam_dma_write(i * 4 + 1, i); // tile
+        ppu.oam_dma_write(i * 4 + 2, 0); // attr
         ppu.oam_dma_write(i * 4 + 3, i * 8); // X
     }
     tick_to(&mut ppu, 10, 256);
     tick(&mut ppu, 1);
     let status = ppu.read_register(2, None);
-    assert_eq!(status & 0x20, 0x20, "sprite overflow flag should be set with >8 sprites");
+    assert_eq!(
+        status & 0x20,
+        0x20,
+        "sprite overflow flag should be set with >8 sprites"
+    );
 }
 
 // ── frame_ready ──────────────────────────────────────────────────────────────
@@ -435,7 +481,10 @@ fn frame_ready_set_after_scanline_239() {
     let mut ppu = Ppu::new();
     tick_to(&mut ppu, 239, 256);
     tick(&mut ppu, 1);
-    assert!(ppu.frame_ready, "frame_ready must be set after scanline 239 dot 256");
+    assert!(
+        ppu.frame_ready,
+        "frame_ready must be set after scanline 239 dot 256"
+    );
 }
 
 #[test]
@@ -463,7 +512,10 @@ fn greyscale_mode_masks_palette_to_0x30() {
     tick_to(&mut ppu, 1, 1);
     tick(&mut ppu, 1);
     // Pixel (0,0) should be backdrop = 0x1F masked to 0x10
-    assert_eq!(ppu.frame[0], 0x10, "greyscale should mask colour to bits [5:4]");
+    assert_eq!(
+        ppu.frame[0], 0x10,
+        "greyscale should mask colour to bits [5:4]"
+    );
 }
 
 // ── Coarse-X wrap ────────────────────────────────────────────────────────────

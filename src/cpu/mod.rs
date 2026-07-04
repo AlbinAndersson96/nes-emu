@@ -58,6 +58,15 @@ pub struct Cpu {
     /// during the branch's RunInstruction, it is deferred until after the
     /// NEXT instruction executes. This flag marks that deferral window.
     pub(in crate::cpu) branch_delay_irq: bool,
+    /// Set by VectorFetchHi when an interrupt service sequence completes.
+    /// Interrupt sequences do not poll the interrupt lines, so the handler's
+    /// first instruction always executes before another interrupt can be
+    /// serviced (nesdev CPU_interrupts: "The interrupt sequences themselves
+    /// do not perform interrupt polling, meaning at least one instruction
+    /// from the interrupt handler will execute before another interrupt is
+    /// serviced"). Suppresses the pending_nmi/IRQ dispatch checks for exactly
+    /// one queue-empty dispatch; the pending flags themselves survive.
+    pub(in crate::cpu) interrupt_poll_suppressed: bool,
 }
 
 // P register flag masks
@@ -94,6 +103,7 @@ impl Cpu {
             branch_target_hi: 0,
             vector_base: 0,
             branch_delay_irq: false,
+            interrupt_poll_suppressed: false,
         }
     }
 
@@ -117,7 +127,12 @@ impl Cpu {
     /// (irq_pending, pending_irq, irq_inhibit_next, flag(FLAG_I)).
     #[cfg(test)]
     pub(crate) fn debug_irq_state(&self) -> (bool, bool, bool, bool) {
-        (self.irq_pending, self.pending_irq, self.irq_inhibit_next, self.flag(FLAG_I))
+        (
+            self.irq_pending,
+            self.pending_irq,
+            self.irq_inhibit_next,
+            self.flag(FLAG_I),
+        )
     }
 
     pub fn reset(&mut self, bus: &mut dyn Bus) {
@@ -156,11 +171,20 @@ impl Cpu {
         }
 
         if self.queue_len == 0 {
+            // If an interrupt sequence just completed (VectorFetchHi last tick),
+            // skip interrupt servicing for this one dispatch: the handler's first
+            // instruction always executes. Pending flags are left intact so the
+            // interrupt fires at the NEXT dispatch instead.
+            let poll_suppressed = self.interrupt_poll_suppressed;
+            self.interrupt_poll_suppressed = false;
+
             // NMI has highest priority. Service it directly (no instruction executes).
-            if self.pending_nmi {
+            if self.pending_nmi && !poll_suppressed {
                 self.pending_nmi = false;
-                let _ = bus.read(self.pc); self.cycles += 1; // T1 dummy
-                let _ = bus.read(self.pc); self.cycles += 1; // T2 dummy
+                let _ = bus.read(self.pc);
+                self.cycles += 1; // T1 dummy
+                let _ = bus.read(self.pc);
+                self.cycles += 1; // T2 dummy
                 let p = (self.p & !FLAG_B) | FLAG_U;
                 self.queue_interrupt_sequence(0xFFFA, p);
                 return;
@@ -200,8 +224,11 @@ impl Cpu {
             let opcode = self.fetch(bus);
             self.cycles += 1; // T1: opcode fetch cycle
 
-            if !inhibit && irq && !self.flag(FLAG_I) {
-                if matches!(opcode, 0x10 | 0x30 | 0x50 | 0x70 | 0x90 | 0xB0 | 0xD0 | 0xF0) {
+            if !inhibit && irq && !poll_suppressed && !self.flag(FLAG_I) {
+                if matches!(
+                    opcode,
+                    0x10 | 0x30 | 0x50 | 0x70 | 0x90 | 0xB0 | 0xD0 | 0xF0
+                ) {
                     // Branch: defer IRQ to BranchPageFix (page-cross case) or
                     // end of RunInstruction (non-page-cross / not-taken case).
                     self.pending_irq = true;
@@ -211,7 +238,8 @@ impl Cpu {
                     // is the interrupted instruction's address.
                     self.pc = self.pc.wrapping_sub(1);
                     // T2: dummy read at interrupted PC.
-                    let _ = bus.read(self.pc); self.cycles += 1;
+                    let _ = bus.read(self.pc);
+                    self.cycles += 1;
                     let p = (self.p & !FLAG_B) | FLAG_U;
                     self.queue_interrupt_sequence(0xFFFE, p);
                     return;
@@ -238,8 +266,10 @@ impl Cpu {
                 // A taken non-page-crossing branch (3 cycles, no BranchPageFix queued)
                 // ignores IRQ at its last clock (T3). If an IRQ arrives during this
                 // RunInstruction, mark that the IRQ must be deferred by one instruction.
-                let is_branch = matches!(opcode,
-                    0x10 | 0x30 | 0x50 | 0x70 | 0x90 | 0xB0 | 0xD0 | 0xF0);
+                let is_branch = matches!(
+                    opcode,
+                    0x10 | 0x30 | 0x50 | 0x70 | 0x90 | 0xB0 | 0xD0 | 0xF0
+                );
                 if is_branch && cycles == 3 && self.queue_len == 0 {
                     self.branch_delay_irq = true;
                 }
@@ -254,7 +284,8 @@ impl Cpu {
                         self.pending_irq = false;
                         if !blocked {
                             self.cycles += 1; // T1 phantom
-                            let _ = bus.read(self.pc); self.cycles += 1; // T2 dummy
+                            let _ = bus.read(self.pc);
+                            self.cycles += 1; // T2 dummy
                             let p = (self.p & !FLAG_B) | FLAG_U;
                             self.queue_interrupt_sequence(0xFFFE, p);
                         }
@@ -267,8 +298,7 @@ impl Cpu {
                 // irq_pending: set after RunInstruction (IRQ fired during T2/T3 of
                 //   the branch — T+2/T+3 in the test table).
                 // Both abort T4 if the IRQ line is not masked.
-                let irq_abort = self.pending_irq
-                    || (!self.flag(FLAG_I) && self.irq_pending);
+                let irq_abort = self.pending_irq || (!self.flag(FLAG_I) && self.irq_pending);
                 if irq_abort {
                     // IRQ aborts T4: page-fix cycle skipped, no +1 cycle.
                     // cpu.pc is already the page-wrong address — that is what
@@ -276,7 +306,8 @@ impl Cpu {
                     self.pending_irq = false;
                     self.irq_pending = false;
                     self.cycles += 1; // T1 phantom at page_wrong_pc
-                    let _ = bus.read(self.pc); self.cycles += 1; // T2 dummy
+                    let _ = bus.read(self.pc);
+                    self.cycles += 1; // T2 dummy
                     let p = (self.p & !FLAG_B) | FLAG_U;
                     self.queue_interrupt_sequence(0xFFFE, p);
                 } else {
@@ -327,6 +358,7 @@ impl Cpu {
                 let lo = self.vector_lo as u16;
                 self.pc = (hi << 8) | lo;
                 self.pending_irq = false;
+                self.interrupt_poll_suppressed = true;
             }
         }
     }

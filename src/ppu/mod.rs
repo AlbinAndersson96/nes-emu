@@ -19,10 +19,10 @@ pub struct Ppu {
     oam_addr: u8, // $2003 OAMADDR
 
     // Loopy registers (internal to the PPU, exposed via $2005/$2006/$2007)
-    v: u16,      // current VRAM address (15-bit)
-    t: u16,      // temporary VRAM address (15-bit)
-    fine_x: u8,  // fine X scroll (3-bit)
-    w: bool,     // write toggle: false = first write, true = second write
+    v: u16,     // current VRAM address (15-bit)
+    t: u16,     // temporary VRAM address (15-bit)
+    fine_x: u8, // fine X scroll (3-bit)
+    w: bool,    // write toggle: false = first write, true = second write
 
     // PPUDATA read-ahead buffer (reads are delayed one access for non-palette data)
     read_buf: u8,
@@ -49,10 +49,10 @@ pub struct Ppu {
 
     // ── Background pipeline ─────────────────────────────────────────────────
     // Per-8-dot fetch latches
-    bg_nt_byte: u8,       // nametable byte (tile id)
-    bg_attr_byte: u8,     // attribute byte (2-bit palette selector)
-    bg_pat_lo: u8,        // pattern plane 0 for current tile
-    bg_pat_hi: u8,        // pattern plane 1 for current tile
+    bg_nt_byte: u8,   // nametable byte (tile id)
+    bg_attr_byte: u8, // attribute byte (2-bit palette selector)
+    bg_pat_lo: u8,    // pattern plane 0 for current tile
+    bg_pat_hi: u8,    // pattern plane 1 for current tile
     // 16-bit shift registers: bit 15 is the pixel being output this dot
     bg_shift_lo: u16,
     bg_shift_hi: u16,
@@ -60,13 +60,13 @@ pub struct Ppu {
     bg_shift_attr_hi: u16, // attribute bit 1, replicated to 8 bits per reload
 
     // ── Sprite pipeline ──────────────────────────────────────────────────────
-    secondary_oam: [u8; 32],            // up to 8 sprites for next scanline
-    sprite_count: usize,                // sprites loaded for the scanline THIS DOT is rendering
-    sprite_shift_lo: [u8; 8],          // pattern plane 0 shift registers
-    sprite_shift_hi: [u8; 8],          // pattern plane 1 shift registers
-    sprite_attr: [u8; 8],              // attribute bytes for active sprites
-    sprite_x: [u8; 8],                 // X counters for active sprites
-    sprite0_in_secondary: bool,        // sprite 0 is among the sprites THIS DOT is rendering
+    secondary_oam: [u8; 32],    // up to 8 sprites for next scanline
+    sprite_count: usize,        // sprites loaded for the scanline THIS DOT is rendering
+    sprite_shift_lo: [u8; 8],   // pattern plane 0 shift registers
+    sprite_shift_hi: [u8; 8],   // pattern plane 1 shift registers
+    sprite_attr: [u8; 8],       // attribute bytes for active sprites
+    sprite_x: [u8; 8],          // X counters for active sprites
+    sprite0_in_secondary: bool, // sprite 0 is among the sprites THIS DOT is rendering
     // Evaluation (dots 65–256) writes into these instead of the render-facing
     // fields above, which output_pixel() is still reading for dots 65–256 of
     // the SAME scanline (rendering data prepared during the PREVIOUS
@@ -79,7 +79,7 @@ pub struct Ppu {
     // ── Framebuffer ──────────────────────────────────────────────────────────
     // 256 × 240 pixels, each an index into the NES master palette (0x00–0x3F).
     pub frame: Box<[u8; 256 * 240]>,
-    pub frame_ready: bool,  // set when scanline 239 dot 256 is done; cleared by caller
+    pub frame_ready: bool, // set when scanline 239 dot 256 is done; cleared by caller
 }
 
 impl Ppu {
@@ -226,14 +226,51 @@ impl Ppu {
 
         // ── Scroll pipeline ───────────────────────────────────────────────────
         if render && is_render_scanline {
-            let coarse_x_tick = matches!(self.dot,
-                8 | 16 | 24 | 32 | 40 | 48 | 56 | 64 | 72 | 80 |
-                88 | 96 | 104 | 112 | 120 | 128 | 136 | 144 | 152 | 160 |
-                168 | 176 | 184 | 192 | 200 | 208 | 216 | 224 | 232 | 240 |
-                248 | 256 | 328 | 336);
-            if coarse_x_tick { self.increment_coarse_x(); }
-            if self.dot == 256 { self.increment_y(); }
-            if self.dot == 257 { self.copy_t_to_v_horizontal(); }
+            let coarse_x_tick = matches!(
+                self.dot,
+                8 | 16
+                    | 24
+                    | 32
+                    | 40
+                    | 48
+                    | 56
+                    | 64
+                    | 72
+                    | 80
+                    | 88
+                    | 96
+                    | 104
+                    | 112
+                    | 120
+                    | 128
+                    | 136
+                    | 144
+                    | 152
+                    | 160
+                    | 168
+                    | 176
+                    | 184
+                    | 192
+                    | 200
+                    | 208
+                    | 216
+                    | 224
+                    | 232
+                    | 240
+                    | 248
+                    | 256
+                    | 328
+                    | 336
+            );
+            if coarse_x_tick {
+                self.increment_coarse_x();
+            }
+            if self.dot == 256 {
+                self.increment_y();
+            }
+            if self.dot == 257 {
+                self.copy_t_to_v_horizontal();
+            }
             if self.scanline == PRERENDER_SCANLINE && (280..=304).contains(&self.dot) {
                 self.copy_t_to_v_vertical();
             }
@@ -264,7 +301,7 @@ impl Ppu {
     fn increment_coarse_x(&mut self) {
         if self.v & 0x001F == 31 {
             self.v &= !0x001F; // coarse X = 0
-            self.v ^= 0x0400;  // flip horizontal nametable
+            self.v ^= 0x0400; // flip horizontal nametable
         } else {
             self.v += 1;
         }
@@ -302,11 +339,19 @@ impl Ppu {
     // ── Background rendering helpers ─────────────────────────────────────────
 
     fn bg_pattern_base(&self) -> u16 {
-        if self.ctrl & 0x10 != 0 { 0x1000 } else { 0x0000 }
+        if self.ctrl & 0x10 != 0 {
+            0x1000
+        } else {
+            0x0000
+        }
     }
 
     fn sprite_pattern_base(&self) -> u16 {
-        if self.ctrl & 0x08 != 0 { 0x1000 } else { 0x0000 }
+        if self.ctrl & 0x08 != 0 {
+            0x1000
+        } else {
+            0x0000
+        }
     }
 
     fn sprite_height(&self) -> u16 {
@@ -318,8 +363,16 @@ impl Ppu {
         self.bg_shift_lo = (self.bg_shift_lo & 0xFF00) | self.bg_pat_lo as u16;
         self.bg_shift_hi = (self.bg_shift_hi & 0xFF00) | self.bg_pat_hi as u16;
         // Replicate the 2-bit palette selector across 8 bits so we can shift it
-        let attr_lo = if self.bg_attr_byte & 0x01 != 0 { 0xFF } else { 0x00 };
-        let attr_hi = if self.bg_attr_byte & 0x02 != 0 { 0xFF } else { 0x00 };
+        let attr_lo = if self.bg_attr_byte & 0x01 != 0 {
+            0xFF
+        } else {
+            0x00
+        };
+        let attr_hi = if self.bg_attr_byte & 0x02 != 0 {
+            0xFF
+        } else {
+            0x00
+        };
         self.bg_shift_attr_lo = (self.bg_shift_attr_lo & 0xFF00) | attr_lo;
         self.bg_shift_attr_hi = (self.bg_shift_attr_hi & 0xFF00) | attr_hi;
     }
@@ -344,10 +397,8 @@ impl Ppu {
             }
             3 => {
                 // Fetch attribute byte
-                let attr_addr = 0x23C0
-                    | (self.v & 0x0C00)
-                    | ((self.v >> 4) & 0x38)
-                    | ((self.v >> 2) & 0x07);
+                let attr_addr =
+                    0x23C0 | (self.v & 0x0C00) | ((self.v >> 4) & 0x38) | ((self.v >> 2) & 0x07);
                 let attr = self.ppu_read(attr_addr, cart);
                 // Select the 2-bit palette for the current 2×2 tile quadrant
                 let shift = ((self.v >> 4) & 0x04) | (self.v & 0x02);
@@ -355,17 +406,12 @@ impl Ppu {
             }
             5 => {
                 let fine_y = (self.v >> 12) & 0x07;
-                let addr = self.bg_pattern_base()
-                    | ((self.bg_nt_byte as u16) << 4)
-                    | fine_y;
+                let addr = self.bg_pattern_base() | ((self.bg_nt_byte as u16) << 4) | fine_y;
                 self.bg_pat_lo = self.ppu_read(addr, cart);
             }
             7 => {
                 let fine_y = (self.v >> 12) & 0x07;
-                let addr = self.bg_pattern_base()
-                    | ((self.bg_nt_byte as u16) << 4)
-                    | fine_y
-                    | 8;
+                let addr = self.bg_pattern_base() | ((self.bg_nt_byte as u16) << 4) | fine_y | 8;
                 self.bg_pat_hi = self.ppu_read(addr, cart);
             }
             _ => {}
@@ -399,7 +445,11 @@ impl Ppu {
         }
         // Pre-render's "next scanline" wraps around to scanline 0 of the new
         // frame, not 262 (which doesn't exist).
-        let next_scanline = if self.scanline == PRERENDER_SCANLINE { 0 } else { self.scanline + 1 };
+        let next_scanline = if self.scanline == PRERENDER_SCANLINE {
+            0
+        } else {
+            self.scanline + 1
+        };
         let height = self.sprite_height() as i32;
         let mut n = 0usize;
         while n < 64 && self.sprite_eval_count < 8 {
@@ -449,12 +499,12 @@ impl Ppu {
             return;
         }
 
-        let y_pos   = self.secondary_oam[idx * 4] as u16;
-        let tile    = self.secondary_oam[idx * 4 + 1];
-        let attr    = self.secondary_oam[idx * 4 + 2];
-        let x_pos   = self.secondary_oam[idx * 4 + 3];
-        let flip_v  = attr & 0x80 != 0;
-        let height  = self.sprite_height();
+        let y_pos = self.secondary_oam[idx * 4] as u16;
+        let tile = self.secondary_oam[idx * 4 + 1];
+        let attr = self.secondary_oam[idx * 4 + 2];
+        let x_pos = self.secondary_oam[idx * 4 + 3];
+        let flip_v = attr & 0x80 != 0;
+        let height = self.sprite_height();
 
         let mut row = (self.scanline + 1).saturating_sub(y_pos + 1);
         if flip_v {
@@ -462,7 +512,11 @@ impl Ppu {
         }
 
         let (pt_base, tile_idx) = if height == 16 {
-            let pt = if tile & 0x01 != 0 { 0x1000u16 } else { 0x0000u16 };
+            let pt = if tile & 0x01 != 0 {
+                0x1000u16
+            } else {
+                0x0000u16
+            };
             let t = (tile & 0xFE) as u16 + if row >= 8 { 1 } else { 0 };
             (pt, t)
         } else {
@@ -483,8 +537,8 @@ impl Ppu {
 
         self.sprite_shift_lo[idx] = lo;
         self.sprite_shift_hi[idx] = hi;
-        self.sprite_attr[idx]    = attr;
-        self.sprite_x[idx]       = x_pos;
+        self.sprite_attr[idx] = attr;
+        self.sprite_x[idx] = x_pos;
     }
 
     // ── Pixel output ──────────────────────────────────────────────────────────
@@ -497,8 +551,8 @@ impl Ppu {
             return;
         }
 
-        let bg_enabled  = self.mask & 0x08 != 0;
-        let sp_enabled  = self.mask & 0x10 != 0;
+        let bg_enabled = self.mask & 0x08 != 0;
+        let sp_enabled = self.mask & 0x10 != 0;
         let bg_left_clip = self.mask & 0x02 == 0 && x < 8;
         let sp_left_clip = self.mask & 0x04 == 0 && x < 8;
 
@@ -549,10 +603,16 @@ impl Ppu {
 
         // Priority multiplexer
         let (palette, color_idx) = match (bg_col, sp_col) {
-            (0, 0) => (0u8, 0u8),             // both transparent → backdrop
-            (0, _) => (sp_pal, sp_col),        // only sprite visible
-            (_, 0) => (bg_pal, bg_col),        // only background visible
-            _ => if sp_priority { (bg_pal, bg_col) } else { (sp_pal, sp_col) },
+            (0, 0) => (0u8, 0u8),       // both transparent → backdrop
+            (0, _) => (sp_pal, sp_col), // only sprite visible
+            (_, 0) => (bg_pal, bg_col), // only background visible
+            _ => {
+                if sp_priority {
+                    (bg_pal, bg_col)
+                } else {
+                    (sp_pal, sp_col)
+                }
+            }
         };
 
         // Look up palette RAM: backdrop color at $3F00 if color_idx == 0
@@ -563,7 +623,11 @@ impl Ppu {
         };
         let nes_color = self.palette[Self::palette_idx(palette_addr)];
         let grey = self.mask & 0x01 != 0;
-        self.frame[y * 256 + x] = if grey { nes_color & 0x30 } else { nes_color & 0x3F };
+        self.frame[y * 256 + x] = if grey {
+            nes_color & 0x30
+        } else {
+            nes_color & 0x3F
+        };
     }
 
     /// Returns true (and clears the latch) if an NMI is pending.
@@ -584,12 +648,12 @@ impl Ppu {
 
     fn mirror_vram_addr(&self, addr: u16) -> usize {
         let a = (addr & 0x0FFF) as usize; // strip high bits → 0x000–0xFFF
-        let nt = (a >> 10) & 0x3;        // nametable index 0–3
-        let off = a & 0x3FF;             // byte offset within nametable
+        let nt = (a >> 10) & 0x3; // nametable index 0–3
+        let off = a & 0x3FF; // byte offset within nametable
         let bank: usize = match self.mirroring {
             Mirroring::Horizontal => [0, 0, 1, 1][nt],
-            Mirroring::Vertical   => [0, 1, 0, 1][nt],
-            Mirroring::SingleLow  => 0,
+            Mirroring::Vertical => [0, 1, 0, 1][nt],
+            Mirroring::SingleLow => 0,
             Mirroring::SingleHigh => 1,
             Mirroring::FourScreen => nt & 1, // only 2 KB on-chip; treat as vertical
         };

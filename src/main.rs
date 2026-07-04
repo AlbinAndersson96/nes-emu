@@ -9,13 +9,13 @@ mod renderer;
 mod tests;
 
 use app::App;
+use renderer::Renderer;
 use std::{
     env, fs,
     path::PathBuf,
     process,
     time::{Duration, Instant},
 };
-use renderer::Renderer;
 use winit::{
     event::{ElementState, Event, ModifiersState, VirtualKeyCode, WindowEvent},
     event_loop::{ControlFlow, EventLoop},

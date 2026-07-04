@@ -82,6 +82,27 @@ vector) even a cycle or two into an already-dispatched IRQ's dummy-read/push pha
 — a claim that needs an external hardware reference to confirm, not derivable from
 this ROM alone.
 
+## Interrupt sequences do not poll interrupts
+
+Real 6502 hardware does not poll the interrupt lines during the 7-cycle interrupt
+sequence itself (nesdev `CPU_interrupts`: *"The interrupt sequences themselves do
+not perform interrupt polling, meaning at least one instruction from the interrupt
+handler will execute before another interrupt is serviced"*). An NMI edge that
+arrives too late to win the T6 hijack check therefore stays pending across the rest
+of the sequence **and** the handler's first instruction — it is serviced at the
+dispatch after that, never before.
+
+Modeled via `Cpu::interrupt_poll_suppressed` (`src/cpu/mod.rs`): set by
+`VectorFetchHi` (the final micro-op of every interrupt sequence — BRK, NMI, and IRQ
+all funnel through it), consumed by the next queue-empty dispatch, which skips both
+the `pending_nmi` direct-service check and the IRQ dispatch check for exactly that
+one dispatch. The pending flags survive untouched, so the interrupt fires one
+instruction later.
+
+This was the missing "third timing rule" for `cpu_interrupts_v2/2-nmi_and_brk`
+rows 8-9 ("NMI after SEC at beginning of IRQ handler" — the handler's `SEC` must
+run before the just-missed NMI preempts). With it, that test **passes in full**.
+
 ## Interrupt-polling granularity (the deferred-edge fix)
 
 Real 6502 hardware samples the interrupt lines going into an instruction's *last*
@@ -123,7 +144,9 @@ and producing the wrong captured byte. See the debug log for the full trace.
 Verified impact of the NMI defer fix: `ppu/vbl_clear_time` now passes outright
 (same underlying mechanism — VBL flag clear timing is NMI-adjacent), and
 `cpu_interrupts_v2/2-nmi_and_brk` went from ~2/10 to 8-9/10 rows matching the
-ROM's expected table, with zero regressions across the rest of the suite.
+ROM's expected table, with zero regressions across the rest of the suite. (The
+final 2 rows were later fixed by the interrupt-sequences-don't-poll rule above;
+the test now passes in full.)
 
 ## VBlank sync (`sync_vbl`) and fixed-cycle delay routines
 

@@ -1174,3 +1174,35 @@ likely *not* the actual bug — the real ~4-cycle discrepancy is probably in unr
 macros or the IRQ handler's own delay chain.
 
 ---
+
+### 2026-07-04 (new session) — test 2 (nmi_and_brk) FIXED AND PASSING: the "third timing rule" was already documented on nesdev — interrupt sequences do not poll interrupts
+
+**Hypothesis:** The previous session's open question — why does the vector target's first
+instruction (`SEC` at `$E316`) execute before a just-missed NMI can preempt it (test 2
+rows 8-9) — is answered verbatim by the same nesdev `CPU_interrupts` page that resolved the
+hijack-window question: **"The interrupt sequences themselves do not perform interrupt
+polling, meaning at least one instruction from the interrupt handler will execute before
+another interrupt is serviced."** This is not a per-instruction grace quirk — it's a general
+rule: the 7-cycle interrupt sequence never polls, so an edge that misses the T6 hijack check
+sits pending across the entire remainder of the sequence AND the handler's first
+instruction's dispatch, only being serviced at the dispatch after that.
+
+**Change (`src/cpu/mod.rs`):** new `interrupt_poll_suppressed` flag, set by `VectorFetchHi`
+(the final micro-op of every interrupt sequence — BRK, NMI, and IRQ all funnel through it),
+consumed by the next queue-empty dispatch: for exactly that one dispatch, both the
+`pending_nmi` direct-service check and the IRQ dispatch check are skipped (the pending flags
+themselves survive untouched — the interrupt still fires, one instruction later).
+
+**Result: `cpu_interrupts_v2/2-nmi_and_brk` PASSES** — all 10 rows exactly match the
+readme, including the previously-wrong rows 8-9 (now `27 36 00`: the handler's `SEC` runs
+first, so the captured P has C=1). Full `cargo test`: **178 passed / 8 failed, zero
+regressions** (previous baseline 177/9). Remaining failures: `power_up_palette` (PPU,
+hardware-specific), 3 `sprite_hit_roms` timing tests (separate PPU investigation, not this
+log's scope), and `cpu_interrupts_v2` 3/4/5 + combined.
+
+Tests 3, 4, 5 outputs are byte-identical before/after this change (verified) — this rule
+doesn't interact with their failure modes. First implementation attempt had zero effect for
+an embarrassing reason worth recording: the flag was gated at dispatch but never *set* in
+`VectorFetchHi` — a diff-your-own-edit sanity check (`grep -n poll_suppressed`) caught it.
+
+---

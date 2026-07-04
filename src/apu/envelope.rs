@@ -60,6 +60,10 @@ impl Envelope {
     }
 
     pub fn volume(&self) -> u8 {
-        if self.constant_volume { self.period } else { self.decay_level }
+        if self.constant_volume {
+            self.period
+        } else {
+            self.decay_level
+        }
     }
 }

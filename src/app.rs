@@ -33,7 +33,10 @@ fn load_rom_into(state: &mut AppState, data: &[u8]) -> Result<(), String> {
 
 impl App {
     pub fn new(renderer: Renderer) -> Self {
-        Self { state: AppState::NoRom, renderer }
+        Self {
+            state: AppState::NoRom,
+            renderer,
+        }
     }
 
     pub fn load_rom(&mut self, path: &Path) -> Result<(), String> {
@@ -52,8 +55,12 @@ impl App {
                     let cycles_before = cpu.cycles;
                     if bus.dma_active() {
                         bus.tick_dma();
-                        if bus.tick_ppu(1) { cpu.nmi(); }
-                        if bus.tick_apu(1) { cpu.irq(); }
+                        if bus.tick_ppu(1) {
+                            cpu.nmi();
+                        }
+                        if bus.tick_apu(1) {
+                            cpu.irq();
+                        }
                         elapsed += 1;
                     } else {
                         cpu.tick(bus);
@@ -62,10 +69,16 @@ impl App {
                         let mut got_nmi = extra_nmi;
                         let remaining = delta.saturating_sub(extra as u64);
                         for _ in 0..remaining {
-                            if bus.tick_ppu(1) { got_nmi = true; }
+                            if bus.tick_ppu(1) {
+                                got_nmi = true;
+                            }
                         }
-                        if got_nmi { cpu.nmi(); }
-                        if bus.tick_apu(delta) { cpu.irq(); }
+                        if got_nmi {
+                            cpu.nmi();
+                        }
+                        if bus.tick_apu(delta) {
+                            cpu.irq();
+                        }
                         elapsed += delta;
                     }
                 }
@@ -135,7 +148,9 @@ mod tests {
         match &state {
             // Cpu::reset() unconditionally sets cycles to 8 (src/cpu/mod.rs), so a
             // freshly-reset Cpu always lands there, never at 0.
-            AppState::Running { cpu, .. } => assert_eq!(cpu.cycles, 8, "swap must produce a freshly reset Cpu"),
+            AppState::Running { cpu, .. } => {
+                assert_eq!(cpu.cycles, 8, "swap must produce a freshly reset Cpu")
+            }
             AppState::NoRom => panic!("expected Running after a successful swap"),
         }
     }

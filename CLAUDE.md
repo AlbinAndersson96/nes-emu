@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-A NES emulator written in Rust. The CPU (full 6502 instruction set including unofficial opcodes), a full PPU (background rendering, sprites, palette, scrolling, OAM DMA), and the full APU (all five channels plus frame counter) are implemented. 154 of 159 blargg ROM tests pass: all 17 `instr_test-v5` tests, `instr_timing`, all 5 `instr_misc` tests, and `cpu_interrupts_v2/1-cli_latency`. The remaining 5 failures require sub-instruction cycle-accurate CPU emulation (see Known gaps).
+A NES emulator written in Rust. The CPU (full 6502 instruction set including unofficial opcodes), a full PPU (background rendering, sprites, palette, scrolling, OAM DMA), and the full APU (all five channels plus frame counter) are implemented. 155 of 159 blargg ROM tests pass: all 17 `instr_test-v5` tests, `instr_timing`, all 5 `instr_misc` tests, `cpu_interrupts_v2/1-cli_latency`, and `cpu_interrupts_v2/2-nmi_and_brk`. The remaining 4 failures require sub-instruction cycle-accurate CPU emulation (see Known gaps).
 
 ## Commands
 
@@ -36,7 +36,7 @@ cargo fmt            # format
 - **`src/tests/mod.rs`** — `TestBus`: flat 64 KB address space used by unit tests (no mirroring, no side effects).
 - **`src/tests/bus.rs`** — bus unit tests.
 - **`src/tests/cpu.rs`** — CPU unit tests.
-- **`src/tests/roms.rs`** — Blargg CPU ROM test harness. Polls $6000/$6001–$6003 for test completion. Per-cycle run loop: when DMA is active calls `bus.tick_dma()`; otherwise calls `cpu.tick(bus)`. After each cycle calls `bus.tick_ppu(delta)` (returns true → `cpu.nmi()`) and `bus.tick_apu(delta)` (returns true → `cpu.irq()`). Runs the `instr_test-v5` suite (17 tests, all passing), `instr_timing` (passing), all 5 `instr_misc` tests (passing), plus `cpu_interrupts_v2` (1 passing, 4 failing — see Known gaps).
+- **`src/tests/roms.rs`** — Blargg CPU ROM test harness. Polls $6000/$6001–$6003 for test completion. Per-cycle run loop: when DMA is active calls `bus.tick_dma()`; otherwise calls `cpu.tick(bus)`. After each cycle calls `bus.tick_ppu(delta)` (returns true → `cpu.nmi()`) and `bus.tick_apu(delta)` (returns true → `cpu.irq()`). Runs the `instr_test-v5` suite (17 tests, all passing), `instr_timing` (passing), all 5 `instr_misc` tests (passing), plus `cpu_interrupts_v2` (2 passing, 4 failing: tests 3-5 and the combined suite — see Known gaps).
 - **`src/tests/ppu_roms.rs`** — Blargg PPU ROM test harness. Runs each ROM for 300 frames (~5 s NES time), then reads the result code from the nametable (the ROMs render `$XX` in ASCII tiles at nametable-0 row 5, col 2–4) and looks up its meaning from the per-ROM table in the README. On failure the panic message includes the result code and its description. Also saves a PNG screenshot to `tests/screenshots/ppu/output/` and pixel-compares against a golden in `tests/screenshots/ppu/golden/` if one exists. To bless a new golden: `cp tests/screenshots/ppu/output/<name>.png tests/screenshots/ppu/golden/<name>.png`.
 - **`docs/bus.md`** — NES address map and bus design notes.
 - **`docs/cpu_instructions.md`** — 6502 instruction reference (official opcodes, addressing modes, cycle counts).
@@ -70,7 +70,7 @@ tests/screenshots/
 
 ## Known gaps
 
-These are confirmed missing features tied to failing blargg ROM tests. The project currently passes **154 of 159** blargg CPU tests and **4 of 5** blargg PPU tests.
+These are confirmed missing features tied to failing blargg ROM tests. The project currently passes **155 of 159** blargg CPU tests and **4 of 5** blargg PPU tests.
 
 ### Fixed (previously listed here)
 
@@ -79,18 +79,17 @@ These are confirmed missing features tied to failing blargg ROM tests. The proje
 3. **`$2002` read side effects** — Already implemented correctly in the PPU.
 4. **DMC DMA stall** — 4-cycle CPU stall implemented in `Bus::tick_dma()`; byte is fetched and supplied to the DMC on the final stall cycle. `instr_misc/04-dummy_reads_apu` passes.
 5. **OAM DMA start offset/wrap** — `Ppu::oam_dma_write` now indexes OAM at `oam_addr.wrapping_add(offset)` instead of raw `offset`, so the DMA copy starts at the value in `$2003` and wraps mod 256 (and leaves `$2003` itself intact). `ppu/sprite_ram` now passes.
+6. **`cpu_interrupts_v2/2-nmi_and_brk`** — **now passes.** Two fixes: the
+   interrupt-polling-granularity fix (deferred NMI-edge delivery, `src/tests/roms.rs`) took it
+   from ~2/10 to 8/10 correct rows; the final 2 rows were fixed by modeling nesdev's
+   "interrupt sequences do not perform interrupt polling" rule (`interrupt_poll_suppressed`,
+   `src/cpu/mod.rs`): the interrupt handler's first instruction always executes before a
+   pending interrupt that missed the T6 hijack window can be serviced. See
+   `docs/cpu_interrupts.md`.
 
 ### Remaining failures (all require sub-instruction cycle-accurate emulation)
 
-The 5 remaining failures (`cpu_interrupts_v2` tests 2–5 plus the combined suite) exercise interrupt-sequencing behaviour that depends on *which cycle within a multi-cycle instruction* a signal arrives.
-
-- **`cpu_interrupts_v2/2-nmi_and_brk`** — see `docs/cpu_interrupts.md` for the confirmed
-  NMI-hijacks-BRK mechanics (B=1 is preserved, not cleared — a previous version of this note
-  had that backwards) and the interrupt-polling-granularity fix (deferred NMI-edge delivery,
-  `src/tests/roms.rs`) that took this test from ~2/10 to 8-9/10 correct rows (verified against
-  the readme's expected table), zero regressions elsewhere. One remaining known defect: a
-  single stray flag bit on the last two rows, tied to `pending_nmi` surviving past
-  `VectorFetchHi` into the next instruction — see the investigation log for detail.
+The remaining failures (`cpu_interrupts_v2` tests 3–5 plus the combined suite) exercise interrupt-sequencing behaviour that depends on *which cycle within a multi-cycle instruction* a signal arrives.
 
 - **`cpu_interrupts_v2/3-nmi_and_irq`** — NMI hijacking an in-progress *IRQ* (not BRK) service
   sequence; see `docs/cpu_interrupts.md` for the confirmed dispatch/hijack mechanics. This
