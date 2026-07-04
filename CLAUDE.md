@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-A NES emulator written in Rust. The CPU (full 6502 instruction set including unofficial opcodes), a full PPU (background rendering, sprites, palette, scrolling, OAM DMA), and the full APU (all five channels plus frame counter) are implemented. 155 of 159 blargg ROM tests pass: all 17 `instr_test-v5` tests, `instr_timing`, all 5 `instr_misc` tests, `cpu_interrupts_v2/1-cli_latency`, and `cpu_interrupts_v2/2-nmi_and_brk`. The remaining 4 failures require sub-instruction cycle-accurate CPU emulation (see Known gaps).
+A NES emulator written in Rust. The CPU (full 6502 instruction set including unofficial opcodes), a full PPU (background rendering, sprites, palette, scrolling, OAM DMA), and the full APU (all five channels plus frame counter) are implemented. 156 of 159 blargg ROM tests pass: all 17 `instr_test-v5` tests, `instr_timing`, all 5 `instr_misc` tests, and `cpu_interrupts_v2` tests 1, 2, and 4. The remaining 3 failures require sub-instruction cycle-accurate CPU emulation (see Known gaps).
 
 ## Commands
 
@@ -36,7 +36,7 @@ cargo fmt            # format
 - **`src/tests/mod.rs`** — `TestBus`: flat 64 KB address space used by unit tests (no mirroring, no side effects).
 - **`src/tests/bus.rs`** — bus unit tests.
 - **`src/tests/cpu.rs`** — CPU unit tests.
-- **`src/tests/roms.rs`** — Blargg CPU ROM test harness. Polls $6000/$6001–$6003 for test completion. Per-cycle run loop: when DMA is active calls `bus.tick_dma()`; otherwise calls `cpu.tick(bus)`. After each cycle calls `bus.tick_ppu(delta)` (returns true → `cpu.nmi()`) and `bus.tick_apu(delta)` (returns true → `cpu.irq()`). Runs the `instr_test-v5` suite (17 tests, all passing), `instr_timing` (passing), all 5 `instr_misc` tests (passing), plus `cpu_interrupts_v2` (2 passing, 4 failing: tests 3-5 and the combined suite — see Known gaps).
+- **`src/tests/roms.rs`** — Blargg CPU ROM test harness. Polls $6000/$6001–$6003 for test completion. Per-cycle run loop: when DMA is active calls `bus.tick_dma()`; otherwise calls `cpu.tick(bus)`. After each cycle calls `bus.tick_ppu(delta)` (returns true → `cpu.nmi()`) and `bus.tick_apu(delta)` (returns true → `cpu.irq()`). Runs the `instr_test-v5` suite (17 tests, all passing), `instr_timing` (passing), all 5 `instr_misc` tests (passing), plus `cpu_interrupts_v2` (3 passing, 3 failing: tests 3, 5, and the combined suite — see Known gaps).
 - **`src/tests/ppu_roms.rs`** — Blargg PPU ROM test harness. Runs each ROM for 300 frames (~5 s NES time), then reads the result code from the nametable (the ROMs render `$XX` in ASCII tiles at nametable-0 row 5, col 2–4) and looks up its meaning from the per-ROM table in the README. On failure the panic message includes the result code and its description. Also saves a PNG screenshot to `tests/screenshots/ppu/output/` and pixel-compares against a golden in `tests/screenshots/ppu/golden/` if one exists. To bless a new golden: `cp tests/screenshots/ppu/output/<name>.png tests/screenshots/ppu/golden/<name>.png`.
 - **`docs/bus.md`** — NES address map and bus design notes.
 - **`docs/cpu_instructions.md`** — 6502 instruction reference (official opcodes, addressing modes, cycle counts).
@@ -70,7 +70,7 @@ tests/screenshots/
 
 ## Known gaps
 
-These are confirmed missing features tied to failing blargg ROM tests. The project currently passes **155 of 159** blargg CPU tests and **4 of 5** blargg PPU tests.
+These are confirmed missing features tied to failing blargg ROM tests. The project currently passes **156 of 159** blargg CPU tests and **4 of 5** blargg PPU tests.
 
 ### Fixed (previously listed here)
 
@@ -87,9 +87,11 @@ These are confirmed missing features tied to failing blargg ROM tests. The proje
    pending interrupt that missed the T6 hijack window can be serviced. See
    `docs/cpu_interrupts.md`.
 
+7. **`cpu_interrupts_v2/4-irq_and_dma`** — **now passes.** Three fixes: (a) `frame_reset_delay = 7` (the $4017 write is applied while the APU still sits at the start of the writing instruction, 4 cycles before the hardware write cycle, plus the hardware's 3-cycle post-write delay); (b) interrupts that first assert during a DMA stall are delivered at DMA end with one dispatch poll suppressed, so the first post-DMA instruction executes before service (`suppress_next_interrupt_poll`, mirroring the interrupt-sequences-don't-poll rule); (c) OAM DMA takes 514 cycles instead of 513 when the $4014 write lands on an odd APU cycle (`Apu::cycle_parity`).
+
 ### Remaining failures (all require sub-instruction cycle-accurate emulation)
 
-The remaining failures (`cpu_interrupts_v2` tests 3–5 plus the combined suite) exercise interrupt-sequencing behaviour that depends on *which cycle within a multi-cycle instruction* a signal arrives.
+The remaining failures (`cpu_interrupts_v2` tests 3 and 5 plus the combined suite) exercise interrupt-sequencing behaviour that depends on *which cycle within a multi-cycle instruction* a signal arrives.
 
 - **`cpu_interrupts_v2/3-nmi_and_irq`** — NMI hijacking an in-progress *IRQ* (not BRK) service
   sequence; see `docs/cpu_interrupts.md` for the confirmed dispatch/hijack mechanics. This
@@ -106,8 +108,6 @@ The remaining failures (`cpu_interrupts_v2` tests 3–5 plus the combined suite)
   regresses an otherwise-correct row (IRQ is level-triggered and already correctly
   re-sampled every tick; it doesn't have the edge-triggered NMI's "last cycle invisible"
   problem). See the investigation log for the full trace evidence.
-
-- **`cpu_interrupts_v2/4-irq_and_dma`** — During OAM-DMA, the run loop calls `bus.tick_dma()` and then `cpu.irq()` on every DMA cycle, but `cpu.irq()` only sets `irq_pending = true`. That flag is not consumed until the next `cpu.tick()` call, which does not happen while DMA is active. The result is that every IRQ that fires during DMA is indistinguishable to the CPU: they all appear to have arrived at the moment DMA ended. On real hardware the CPU samples the IRQ line at a specific DMA cycle, so the number of cycles between the IRQ signal and the start of the interrupt service depends on *when during the DMA* the signal was asserted. ROM output shows a `53 +N` table of per-offset IRQ latency measurements; values go wrong at `+4` onwards (first offset where the IRQ reaches the CPU one DMA cycle later than expected).
 
 - **`cpu_interrupts_v2/5-branch_delays_irq`** — A page-crossing branch should abort its T4 page-fix cycle when IRQ is pending at T3, taking only 3 cycles total and pushing the page-wrong PC. `BranchPageFix` already handles the case where `pending_irq` was set at opcode-fetch time. The remaining bug: `pending_irq` is only set in the opcode-fetch path (queue empty, IRQ visible before the branch opcode is read). If the APU fires during the branch's *RunInstruction* tick (which consumes T1+T2+T3 all at once), `cpu.irq()` is called after that tick completes with `delta=3`, but at that point the queue is non-empty so the irq-to-`pending_irq` promotion never happens. `BranchPageFix` then sees `pending_irq=false` and applies the page fix instead of aborting it. ROM output (`T+ CK PC` table): T+0 and T+1 are correct (IRQ was pending before opcode fetch → `pending_irq` set → abort works, PC=`$0E`); T+2 onwards are wrong (IRQ arrives during RunInstruction, page fix completes, PC=`$03`).
 

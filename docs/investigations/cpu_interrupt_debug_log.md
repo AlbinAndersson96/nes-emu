@@ -1265,3 +1265,39 @@ row-0 trace before touching anything; (4) test 5's constant CK -4 — measuremen
 (`print_dec`/`setb` macro costs) still unverified.
 
 ---
+
+### 2026-07-04 (same session) — test 4 (irq_and_dma) FIXED AND PASSING: DMA-window interrupt suppression + 514-cycle odd-start OAM DMA
+
+Both next-steps (1) and (2) above implemented; each fixed exactly the rows predicted.
+
+**(1) DMA-window suppression (`src/tests/roms.rs` + two new public `Cpu` methods).** An IRQ
+that first asserts during a DMA stall missed the stalled instruction's penultimate-cycle
+poll; the next poll point belongs to the first post-DMA instruction, so that instruction
+executes before the IRQ is serviced. Implementation: the harness's DMA branch no longer
+calls `cpu.irq()`/`cpu.nmi()` immediately — it accumulates `dma_irq_deferred` (only if the
+IRQ line wasn't already pending when the DMA began, checked via new `Cpu::irq_line_pending()`)
+and `dma_nmi_deferred`, then on DMA exit delivers them and calls the new
+`Cpu::suppress_next_interrupt_poll()` (reuses `interrupt_poll_suppressed`). An IRQ already
+pending *before* the DMA began services at the first post-DMA dispatch as before (that's the
+readme's column-7 band, +7..+10 — IRQs landing within STA $4014's own 4 cycles). This took
+the "8" band from `[+524,+525]` (just the post-DMA NOP) to `[+11..+525]` — every DMA-window
+row now correct except +526.
+
+**(2) 513/514-cycle OAM DMA (`src/bus.rs` + `Apu::cycle_parity()`).** nesdev: the stall is
++1 cycle when the $4014 write lands on an odd CPU cycle (the APU's divide-by-2 get/put
+clock). Added a free-running `cycle_count` to the APU (never reset by register writes,
+unlike `frame_cycles` — this is the same "free-running divider" concept the earlier reverted
+parity experiment modeled) and `Bus::oam_dma` now picks 513/514 from its parity.
+`Bus::tick_dma` generalized to wait 1-or-2 cycles before the 256 copy pairs. Note the same
+4-cycle write-application lag as $4017 applies, but 4 is even so the APU counter's parity at
+write-application time already equals the write cycle's parity — no adjustment needed. The
+polarity anchor (odd→514) was verified empirically: it fixes +526, and the opposite polarity
+would leave the boundary where it was. In this ROM the DMA start parity alternates row by
+row (the row delay changes by 1 cycle per row), and the readme's clean band edge is still
+consistent with alternating 513/514 because the edge condition moves in steps of 0 and 2.
+
+**Result: `cpu_interrupts_v2/4-irq_and_dma` PASSES — every row exact.** Full `cargo test`:
+**179 passed / 7 failed, zero regressions** (`sprite_ram`, `dummy_reads_apu`, and all other
+DMA-adjacent tests unaffected). Remaining in scope: tests 3, 5, combined.
+
+---

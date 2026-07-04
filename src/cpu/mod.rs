@@ -117,6 +117,23 @@ impl Cpu {
         self.irq_pending = true;
     }
 
+    /// True when the IRQ line has been signalled and not yet consumed by a dispatch.
+    /// Used by DMA-stalling run loops to distinguish an IRQ that was already
+    /// pending when the DMA began from one that first asserted during the stall.
+    pub fn irq_line_pending(&self) -> bool {
+        self.irq_pending
+    }
+
+    /// Suppress interrupt servicing for the next queue-empty dispatch (the pending
+    /// flags survive; the interrupt fires one instruction later). Run loops call
+    /// this when an interrupt first asserts during a DMA stall: the interrupt
+    /// missed the stalled instruction's poll point (the poll happens on an
+    /// instruction's penultimate cycle, before the DMA halts the CPU), so the
+    /// first post-DMA instruction executes before the interrupt can be serviced.
+    pub fn suppress_next_interrupt_poll(&mut self) {
+        self.interrupt_poll_suppressed = true;
+    }
+
     /// Diagnostic accessor for interrupt-timing tracers: (pending_nmi, nmi_pending, queue_len).
     #[cfg(test)]
     pub(crate) fn debug_nmi_state(&self) -> (bool, bool, u8) {

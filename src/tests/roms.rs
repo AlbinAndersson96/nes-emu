@@ -61,6 +61,15 @@ fn run_until_complete_trace(bus: &mut Bus, cpu: &mut Cpu, trace_nmi: bool) {
     // for how this was derived (matches readme expected-output tables for
     // cpu_interrupts_v2/2-nmi_and_brk; not fully verified for every sub-case).
     let mut deferred_nmi = false;
+    // Interrupts that first assert during a DMA stall missed the stalled
+    // instruction's poll point (polling happens on an instruction's penultimate
+    // cycle, before the DMA halts the CPU). They are delivered when the DMA ends,
+    // with the CPU's next dispatch poll suppressed, so the first post-DMA
+    // instruction executes before the interrupt is serviced — matching
+    // cpu_interrupts_v2/4-irq_and_dma's expected table (the long "8" band).
+    let mut dma_nmi_deferred = false;
+    let mut dma_irq_deferred = false;
+    let mut in_dma = false;
 
     loop {
         let sig_valid =
@@ -87,15 +96,30 @@ fn run_until_complete_trace(bus: &mut Bus, cpu: &mut Cpu, trace_nmi: bool) {
         // (RunInstruction is a bulk micro-op; fetch tick consumes 0 cycles).
         let cycles_before = cpu.cycles;
         if bus.dma_active() {
+            in_dma = true;
             bus.tick_dma();
             if bus.tick_ppu(1) {
-                cpu.nmi();
+                dma_nmi_deferred = true;
             }
-            if bus.tick_apu(1) {
-                cpu.irq();
+            if bus.tick_apu(1) && !cpu.irq_line_pending() {
+                dma_irq_deferred = true;
             }
             total_cycles += 1;
         } else {
+            if in_dma {
+                in_dma = false;
+                if dma_nmi_deferred || dma_irq_deferred {
+                    if dma_nmi_deferred {
+                        cpu.nmi();
+                    }
+                    if dma_irq_deferred {
+                        cpu.irq();
+                    }
+                    cpu.suppress_next_interrupt_poll();
+                }
+                dma_nmi_deferred = false;
+                dma_irq_deferred = false;
+            }
             cpu.tick(bus);
             let delta = cpu.cycles - cycles_before;
             // Consume any PPU cycles pre-advanced during a $2002 read, then tick

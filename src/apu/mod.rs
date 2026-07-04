@@ -52,6 +52,10 @@ pub struct Apu {
     /// Writing $4017 sets this to 7; each tick decrements it; at 0 frame_cycles
     /// resets. See the $4017 write handler for the derivation of 7.
     frame_reset_delay: u8,
+    /// Free-running CPU-cycle counter — never reset by register writes (unlike
+    /// frame_cycles). Its parity models the APU's divide-by-2 get/put clock,
+    /// which decides whether an OAM DMA takes 513 or 514 cycles.
+    cycle_count: u64,
 }
 
 impl Apu {
@@ -67,6 +71,7 @@ impl Apu {
             frame_irq_flag: false,
             frame_cycles: 0,
             frame_reset_delay: 0,
+            cycle_count: 0,
         }
     }
 
@@ -81,6 +86,7 @@ impl Apu {
 
     fn tick_one(&mut self) {
         self.frame_cycles += 1;
+        self.cycle_count += 1;
 
         // $4017 write-to-reset delay; see the $4017 write handler for derivation.
         if self.frame_reset_delay > 0 {
@@ -139,6 +145,13 @@ impl Apu {
         self.pulse2.clock_length_and_sweep();
         self.triangle.clock_length();
         self.noise.clock_length();
+    }
+
+    /// Parity of the free-running APU cycle counter (the divide-by-2 get/put
+    /// clock). Sampled by the bus when $4014 is written to pick the 513- or
+    /// 514-cycle OAM DMA stall.
+    pub fn cycle_parity(&self) -> bool {
+        self.cycle_count & 1 == 1
     }
 
     fn take_irq(&mut self) -> bool {

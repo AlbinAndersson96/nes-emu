@@ -24,9 +24,11 @@ pub struct Bus {
     pub apu: Apu,
     controller_latch: [u8; 2],
     controller_shift: [u8; 2],
-    /// OAM DMA state: set when a write to $4014 triggers a 513-cycle DMA.
+    /// OAM DMA state: set when a write to $4014 triggers a 513/514-cycle DMA.
     oam_dma_active: bool,
     oam_dma_cycles_left: u16,
+    /// Total stall length of the current OAM DMA (513, or 514 for odd-cycle starts).
+    oam_dma_len: u16,
     oam_dma_page: u8,
     oam_dma_byte_idx: u16,
     /// DMC DMA: counts down 4 cycles while the CPU is stalled for a sample fetch.
@@ -49,6 +51,7 @@ impl Bus {
             controller_shift: [0u8; 2],
             oam_dma_active: false,
             oam_dma_cycles_left: 0,
+            oam_dma_len: 0,
             oam_dma_page: 0,
             oam_dma_byte_idx: 0,
             dmc_dma_cycles_left: 0,
@@ -66,8 +69,11 @@ impl Bus {
     /// DMC DMA simply counts down and fetches the byte on the last cycle.
     pub fn tick_dma(&mut self) {
         if self.oam_dma_active {
-            let cycle_num = 513u16.wrapping_sub(self.oam_dma_cycles_left);
-            if cycle_num % 2 == 1 && self.oam_dma_byte_idx < 256 {
+            // Wait cycles first (1, or 2 for an odd-cycle start), then one byte
+            // copied every second cycle, aligned to the same get/put phase.
+            let cycle_num = self.oam_dma_len - self.oam_dma_cycles_left;
+            let waits = self.oam_dma_len - 512;
+            if cycle_num >= waits && (cycle_num - waits) % 2 == 1 && self.oam_dma_byte_idx < 256 {
                 let addr = ((self.oam_dma_page as u16) << 8) | self.oam_dma_byte_idx;
                 let data = self.read(addr);
                 self.ppu.oam_dma_write(self.oam_dma_byte_idx as u8, data);
@@ -134,12 +140,17 @@ impl Bus {
     }
 
     /// Initiate an OAM DMA transfer triggered by a write to $4014.
-    /// The transfer is always 513 cycles (256 read/write pairs + 1 idle). On real
-    /// hardware the stall is 514 cycles when triggered on an odd CPU cycle, but
-    /// that +1 parity alignment is not currently implemented.
+    /// The stall is 513 cycles (1 wait + 256 read/write pairs), +1 when the
+    /// write lands on an odd CPU cycle relative to the APU's divide-by-2
+    /// get/put clock. The APU's free-running counter supplies that parity;
+    /// it currently sits at the START of the writing instruction (tick_apu
+    /// runs after the whole instruction), and the $4014 write cycle is the
+    /// 4th/last cycle of an absolute store — an even offset, so the counter's
+    /// parity now equals the write cycle's parity.
     fn oam_dma(&mut self, page: u8) {
         self.oam_dma_active = true;
-        self.oam_dma_cycles_left = 513;
+        self.oam_dma_len = if self.apu.cycle_parity() { 514 } else { 513 };
+        self.oam_dma_cycles_left = self.oam_dma_len;
         self.oam_dma_page = page;
         self.oam_dma_byte_idx = 0;
     }
