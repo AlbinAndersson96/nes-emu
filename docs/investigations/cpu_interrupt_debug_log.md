@@ -1206,3 +1206,62 @@ an embarrassing reason worth recording: the flag was gated at dispatch but never
 `VectorFetchHi` — a diff-your-own-edit sanity check (`grep -n poll_suppressed`) caught it.
 
 ---
+
+### 2026-07-04 (same session) — `frame_reset_delay = 7` DERIVED (not curve-fit) and applied: the $4017 write is applied 4 cycles before the hardware write cycle — tests 3, 4, 5 ALL move substantially closer
+
+**The key realization came from test 4, not test 5.** Comparing test 4's full output against
+the readme: our table was the expected table **shifted by exactly 3 rows** (`got[+N] ==
+expected[+N-3]` for every row), and crucially the shift is present at offsets +0..+3 — before
+the sprite DMA is even reached. So test 4's failure was (mostly) NOT a DMA bug: it was a
+constant 3-cycle IRQ-too-early offset, the same ~3 cycles test 5's earlier
+`frame_reset_delay` sweep found (7 fixed the PC column) and the same direction test 3 needed.
+
+**Mechanistic derivation (this is why 7 is physical, not a magic number):**
+- Our emulator applies the `$4017` write side effect when `bus.write` runs *inside*
+  `RunInstruction` — at that moment the APU has not yet been ticked for any of the writing
+  instruction's own cycles (`tick_apu(delta)` runs after the whole instruction). So the write
+  lands at APU-time T0 = start of the STA instruction.
+- On hardware, the bus write happens on STA abs's **4th (last) cycle** = T0+4, and the frame
+  counter reset takes effect 3-4 CPU cycles *after the write cycle* (nesdev "APU Frame
+  Counter" write jitter; 3 = the `sync_apu`-aligned case per blargg's own sync_apu.s comment).
+- Hardware reset therefore lands at T0+4+3 = T0+7; our delay mechanism resets at T0+delay.
+  Correct delay **= 7**, decomposed as 4 (instruction cycles the APU hasn't seen yet) + 3
+  (hardware post-write-cycle delay, aligned case). The old flat 4 made the frame IRQ fire
+  3 cycles early relative to the instruction stream — invisible to the isolated
+  `isolate_apu_frame_irq_timing` measurement (which measures from write *application*, not
+  from the hardware write cycle) and to `instr_timing` (no APU IRQ involvement), which is
+  why three prior verification passes all came back "clean" while the bug sat between them.
+- The previous session's rejection of 7 as "not physically real" was wrong because it
+  compared 7 against the hardware's 3-4 jitter without accounting for the harness's own
+  4-cycle write-application lag. The parity-jitter experiment (3 vs 4) was also doomed for
+  the same reason: both values are ~3-4 cycles early; the granularity error swamped the
+  parity nuance.
+
+**Change (`src/apu/mod.rs`):** `frame_reset_delay = 7` with the full derivation in a comment.
+
+**Results (all verified against readme tables, zero regressions — 178/8 unchanged):**
+- **Test 4:** rows +0..+10 now match EXACTLY (previously all shifted). Remaining wrong:
+  IRQs arriving *during* the DMA window are serviced at the first post-DMA dispatch
+  (column 7) where hardware lets one post-DMA instruction execute first (column 8: the IRQ
+  missed STA's penultimate-cycle poll; the next poll point is the following NOP's). Also the
+  tail 8→9 transition is one offset early (+526 vs +527) — likely the unimplemented
+  513-vs-514 odd-cycle OAM DMA stall (`Bus::oam_dma`'s own comment flags this).
+- **Test 3:** first column went from `23,23,23,23,23,27×7` to `21,21,20×7,25,25,25` — the
+  readme wants `23,21,21,20×7,25,25`. The value family and transition structure now match;
+  everything is one row early (we start at `21` where hardware still shows `23` at row 0).
+  The "confirmed contradiction" from the previous sessions is essentially resolved: the
+  missing piece was never the NMI/IRQ arbitration mechanism, it was the IRQ line asserting
+  3 cycles early, which changed *which* rows fall in the hijack window.
+- **Test 5:** PC column now matches the readme pattern; CK column still off by a constant
+  (readme wants 2/1/3..., we print FE/FD/FF... = -2/-3/-1 as i8 — a constant -4).
+- Tests 1 (`cli_latency`) and 2 (`nmi_and_brk`) still pass.
+
+**Next steps, in order of tractability:** (1) test 4: deliver-but-suppress IRQs that first
+assert during DMA (mirror of the `interrupt_poll_suppressed` rule, harness-level since DMA
+stalling lives in the run loop); (2) test 4 tail: 514-cycle OAM DMA when started on an odd
+CPU cycle; (3) test 3: one-row-early residual — plausibly the IRQ needs to be one more cycle
+later (hardware d=4 case → delay 8? or the $4015-read granularity on the ack path), needs a
+row-0 trace before touching anything; (4) test 5's constant CK -4 — measurement-chain
+(`print_dec`/`setb` macro costs) still unverified.
+
+---

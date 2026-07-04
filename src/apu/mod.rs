@@ -49,7 +49,8 @@ pub struct Apu {
     /// CPU cycles elapsed since the last frame counter reset.
     frame_cycles: u32,
     /// Cycles remaining until a $4017-triggered frame counter reset takes effect.
-    /// Writing $4017 sets this to 3; each tick decrements it; at 0 frame_cycles resets.
+    /// Writing $4017 sets this to 7; each tick decrements it; at 0 frame_cycles
+    /// resets. See the $4017 write handler for the derivation of 7.
     frame_reset_delay: u8,
 }
 
@@ -81,7 +82,7 @@ impl Apu {
     fn tick_one(&mut self) {
         self.frame_cycles += 1;
 
-        // $4017 write jitter: reset takes effect 3 CPU cycles after the write.
+        // $4017 write-to-reset delay; see the $4017 write handler for derivation.
         if self.frame_reset_delay > 0 {
             self.frame_reset_delay -= 1;
             if self.frame_reset_delay == 0 {
@@ -224,9 +225,20 @@ impl Apu {
                 if self.irq_inhibit {
                     self.frame_irq_flag = false;
                 }
-                // On real hardware the frame counter reset takes effect 3–4 CPU
-                // cycles after the write (write jitter). Use 4 cycles.
-                self.frame_reset_delay = 4;
+                // On real hardware the frame counter reset takes effect 3-4 CPU
+                // cycles after the WRITE CYCLE (nesdev "APU Frame Counter" write
+                // jitter). This write is applied while the APU still sits at the
+                // START of the writing instruction: the caller only ticks the APU
+                // (tick_apu(delta)) after the whole instruction, and a $4017 write
+                // is in practice always an absolute store whose bus write happens
+                // on its 4th/last cycle. The APU is therefore 4 cycles behind the
+                // real write cycle at this point, and the correct delay from HERE
+                // is 4 (instruction cycles still to be ticked) + 3 (hardware
+                // post-write-cycle delay, sync_apu-aligned case) = 7. Verified against
+                // cpu_interrupts_v2/4-irq_and_dma's expected table (a flat 4 here
+                // shifts the whole table by exactly 3 rows) — see
+                // docs/investigations/cpu_interrupt_debug_log.md (2026-07-04).
+                self.frame_reset_delay = 7;
                 // 5-step mode: immediate quarter/half-frame fires at write time.
                 if self.frame_mode {
                     self.clock_quarter_frame();
