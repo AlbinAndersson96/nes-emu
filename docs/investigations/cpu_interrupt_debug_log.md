@@ -1359,3 +1359,50 @@ self-calibration by `sync_vbl`, not a broken knob.
 Remaining in scope: test 5 (`branch_delays_irq`) and the combined suite.
 
 ---
+
+### 2026-07-04 (same session) — test 5 (branch_delays_irq): CK column root cause IDENTIFIED ($4015 reads sample the APU 4 cycles early), but the fix requires making sync_apu's convergence work — attempted, reverted, next step defined
+
+**State after the fixes above:** test 5's `test_jmp` PC column matches the readme exactly
+(the branch/IRQ interaction itself — the test's nominal subject — is now correct); only the
+CK column is wrong, uniformly `expected - 4` on every row.
+
+**CK decoded (from `5-branch_delays_irq.s`'s `irq:` handler):** after a fixed initial delay,
+the handler runs a loop of exactly 29831 cycles per iteration (`dex; delay 29831-13;
+bit $4015; bit $4015; bvc`) — one cycle longer than the 29830-cycle frame-IRQ period, so the
+4-cycle window between the two `bit $4015`s (first clears the flag, second samples V) walks
+across the flag's set-moment at 1 cycle per iteration. X at loop exit is printed as CK. A
+uniform CK error of exactly -4 therefore means our `$4015` read samples the flag 4 cycles
+early — and it does: the read is applied while the APU still sits at the START of the
+reading instruction (the read cycle is `BIT abs`'s 4th/last cycle; `tick_apu` runs after the
+whole instruction). Same lag family as the $4017 write (fixed via `frame_reset_delay=7`) and
+the $2002 read (fixed via pre-advance).
+
+**Attempt 1 — flat 4-cycle APU pre-advance on $4015 reads only** (mirroring the PPU's $2002
+mechanism, with `Bus::take_apu_preadvance` consumed by the run loop): CK moved as predicted,
+but test 3 regressed to an early framework failure (code 0x01, no table) and test 5's PC
+column regressed (leading `03` row again). **Why: sync_apu compares $4015 reads against a
+$4017 write it just made — only their RELATIVE alignment matters, and this moved one anchor
+without the other.** The delay=7 calibration had the old read lag baked in.
+
+**Attempt 2 — fully-consistent physical model:** pre-advance BOTH $4015 reads and $4017
+writes by 4 cycles (to their true access cycle), set `frame_reset_delay` to the physical 3/4
+chosen by write-cycle parity (both polarities tried). Result: tests 3/4/5 all fail, and test
+4's bands come out RAGGED (widths 1/2/3 mixed) — the parity-conditional delay is wobbling
+row to row. Instrumented the post-`sync_apu` write parity: **1,1,0,0,1,0,1,1,0,0 — not
+locked.** On hardware `sync_apu`'s entire purpose is to exit at a deterministic APU-clock
+parity; ours doesn't converge. The physical model cannot work until it does, and its
+convergence in turn depends on cycle-exact $4015 read behavior (and possibly on the frame
+IRQ flag's true set-granularity — APU cycles vs the three consecutive CPU cycles we model).
+**Reverted both attempts** — back to the tests-1-4-passing state (flat `frame_reset_delay=7`,
+no APU pre-advance), verified 4/6 + zero regressions.
+
+**Concrete next step for test 5 (bounded):** read `source/common/sync_apu.s`'s convergence
+loop and derive its contract (what sequence of $4015 observations it needs to see, at what
+cycle offsets, to exit parity-locked). Then fix the $4015 read sampling AND the write
+anchoring TOGETHER so that contract holds in-emulator (an isolated `sync_apu` parity-lock
+test, in the style of `verify_sync_vbl_contract`, is the right harness: run sync_apu from N
+different APU phases and assert the exit parity is always the same). Only then re-apply the
+physical parity-conditional reset delay and re-check CK. Expect `frame_reset_delay=7` to be
+re-derivable as the aligned-parity case of the physical model.
+
+---

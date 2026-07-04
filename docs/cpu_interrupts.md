@@ -70,17 +70,14 @@ this ROM's row 0/row 1 (`docs/investigations/cpu_interrupt_debug_log.md`, the
 This means a single readable byte captured shortly after such a sequence (e.g. via
 `PLA`/`PHA` inside the NMI handler, `cpu_interrupts_v2/3-nmi_and_irq.s`) reflects
 flags from *before* the originally-preempted instruction ran, not after — because
-the push already happened before NMI hijacked anything. **Open question:** applying
-this mechanism uniformly across all 12 rows of that test predicts the same
-captured byte for every row where the hijack lands within the T1-T6 window (since
-this ROM's IRQ dispatch timing doesn't vary by row) — but the ROM's own
-`readme.txt` documents different bytes for different rows in that range. This is a
-confirmed, unresolved contradiction between the mechanically-verified behavior
-above and the expected output; see the debug log's final entries for detail. It
-likely means real hardware allows NMI to fully take over (not just hijack the
-vector) even a cycle or two into an already-dispatched IRQ's dummy-read/push phase
-— a claim that needs an external hardware reference to confirm, not derivable from
-this ROM alone.
+the push already happened before NMI hijacked anything. (An earlier version of this
+document recorded a "confirmed contradiction" between this mechanism and that ROM's
+expected row-by-row output. It dissolved once the test's source was read correctly:
+the readme's row-varying bytes come from *NMI's* row-varying position against the
+`LDA #1`/`CLC`/`NOP` window — the NMI handler's `bit SNDCHN` acks the APU IRQ, so
+for most rows the IRQ never dispatches at all — plus a real one-cycle emulator bug
+in the `$2002` read sampling dot that shifted every row. `3-nmi_and_irq` now passes;
+see the debug log's 2026-07-04 entries.)
 
 ## Interrupt sequences do not poll interrupts
 
@@ -98,6 +95,12 @@ all funnel through it), consumed by the next queue-empty dispatch, which skips b
 the `pending_nmi` direct-service check and the IRQ dispatch check for exactly that
 one dispatch. The pending flags survive untouched, so the interrupt fires one
 instruction later.
+
+The same suppression models the DMA case: an interrupt that first asserts during an
+OAM/DMC DMA stall missed the stalled instruction's poll point, so the run loop
+delivers it at DMA end and calls `Cpu::suppress_next_interrupt_poll()` — the first
+post-DMA instruction executes before service (`4-irq_and_dma`'s long "8" band). An
+IRQ already pending when the DMA began services immediately after it.
 
 This was the missing "third timing rule" for `cpu_interrupts_v2/2-nmi_and_brk`
 rows 8-9 ("NMI after SEC at beginning of IRQ handler" — the handler's `SEC` must
@@ -171,10 +174,17 @@ knowing if debugging these tests further:
   starting PPU phases, including several straddling VBlank onset exactly
   (`verify_sync_vbl_contract` test, `src/tests/roms.rs`) — not a source of any
   known bug either.
-- The APU's frame-IRQ fires at exactly the documented absolute cycle (`4017`
-  write-jitter delay + first `MODE0` step = 29832 cycles after the write),
-  verified in total isolation from the CPU/PPU (`isolate_apu_frame_irq_timing`
-  test). Also not a source of any known bug.
+- The APU's frame-IRQ fires `frame_reset_delay` (7, as applied at instruction
+  start — 4 unticked instruction cycles + hardware's 3-cycle post-write-cycle
+  delay) + first `MODE0` step (29828) = 29835 cycles after the $4017 write is
+  applied. See the $4017 write handler in `src/apu/mod.rs` for the derivation;
+  the old flat 4 made the IRQ fire 3 cycles early relative to the instruction
+  stream and was the root cause of `4-irq_and_dma`'s 3-row table shift.
+- One known residual: `$4015` reads sample the APU 4 cycles early (the read is
+  applied while the APU still sits at the reading instruction's start). This
+  is the sole remaining defect behind `5-branch_delays_irq` (its CK column);
+  fixing it requires moving the read and write anchors together so `sync_apu`
+  still parity-locks — see the debug log's final entries before touching it.
 
 These three subsystems being independently proven correct is *why* the
 `3-nmi_and_irq` contradiction above is genuinely unresolved rather than just

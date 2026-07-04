@@ -95,9 +95,9 @@ These are confirmed missing features tied to failing blargg ROM tests. The proje
 
 The remaining failures (`cpu_interrupts_v2` test 5 plus the combined suite) exercise interrupt-sequencing behaviour that depends on *which cycle within a multi-cycle instruction* a signal arrives.
 
-- **`cpu_interrupts_v2/5-branch_delays_irq`** — A page-crossing branch should abort its T4 page-fix cycle when IRQ is pending at T3, taking only 3 cycles total and pushing the page-wrong PC. `BranchPageFix` already handles the case where `pending_irq` was set at opcode-fetch time. The remaining bug: `pending_irq` is only set in the opcode-fetch path (queue empty, IRQ visible before the branch opcode is read). If the APU fires during the branch's *RunInstruction* tick (which consumes T1+T2+T3 all at once), `cpu.irq()` is called after that tick completes with `delta=3`, but at that point the queue is non-empty so the irq-to-`pending_irq` promotion never happens. `BranchPageFix` then sees `pending_irq=false` and applies the page fix instead of aborting it. ROM output (`T+ CK PC` table): T+0 and T+1 are correct (IRQ was pending before opcode fetch → `pending_irq` set → abort works, PC=`$0E`); T+2 onwards are wrong (IRQ arrives during RunInstruction, page fix completes, PC=`$03`).
+- **`cpu_interrupts_v2/5-branch_delays_irq`** — the PC column (the test's nominal subject: a taken branch ignoring IRQ on its last clock, and the page-cross abort case) now matches the readme exactly. The only remaining defect is the CK column, uniformly `expected - 4`: `$4015` reads sample the APU 4 cycles early (the read is applied while the APU still sits at the reading instruction's start, but the read cycle is the instruction's 4th/last cycle). Fixing it naively breaks `sync_apu`'s read-vs-write relative alignment; the read and write anchors must move together and `sync_apu`'s parity-lock convergence must be made to work first — see the investigation log's 2026-07-04 test-5 entry for the full analysis and the bounded next step.
 
-- **`cpu_interrupts_v2` combined suite** — fails because the individual tests above fail.
+- **`cpu_interrupts_v2` combined suite** — fails because test 5 fails.
 
 ### Failing PPU tests
 
