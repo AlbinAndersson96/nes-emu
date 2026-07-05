@@ -114,7 +114,7 @@ impl App {
                         &mut self.last_fps_update,
                         Instant::now(),
                     );
-                    self.renderer.present(&bus.ppu.frame, self.fps).unwrap();
+                    self.renderer.present(&bus.ppu.frame, Some(self.fps)).unwrap();
                 }
             }
         }

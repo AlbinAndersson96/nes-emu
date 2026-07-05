@@ -184,28 +184,31 @@ impl Renderer {
         })
     }
 
-    pub fn present(&mut self, frame: &[u8; 256 * 240], fps: f64) -> Result<(), pixels::Error> {
-        let mut buf = *frame;
-        // 16px text: at 10px the DejaVu Sans Mono glyphs (curved ones like
-        // 'S' especially) fell below the hard 50%-coverage threshold in enough
-        // places to render as illegible fragments. 16px keeps every glyph in
-        // "199 FPS" (the widest plausible reading) legible; box sized to match.
-        for y in 0..FPS_BOX_HEIGHT {
-            for x in 0..FPS_BOX_WIDTH {
-                buf[y * 256 + x] = PLACEHOLDER_BG_INDEX;
+    pub fn present(&mut self, frame: &[u8; 256 * 240], fps: Option<f64>) -> Result<(), pixels::Error> {
+        match fps {
+            Some(fps) => {
+                let mut buf = *frame;
+                for y in 0..FPS_BOX_HEIGHT {
+                    for x in 0..FPS_BOX_WIDTH {
+                        buf[y * 256 + x] = PLACEHOLDER_BG_INDEX;
+                    }
+                }
+                let text = format!("{:.0} FPS", fps.round());
+                draw_text(
+                    &mut buf,
+                    &self.font,
+                    &text,
+                    2,
+                    13,
+                    16.0,
+                    PLACEHOLDER_FG_INDEX,
+                );
+                nes_to_rgba(&buf, self.pixels.frame_mut());
+            }
+            None => {
+                nes_to_rgba(frame, self.pixels.frame_mut());
             }
         }
-        let text = format!("{:.0} FPS", fps.round());
-        draw_text(
-            &mut buf,
-            &self.font,
-            &text,
-            2,
-            13,
-            16.0,
-            PLACEHOLDER_FG_INDEX,
-        );
-        nes_to_rgba(&buf, self.pixels.frame_mut());
         self.pixels.render()
     }
 
