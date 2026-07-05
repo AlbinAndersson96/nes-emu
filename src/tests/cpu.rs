@@ -1,5 +1,5 @@
-use crate::cpu::{Cpu, FLAG_B, FLAG_C, FLAG_I, FLAG_N, FLAG_U, FLAG_V, FLAG_Z};
 use super::TestBus;
+use crate::cpu::{Cpu, FLAG_B, FLAG_C, FLAG_I, FLAG_N, FLAG_U, FLAG_V, FLAG_Z};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -951,8 +951,8 @@ fn rti_restores_state() {
     //   pop hi → sp=0xFD, reads mem[0x01FD]
     cpu.sp = 0xFA;
     bus.mem[0x01FB] = FLAG_U | FLAG_C; // P
-    bus.mem[0x01FC] = 0x02;             // PC lo
-    bus.mem[0x01FD] = 0x03;             // PC hi → $0302
+    bus.mem[0x01FC] = 0x02; // PC lo
+    bus.mem[0x01FD] = 0x03; // PC hi → $0302
     w(&mut bus, 0x0200, &[0x40]); // RTI
     let cycles = cpu.step(&mut bus);
     assert_eq!(cpu.pc, 0x0302);
@@ -1062,7 +1062,7 @@ fn slo_shifts_then_oras() {
     w(&mut bus, 0x0200, &[0x07, 0x50]); // SLO $50
     cpu.step(&mut bus);
     assert_eq!(bus.mem[0x0050], 0x80); // ASL
-    assert_eq!(cpu.a, 0x81);           // ORA
+    assert_eq!(cpu.a, 0x81); // ORA
     assert!(cpu.flag(FLAG_N));
 }
 
@@ -1074,7 +1074,7 @@ fn sre_shifts_then_eors() {
     w(&mut bus, 0x0200, &[0x47, 0x50]); // SRE $50
     cpu.step(&mut bus);
     assert_eq!(bus.mem[0x0050], 0x7F); // LSR of 0xFF
-    assert_eq!(cpu.a, 0x80);           // 0xFF ^ 0x7F
+    assert_eq!(cpu.a, 0x80); // 0xFF ^ 0x7F
     assert!(cpu.flag(FLAG_N));
     assert!(cpu.flag(FLAG_C)); // LSR shifted out bit 0
 }
@@ -1088,7 +1088,7 @@ fn rla_rotates_then_ands() {
     w(&mut bus, 0x0200, &[0x27, 0x50]); // RLA $50
     cpu.step(&mut bus);
     assert_eq!(bus.mem[0x0050], 0x00); // ROL 0x80 with C=0 → 0x00, C=1
-    assert_eq!(cpu.a, 0x00);            // AND with 0x00
+    assert_eq!(cpu.a, 0x00); // AND with 0x00
     assert!(cpu.flag(FLAG_Z));
     assert!(cpu.flag(FLAG_C));
 }
@@ -1207,12 +1207,12 @@ fn cycle_counts_load_store() {
 #[test]
 fn cycle_counts_rmw() {
     let cases: &[(&[u8], u8)] = &[
-        (&[0x06, 0x00], 5), // ASL zp
-        (&[0x16, 0x00], 6), // ASL zp,X
+        (&[0x06, 0x00], 5),       // ASL zp
+        (&[0x16, 0x00], 6),       // ASL zp,X
         (&[0x0E, 0x00, 0x00], 6), // ASL abs
         (&[0x1E, 0x00, 0x00], 7), // ASL abs,X
-        (&[0xE6, 0x00], 5), // INC zp
-        (&[0xC6, 0x00], 5), // DEC zp
+        (&[0xE6, 0x00], 5),       // INC zp
+        (&[0xC6, 0x00], 5),       // DEC zp
     ];
     for &(program, expected) in cases {
         let (mut cpu, mut bus) = make();

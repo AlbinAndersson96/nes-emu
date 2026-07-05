@@ -18,21 +18,21 @@ use triangle::TriangleChannel;
 /// The 4-step mode (MODE0) fires the IRQ flag on cycles 29828, 29829, AND 29830,
 /// which matches hardware behaviour (three consecutive IRQ assertions per frame).
 const MODE0: [(u32, bool, bool, bool, bool); 6] = [
-    (7_457,  true,  false, false, false),
-    (14_913, true,  true,  false, false),
-    (22_371, true,  false, false, false),
-    (29_828, false, false, true,  false), // IRQ (cycle before step 4)
-    (29_829, true,  true,  true,  false), // Q+H+IRQ (step 4)
-    (29_830, false, false, true,  true),  // IRQ + sequence restart
+    (7_457, true, false, false, false),
+    (14_913, true, true, false, false),
+    (22_371, true, false, false, false),
+    (29_828, false, false, true, false), // IRQ (cycle before step 4)
+    (29_829, true, true, true, false),   // Q+H+IRQ (step 4)
+    (29_830, false, false, true, true),  // IRQ + sequence restart
 ];
 
 const MODE1: [(u32, bool, bool, bool, bool); 6] = [
-    (7_457,  true,  false, false, false),
-    (14_913, true,  true,  false, false),
-    (22_371, true,  false, false, false),
+    (7_457, true, false, false, false),
+    (14_913, true, true, false, false),
+    (22_371, true, false, false, false),
     (29_829, false, false, false, false), // silent step (no IRQ, no reset)
-    (37_281, true,  true,  false, false),
-    (37_282, false, false, false, true),  // sequence restart
+    (37_281, true, true, false, false),
+    (37_282, false, false, false, true), // sequence restart
 ];
 
 pub struct Apu {
@@ -43,14 +43,19 @@ pub struct Apu {
     pub dmc: DmcChannel,
 
     // Frame counter
-    frame_mode: bool,   // false = 4-step (mode 0), true = 5-step (mode 1)
+    frame_mode: bool, // false = 4-step (mode 0), true = 5-step (mode 1)
     irq_inhibit: bool,
     frame_irq_flag: bool,
     /// CPU cycles elapsed since the last frame counter reset.
     frame_cycles: u32,
     /// Cycles remaining until a $4017-triggered frame counter reset takes effect.
-    /// Writing $4017 sets this to 3; each tick decrements it; at 0 frame_cycles resets.
+    /// Writing $4017 sets this to 7; each tick decrements it; at 0 frame_cycles
+    /// resets. See the $4017 write handler for the derivation of 7.
     frame_reset_delay: u8,
+    /// Free-running CPU-cycle counter — never reset by register writes (unlike
+    /// frame_cycles). Its parity models the APU's divide-by-2 get/put clock,
+    /// which decides whether an OAM DMA takes 513 or 514 cycles.
+    cycle_count: u64,
 }
 
 impl Apu {
@@ -66,6 +71,7 @@ impl Apu {
             frame_irq_flag: false,
             frame_cycles: 0,
             frame_reset_delay: 0,
+            cycle_count: 0,
         }
     }
 
@@ -80,8 +86,9 @@ impl Apu {
 
     fn tick_one(&mut self) {
         self.frame_cycles += 1;
+        self.cycle_count += 1;
 
-        // $4017 write jitter: reset takes effect 3 CPU cycles after the write.
+        // $4017 write-to-reset delay; see the $4017 write handler for derivation.
         if self.frame_reset_delay > 0 {
             self.frame_reset_delay -= 1;
             if self.frame_reset_delay == 0 {
@@ -92,8 +99,7 @@ impl Apu {
         let c = self.frame_cycles;
 
         // Frame counter — fire events and reset at the end of each sequence.
-        let steps: &[(u32, bool, bool, bool, bool)] =
-            if self.frame_mode { &MODE1 } else { &MODE0 };
+        let steps: &[(u32, bool, bool, bool, bool)] = if self.frame_mode { &MODE1 } else { &MODE0 };
 
         for &(at, quarter, half, irq, reset) in steps {
             if c == at {
@@ -141,6 +147,13 @@ impl Apu {
         self.noise.clock_length();
     }
 
+    /// Parity of the free-running APU cycle counter (the divide-by-2 get/put
+    /// clock). Sampled by the bus when $4014 is written to pick the 513- or
+    /// 514-cycle OAM DMA stall.
+    pub fn cycle_parity(&self) -> bool {
+        self.cycle_count & 1 == 1
+    }
+
     fn take_irq(&mut self) -> bool {
         // Level-triggered: the IRQ line is asserted as long as frame_irq_flag is
         // set (and not inhibited), or the DMC IRQ flag is set.  Nothing is
@@ -165,13 +178,27 @@ impl Apu {
 
     fn status_byte(&self) -> u8 {
         let mut s = 0u8;
-        if self.pulse1.length_active()   { s |= 0x01; }
-        if self.pulse2.length_active()   { s |= 0x02; }
-        if self.triangle.length_active() { s |= 0x04; }
-        if self.noise.length_active()    { s |= 0x08; }
-        if self.dmc.active()             { s |= 0x10; }
-        if self.frame_irq_flag           { s |= 0x40; }
-        if self.dmc.irq_flag             { s |= 0x80; }
+        if self.pulse1.length_active() {
+            s |= 0x01;
+        }
+        if self.pulse2.length_active() {
+            s |= 0x02;
+        }
+        if self.triangle.length_active() {
+            s |= 0x04;
+        }
+        if self.noise.length_active() {
+            s |= 0x08;
+        }
+        if self.dmc.active() {
+            s |= 0x10;
+        }
+        if self.frame_irq_flag {
+            s |= 0x40;
+        }
+        if self.dmc.irq_flag {
+            s |= 0x80;
+        }
         s
     }
 
@@ -211,9 +238,20 @@ impl Apu {
                 if self.irq_inhibit {
                     self.frame_irq_flag = false;
                 }
-                // On real hardware the frame counter reset takes effect 3–4 CPU
-                // cycles after the write (write jitter). Use 4 cycles.
-                self.frame_reset_delay = 4;
+                // On real hardware the frame counter reset takes effect 3-4 CPU
+                // cycles after the WRITE CYCLE (nesdev "APU Frame Counter" write
+                // jitter). This write is applied while the APU still sits at the
+                // START of the writing instruction: the caller only ticks the APU
+                // (tick_apu(delta)) after the whole instruction, and a $4017 write
+                // is in practice always an absolute store whose bus write happens
+                // on its 4th/last cycle. The APU is therefore 4 cycles behind the
+                // real write cycle at this point, and the correct delay from HERE
+                // is 4 (instruction cycles still to be ticked) + 3 (hardware
+                // post-write-cycle delay, sync_apu-aligned case) = 7. Verified against
+                // cpu_interrupts_v2/4-irq_and_dma's expected table (a flat 4 here
+                // shifts the whole table by exactly 3 rows) — see
+                // docs/investigations/cpu_interrupt_debug_log.md (2026-07-04).
+                self.frame_reset_delay = 7;
                 // 5-step mode: immediate quarter/half-frame fires at write time.
                 if self.frame_mode {
                     self.clock_quarter_frame();
@@ -252,11 +290,11 @@ impl Apu {
     ///
     /// Returns 0.0 until the channels are fully implemented.
     pub fn output(&self) -> f32 {
-        let p1    = f32::from(self.pulse1.output());
-        let p2    = f32::from(self.pulse2.output());
-        let tri   = f32::from(self.triangle.output());
+        let p1 = f32::from(self.pulse1.output());
+        let p2 = f32::from(self.pulse2.output());
+        let tri = f32::from(self.triangle.output());
         let noise = f32::from(self.noise.output());
-        let dmc   = f32::from(self.dmc.output());
+        let dmc = f32::from(self.dmc.output());
 
         let pulse_out = if p1 + p2 > 0.0 {
             95.88 / (8128.0 / (p1 + p2) + 100.0)

@@ -1174,3 +1174,334 @@ likely *not* the actual bug — the real ~4-cycle discrepancy is probably in unr
 macros or the IRQ handler's own delay chain.
 
 ---
+
+### 2026-07-04 (new session) — test 2 (nmi_and_brk) FIXED AND PASSING: the "third timing rule" was already documented on nesdev — interrupt sequences do not poll interrupts
+
+**Hypothesis:** The previous session's open question — why does the vector target's first
+instruction (`SEC` at `$E316`) execute before a just-missed NMI can preempt it (test 2
+rows 8-9) — is answered verbatim by the same nesdev `CPU_interrupts` page that resolved the
+hijack-window question: **"The interrupt sequences themselves do not perform interrupt
+polling, meaning at least one instruction from the interrupt handler will execute before
+another interrupt is serviced."** This is not a per-instruction grace quirk — it's a general
+rule: the 7-cycle interrupt sequence never polls, so an edge that misses the T6 hijack check
+sits pending across the entire remainder of the sequence AND the handler's first
+instruction's dispatch, only being serviced at the dispatch after that.
+
+**Change (`src/cpu/mod.rs`):** new `interrupt_poll_suppressed` flag, set by `VectorFetchHi`
+(the final micro-op of every interrupt sequence — BRK, NMI, and IRQ all funnel through it),
+consumed by the next queue-empty dispatch: for exactly that one dispatch, both the
+`pending_nmi` direct-service check and the IRQ dispatch check are skipped (the pending flags
+themselves survive untouched — the interrupt still fires, one instruction later).
+
+**Result: `cpu_interrupts_v2/2-nmi_and_brk` PASSES** — all 10 rows exactly match the
+readme, including the previously-wrong rows 8-9 (now `27 36 00`: the handler's `SEC` runs
+first, so the captured P has C=1). Full `cargo test`: **178 passed / 8 failed, zero
+regressions** (previous baseline 177/9). Remaining failures: `power_up_palette` (PPU,
+hardware-specific), 3 `sprite_hit_roms` timing tests (separate PPU investigation, not this
+log's scope), and `cpu_interrupts_v2` 3/4/5 + combined.
+
+Tests 3, 4, 5 outputs are byte-identical before/after this change (verified) — this rule
+doesn't interact with their failure modes. First implementation attempt had zero effect for
+an embarrassing reason worth recording: the flag was gated at dispatch but never *set* in
+`VectorFetchHi` — a diff-your-own-edit sanity check (`grep -n poll_suppressed`) caught it.
+
+---
+
+### 2026-07-04 (same session) — `frame_reset_delay = 7` DERIVED (not curve-fit) and applied: the $4017 write is applied 4 cycles before the hardware write cycle — tests 3, 4, 5 ALL move substantially closer
+
+**The key realization came from test 4, not test 5.** Comparing test 4's full output against
+the readme: our table was the expected table **shifted by exactly 3 rows** (`got[+N] ==
+expected[+N-3]` for every row), and crucially the shift is present at offsets +0..+3 — before
+the sprite DMA is even reached. So test 4's failure was (mostly) NOT a DMA bug: it was a
+constant 3-cycle IRQ-too-early offset, the same ~3 cycles test 5's earlier
+`frame_reset_delay` sweep found (7 fixed the PC column) and the same direction test 3 needed.
+
+**Mechanistic derivation (this is why 7 is physical, not a magic number):**
+- Our emulator applies the `$4017` write side effect when `bus.write` runs *inside*
+  `RunInstruction` — at that moment the APU has not yet been ticked for any of the writing
+  instruction's own cycles (`tick_apu(delta)` runs after the whole instruction). So the write
+  lands at APU-time T0 = start of the STA instruction.
+- On hardware, the bus write happens on STA abs's **4th (last) cycle** = T0+4, and the frame
+  counter reset takes effect 3-4 CPU cycles *after the write cycle* (nesdev "APU Frame
+  Counter" write jitter; 3 = the `sync_apu`-aligned case per blargg's own sync_apu.s comment).
+- Hardware reset therefore lands at T0+4+3 = T0+7; our delay mechanism resets at T0+delay.
+  Correct delay **= 7**, decomposed as 4 (instruction cycles the APU hasn't seen yet) + 3
+  (hardware post-write-cycle delay, aligned case). The old flat 4 made the frame IRQ fire
+  3 cycles early relative to the instruction stream — invisible to the isolated
+  `isolate_apu_frame_irq_timing` measurement (which measures from write *application*, not
+  from the hardware write cycle) and to `instr_timing` (no APU IRQ involvement), which is
+  why three prior verification passes all came back "clean" while the bug sat between them.
+- The previous session's rejection of 7 as "not physically real" was wrong because it
+  compared 7 against the hardware's 3-4 jitter without accounting for the harness's own
+  4-cycle write-application lag. The parity-jitter experiment (3 vs 4) was also doomed for
+  the same reason: both values are ~3-4 cycles early; the granularity error swamped the
+  parity nuance.
+
+**Change (`src/apu/mod.rs`):** `frame_reset_delay = 7` with the full derivation in a comment.
+
+**Results (all verified against readme tables, zero regressions — 178/8 unchanged):**
+- **Test 4:** rows +0..+10 now match EXACTLY (previously all shifted). Remaining wrong:
+  IRQs arriving *during* the DMA window are serviced at the first post-DMA dispatch
+  (column 7) where hardware lets one post-DMA instruction execute first (column 8: the IRQ
+  missed STA's penultimate-cycle poll; the next poll point is the following NOP's). Also the
+  tail 8→9 transition is one offset early (+526 vs +527) — likely the unimplemented
+  513-vs-514 odd-cycle OAM DMA stall (`Bus::oam_dma`'s own comment flags this).
+- **Test 3:** first column went from `23,23,23,23,23,27×7` to `21,21,20×7,25,25,25` — the
+  readme wants `23,21,21,20×7,25,25`. The value family and transition structure now match;
+  everything is one row early (we start at `21` where hardware still shows `23` at row 0).
+  The "confirmed contradiction" from the previous sessions is essentially resolved: the
+  missing piece was never the NMI/IRQ arbitration mechanism, it was the IRQ line asserting
+  3 cycles early, which changed *which* rows fall in the hijack window.
+- **Test 5:** PC column now matches the readme pattern; CK column still off by a constant
+  (readme wants 2/1/3..., we print FE/FD/FF... = -2/-3/-1 as i8 — a constant -4).
+- Tests 1 (`cli_latency`) and 2 (`nmi_and_brk`) still pass.
+
+**Next steps, in order of tractability:** (1) test 4: deliver-but-suppress IRQs that first
+assert during DMA (mirror of the `interrupt_poll_suppressed` rule, harness-level since DMA
+stalling lives in the run loop); (2) test 4 tail: 514-cycle OAM DMA when started on an odd
+CPU cycle; (3) test 3: one-row-early residual — plausibly the IRQ needs to be one more cycle
+later (hardware d=4 case → delay 8? or the $4015-read granularity on the ack path), needs a
+row-0 trace before touching anything; (4) test 5's constant CK -4 — measurement-chain
+(`print_dec`/`setb` macro costs) still unverified.
+
+---
+
+### 2026-07-04 (same session) — test 4 (irq_and_dma) FIXED AND PASSING: DMA-window interrupt suppression + 514-cycle odd-start OAM DMA
+
+Both next-steps (1) and (2) above implemented; each fixed exactly the rows predicted.
+
+**(1) DMA-window suppression (`src/tests/roms.rs` + two new public `Cpu` methods).** An IRQ
+that first asserts during a DMA stall missed the stalled instruction's penultimate-cycle
+poll; the next poll point belongs to the first post-DMA instruction, so that instruction
+executes before the IRQ is serviced. Implementation: the harness's DMA branch no longer
+calls `cpu.irq()`/`cpu.nmi()` immediately — it accumulates `dma_irq_deferred` (only if the
+IRQ line wasn't already pending when the DMA began, checked via new `Cpu::irq_line_pending()`)
+and `dma_nmi_deferred`, then on DMA exit delivers them and calls the new
+`Cpu::suppress_next_interrupt_poll()` (reuses `interrupt_poll_suppressed`). An IRQ already
+pending *before* the DMA began services at the first post-DMA dispatch as before (that's the
+readme's column-7 band, +7..+10 — IRQs landing within STA $4014's own 4 cycles). This took
+the "8" band from `[+524,+525]` (just the post-DMA NOP) to `[+11..+525]` — every DMA-window
+row now correct except +526.
+
+**(2) 513/514-cycle OAM DMA (`src/bus.rs` + `Apu::cycle_parity()`).** nesdev: the stall is
++1 cycle when the $4014 write lands on an odd CPU cycle (the APU's divide-by-2 get/put
+clock). Added a free-running `cycle_count` to the APU (never reset by register writes,
+unlike `frame_cycles` — this is the same "free-running divider" concept the earlier reverted
+parity experiment modeled) and `Bus::oam_dma` now picks 513/514 from its parity.
+`Bus::tick_dma` generalized to wait 1-or-2 cycles before the 256 copy pairs. Note the same
+4-cycle write-application lag as $4017 applies, but 4 is even so the APU counter's parity at
+write-application time already equals the write cycle's parity — no adjustment needed. The
+polarity anchor (odd→514) was verified empirically: it fixes +526, and the opposite polarity
+would leave the boundary where it was. In this ROM the DMA start parity alternates row by
+row (the row delay changes by 1 cycle per row), and the readme's clean band edge is still
+consistent with alternating 513/514 because the edge condition moves in steps of 0 and 2.
+
+**Result: `cpu_interrupts_v2/4-irq_and_dma` PASSES — every row exact.** Full `cargo test`:
+**179 passed / 7 failed, zero regressions** (`sprite_ram`, `dummy_reads_apu`, and all other
+DMA-adjacent tests unaffected). Remaining in scope: tests 3, 5, combined.
+
+---
+
+### 2026-07-04 (same session) — test 3 (nmi_and_irq) FIXED AND PASSING: $2002 read sampling dot moved one dot earlier (onto the read cycle's last dot); previous sessions' mechanism model corrected
+
+**First, corrections to earlier entries, from finally reading `3-nmi_and_irq.s` properly:**
+- Test 3's NMI is a **real VBL edge**, not the `$2000` mid-VBlank instant-fire quirk (the
+  `sta PPUCTRL` arm lands ~80 cycles *before* the second VBL onset after `sync_vbl`; the
+  earlier "arm NMI (relies on the mid-VBlank instant-fire quirk)" reading of the disassembly
+  was wrong).
+- Rows 0-9 show `$1D=00` not because of hijack subtleties but because the NMI handler's
+  `bit SNDCHN` **acks the APU frame IRQ** — after any NMI-first row, the IRQ line drops
+  before the IRQ can ever be dispatched.
+- The readme's rows 0-2 boundaries (`23→21→21→20`) are therefore governed purely by
+  **NMI-vs-code** position (which instruction boundary the edge precedes), not by any
+  NMI-vs-IRQ arbitration. Rows 3-9 (`20`) are NMI preempting the NOP or hijacking the IRQ
+  dispatch that always begins there ("IRQ always occurs here" — at the NOP, not at
+  `LDA #1`); either way the pushed P is `$20`. Rows 10-11 (`25` / `$1D=20`) are the IRQ
+  handler winning, executing its first instruction `sec` (this needs the
+  interrupt-sequences-don't-poll rule fixed earlier today!), then NMI preempting the second
+  instruction. The "confirmed contradiction" recorded by previous sessions dissolves
+  completely under this reading — no exotic mid-dispatch NMI takeover semantics needed.
+
+**The residual defect after the `frame_reset_delay=7` fix:** every row exactly one cycle
+early (our table = readme's shifted up one row). Ruled out first: PPU-CPU power-up dot
+alignment (swept the start position by ±1-2 dots via `debug_set_position` — output
+byte-identical, because `sync_vbl` dot-locks the test code to VBL onset each row and
+absorbs any static phase shift; also, `frame_reset_delay=8`/parity stories can't work
+because rows 0-2 don't involve IRQ at all, and the $4017 write parity provably alternates
+row-to-row in this test while the readme table is smooth).
+
+**Root cause: the dot within the $2002 read cycle at which our emulator samples PPU state.**
+The old pre-advance sampled at instruction-start +12 dots — one dot *past* the read cycle
+(cycle 4 spans dots +9..+11). `sync_vbl` locks code position to VBL onset *through this
+read*, so a one-dot sampling error shifts the code lock by one dot. A frame is a
+non-integer 29780⅔ CPU cycles, so that one dot only crosses a CPU-cycle boundary after
+multi-frame accumulation: test 2 (1 frame from sync to its edge) was unaffected; test 3
+(2 frames) came out exactly one cycle off. This explains the previously-baffling "test 2
+exact, test 3 uniformly 1 late" split with one constant.
+
+**Change (`src/bus.rs` + new `Ppu::tick_dots`):** the $2002 pre-advance now ticks 8 dots,
+samples the register, then ticks the 9th dot — value captured ON the read cycle's final dot,
+total still 9 dots so PPU-CPU alignment never drifts. (NMI edges from both segments feed
+`ppu_preadvance_nmi` as before.)
+
+**Result: `cpu_interrupts_v2/3-nmi_and_irq` PASSES — table matches the readme exactly.**
+Full `cargo test`: **180 passed / 6 failed, zero regressions** — `vbl_clear_time` (the most
+$2002-timing-sensitive previously-passing test) still passes, tests 1/2/4 still pass.
+Re-ran the ignored diagnostics: `verify_sync_vbl_contract` holds at every starting phase;
+`sweep_single_2002_read`'s observable boundary moved 82171→82172, exactly one dot, as
+predicted. Also kept from this session's test-3 work: a `$2000` write pre-advance in
+`src/bus.rs` (writes apply at the store's last cycle, mirroring the $2002 read mechanism) —
+tested no-effect on all current tests (test 3's NMI turned out not to be instant-fire) but
+mechanistically correct and harmless; and the earlier PPU-alignment sweep tooling note that
+`debug_set_position` shifts ARE effective (verified) — the null result was real
+self-calibration by `sync_vbl`, not a broken knob.
+
+Remaining in scope: test 5 (`branch_delays_irq`) and the combined suite.
+
+---
+
+### 2026-07-04 (same session) — test 5 (branch_delays_irq): CK column root cause IDENTIFIED ($4015 reads sample the APU 4 cycles early), but the fix requires making sync_apu's convergence work — attempted, reverted, next step defined
+
+**State after the fixes above:** test 5's `test_jmp` PC column matches the readme exactly
+(the branch/IRQ interaction itself — the test's nominal subject — is now correct); only the
+CK column is wrong, uniformly `expected - 4` on every row.
+
+**CK decoded (from `5-branch_delays_irq.s`'s `irq:` handler):** after a fixed initial delay,
+the handler runs a loop of exactly 29831 cycles per iteration (`dex; delay 29831-13;
+bit $4015; bit $4015; bvc`) — one cycle longer than the 29830-cycle frame-IRQ period, so the
+4-cycle window between the two `bit $4015`s (first clears the flag, second samples V) walks
+across the flag's set-moment at 1 cycle per iteration. X at loop exit is printed as CK. A
+uniform CK error of exactly -4 therefore means our `$4015` read samples the flag 4 cycles
+early — and it does: the read is applied while the APU still sits at the START of the
+reading instruction (the read cycle is `BIT abs`'s 4th/last cycle; `tick_apu` runs after the
+whole instruction). Same lag family as the $4017 write (fixed via `frame_reset_delay=7`) and
+the $2002 read (fixed via pre-advance).
+
+**Attempt 1 — flat 4-cycle APU pre-advance on $4015 reads only** (mirroring the PPU's $2002
+mechanism, with `Bus::take_apu_preadvance` consumed by the run loop): CK moved as predicted,
+but test 3 regressed to an early framework failure (code 0x01, no table) and test 5's PC
+column regressed (leading `03` row again). **Why: sync_apu compares $4015 reads against a
+$4017 write it just made — only their RELATIVE alignment matters, and this moved one anchor
+without the other.** The delay=7 calibration had the old read lag baked in.
+
+**Attempt 2 — fully-consistent physical model:** pre-advance BOTH $4015 reads and $4017
+writes by 4 cycles (to their true access cycle), set `frame_reset_delay` to the physical 3/4
+chosen by write-cycle parity (both polarities tried). Result: tests 3/4/5 all fail, and test
+4's bands come out RAGGED (widths 1/2/3 mixed) — the parity-conditional delay is wobbling
+row to row. Instrumented the post-`sync_apu` write parity: **1,1,0,0,1,0,1,1,0,0 — not
+locked.** On hardware `sync_apu`'s entire purpose is to exit at a deterministic APU-clock
+parity; ours doesn't converge. The physical model cannot work until it does, and its
+convergence in turn depends on cycle-exact $4015 read behavior (and possibly on the frame
+IRQ flag's true set-granularity — APU cycles vs the three consecutive CPU cycles we model).
+**Reverted both attempts** — back to the tests-1-4-passing state (flat `frame_reset_delay=7`,
+no APU pre-advance), verified 4/6 + zero regressions.
+
+**Concrete next step for test 5 (bounded):** read `source/common/sync_apu.s`'s convergence
+loop and derive its contract (what sequence of $4015 observations it needs to see, at what
+cycle offsets, to exit parity-locked). Then fix the $4015 read sampling AND the write
+anchoring TOGETHER so that contract holds in-emulator (an isolated `sync_apu` parity-lock
+test, in the style of `verify_sync_vbl_contract`, is the right harness: run sync_apu from N
+different APU phases and assert the exit parity is always the same). Only then re-apply the
+physical parity-conditional reset delay and re-check CK. Expect `frame_reset_delay=7` to be
+re-derivable as the aligned-parity case of the physical model.
+
+---
+
+### 2026-07-05 (new session) — test 5 (branch_delays_irq) FIXED AND PASSING; combined suite PASSES; all 159 blargg CPU ROM tests now pass
+
+Four distinct fixes, each verified against a specific readme sub-table. The suite went
+180/6 → **182 passed / 4 failed** (remaining: `power_up_palette` + 3 `sprite_hit_roms`,
+both outside this investigation's scope). All six `cpu_interrupts_v2` tests pass.
+
+**(1) The previous session's "attempt 1" failure was a mechanical overdraw, not a wrong
+model.** Re-examined before pursuing the sync_apu-convergence plan: the $4015 read is
+applied inside the `RunInstruction` tick, whose harness delta is only 3 (the dispatch
+tick's cycle is APU-ticked separately) — so the old 4-cycle pre-advance overdrew by 1 and
+the harness's `saturating_sub` silently swallowed it, drifting the APU 1 cycle ahead per
+$4015 read. That drift is what broke test 3's framework, not the read-anchor model.
+**Fix:** debt-carrying inside the bus — `Bus::tick_apu` repays `apu_preadvance_cycles`
+before advancing, so run loops need no contract at all and total APU time is conserved
+across tick boundaries (`APU_READ_PREADVANCE = 4`, `src/bus.rs`). With that, the CK column
+came out exact and test 3 stayed green. sync_apu's `bne` branch now sees the flag (it takes
+the +1 path uniformly, matching hardware's aligned case uniformly) — everything downstream
+shifts consistently, so no parity model is needed after all. The `sync_apu` parity-lock
+plan from the previous entry became unnecessary.
+
+**(2) OAM DMA parity anchor re-flipped (odd→513, even→514).** The sync_apu +1 shift from
+(1) uniformly flips the parity of `$4014` write cycles in tests that sync first. The
+polarity anchor was always empirical (our absolute cycle 0 is arbitrary); re-anchored so
+test 4's `+526/+527` boundary matches again. Both anchors can't be justified from nesdev's
+"odd CPU cycle" wording alone — our counter's phase relative to hardware's get/put clock is
+unknowable; the readme tables are the ground truth.
+
+**(3) An IRQ already visible at a branch's dispatch preempts it like any other
+instruction.** Removed the dispatch-path special case that set `pending_irq` and always let
+branches execute first. All four sub-test tables agree: the earliest rows push the branch's
+own address (`test_branch_not_taken` rows 0-1 were pushing 06 instead of 04 before this).
+The mid-branch arrival cases are covered by the level-refresh (`irq_pending`) feeding
+`BranchPageFix`'s abort check and the next dispatch. `pending_irq` is now never set — dead
+field retained (the `#[ignore]`d tracers destructure `debug_irq_state`'s 4-tuple); flagged
+for cleanup.
+
+**(4) The aborted page-fix cycle still elapses.** Cross-calibrating CK across
+`test_branch_taken_pagecross`'s matching rows (0-1, 5-9) vs the off-by-one rows 2-4 showed
+hardware's abort-band handler entry at branch T1 + 11, i.e. the aborted T4 is spent (page
+fix skipped, page-wrong PC pushed) and the full 7-cycle sequence follows. Our abort path
+skipped that cycle (entry at +10). Added the elapsed cycle in `BranchPageFix`'s abort arm.
+
+**(5) The taken-branch last-clock ignore applies only to an IRQ that FIRST asserts on that
+clock.** `branch_delay_irq` used to defer whatever was pending at the next dispatch —
+wrong for IRQs asserted during the branch's T1/T2, which hardware services right after the
+branch (`test_branch_taken` rows 2-3: pushed 07, not 0A). Distinguishing T2 from T3
+arrivals needs per-cycle APU ticking: the harness now ticks the APU one cycle at a time
+(mirroring the PPU loop) and calls the new `Cpu::irq_on_last_cycle()` for a line that first
+asserts on an instruction-completing tick's final cycle; the dispatch defers only when
+`branch_delay_irq && irq_asserted_on_last_cycle`. Rows 4-8 (the readme's `*** special
+case`) still defer correctly; rows 2-3 now service at branch+10.
+
+**Result: `5-branch_delays_irq` passes — all four sub-tests match their readme tables
+row-for-row (all four CRCs) — and `cpu_interrupts_v2` (combined) passes.** Zero regressions
+anywhere (`cli_latency`'s branch-heavy CLI/PLP cases were the main risk for (3)/(5) and
+stay green; `instr_timing` unaffected by (4) since it never takes the abort path).
+
+**Known divergence note:** the per-cycle APU ticking + `irq_on_last_cycle` + DMA-deferral
+logic live in the test harness's run loop (`src/tests/roms.rs`); `main.rs`'s real run loop
+still ticks the APU in bulk and lacks the NMI defer machinery too (pre-existing, noted
+before). The bus-level changes ($4015 pre-advance with internal repay, DMA length parity)
+apply everywhere automatically. Porting the harness loop refinements to `main.rs` is the
+natural next hygiene task.
+
+---
+
+### 2026-07-05 (same session) — hygiene: run-loop unification (`SystemClock`) + dead `pending_irq` removed
+
+Both hygiene items flagged at the close of the investigation are done; no behavior change
+(verified: full `cargo test` byte-identical at 182 passed / 4 failed before and after).
+
+**Run-loop unification.** The blargg-verified stepping logic moved verbatim from
+`run_until_complete_trace` into a new shared `SystemClock` (`src/system.rs`): one `step()`
+per CPU tick or DMA stall cycle, carrying the deferred-NMI-edge rule, per-cycle APU ticking
+with `Cpu::irq_on_last_cycle` flagging, and DMA interrupt deferral, plus the loop-persistent
+state they need. Consumers:
+- the ROM test harness (`run_until_complete_trace`, `src/tests/roms.rs`) — now a thin loop
+  around `SystemClock::step` (kept: sig-polling, timeout, the NMI trace hook via
+  `StepResult::nmi`);
+- the real run loop (`App::step_frame`, `src/app.rs`) — previously a stale duplicate with
+  none of the interrupt-delivery refinements. `AppState::Running` now owns a `SystemClock`,
+  and `load_rom_into` gained the same post-reset `tick_ppu(7)`/`tick_apu(8)` pre-advance the
+  harness does (it had none).
+New public `Cpu::instruction_boundary()` replaces the harness's `#[cfg(test)]`
+queue-length peek. The `#[ignore]`d diagnostic tracers keep their private historical loop
+copies (unchanged, already documented as stale-prone — trust `SystemClock`, not them).
+
+**Dead `pending_irq` removed.** Orphaned when the branch dispatch special-case was removed
+(nothing set it anymore). Field, its clears in `BranchPageFix`/`VectorFetchHi`, and its arm
+of the RunInstruction-end deferred-fire condition deleted; `debug_irq_state()` is now a
+3-tuple (three tracer call sites updated).
+
+Note on runtime verification: the GUI app can't be launched in this environment (headless);
+the port is exercised by `app.rs`'s unit tests plus the fact that the identical `SystemClock`
+path now runs all 159 blargg ROMs. Worth a quick real-ROM smoke run on a desktop next time
+the app is touched.
+
+---

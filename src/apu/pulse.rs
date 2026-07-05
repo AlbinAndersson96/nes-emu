@@ -51,8 +51,7 @@ impl PulseChannel {
                 self.timer_period = (self.timer_period & 0xFF00) | u16::from(data);
             }
             3 => {
-                self.timer_period =
-                    (self.timer_period & 0x00FF) | (u16::from(data & 0x07) << 8);
+                self.timer_period = (self.timer_period & 0x00FF) | (u16::from(data & 0x07) << 8);
                 if self.enabled {
                     self.length.load(data >> 3);
                 }

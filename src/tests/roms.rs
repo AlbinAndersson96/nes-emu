@@ -4,6 +4,7 @@ use crate::bus::Bus;
 use crate::cartridge::Cartridge;
 use crate::cpu::Bus as CpuBus;
 use crate::cpu::Cpu;
+use crate::system::SystemClock;
 
 // Signature written by the test ROM to $6001-$6003 once output is valid.
 const SIG: [u8; 3] = [0xDE, 0xB0, 0x61];
@@ -46,26 +47,19 @@ fn read_output(bus: &mut Bus) -> String {
     out
 }
 
-fn run_until_complete(bus: &mut Bus, cpu: &mut Cpu) {
-    run_until_complete_trace(bus, cpu, false);
-}
-
 fn run_until_complete_trace(bus: &mut Bus, cpu: &mut Cpu, trace_nmi: bool) {
     let mut total_cycles: u64 = 0;
     let mut nmi_count: u32 = 0;
     let mut last_nmi_cycle: u64 = 0;
-    // An NMI edge landing on any single-cycle tick's own last (only) cycle isn't
-    // visible to real 6502 hardware's interrupt poll (sampled going into a cycle,
-    // using state from before it begins) — it only becomes externally visible one
-    // tick later than an edge on an earlier cycle would. See docs/cpu_interrupts.md
-    // for how this was derived (matches readme expected-output tables for
-    // cpu_interrupts_v2/2-nmi_and_brk; not fully verified for every sub-case).
-    let mut deferred_nmi = false;
+    // All interrupt-delivery rules (deferred NMI edges, per-cycle APU ticking
+    // with last-cycle IRQ flagging, DMA interrupt deferral) live in the shared
+    // SystemClock — the same stepping code main.rs runs. See
+    // docs/cpu_interrupts.md for how each rule was derived and verified.
+    let mut clock = SystemClock::new();
 
     loop {
-        let sig_valid = bus.read(0x6001) == SIG[0]
-            && bus.read(0x6002) == SIG[1]
-            && bus.read(0x6003) == SIG[2];
+        let sig_valid =
+            bus.read(0x6001) == SIG[0] && bus.read(0x6002) == SIG[1] && bus.read(0x6003) == SIG[2];
 
         if sig_valid {
             let status = bus.read(0x6000);
@@ -83,49 +77,17 @@ fn run_until_complete_trace(bus: &mut Bus, cpu: &mut Cpu, trace_nmi: bool) {
             panic!("timed out after {} cycles", total_cycles);
         }
 
-        // Per-cycle execution: DMA stalls the CPU; one tick per clock.
-        // For CPU ticks, advance PPU/APU by however many cycles that tick consumed
-        // (RunInstruction is a bulk micro-op; fetch tick consumes 0 cycles).
-        let cycles_before = cpu.cycles;
-        if bus.dma_active() {
-            bus.tick_dma();
-            if bus.tick_ppu(1) { cpu.nmi(); }
-            if bus.tick_apu(1) { cpu.irq(); }
-            total_cycles += 1;
-        } else {
-            cpu.tick(bus);
-            let delta = cpu.cycles - cycles_before;
-            // Consume any PPU cycles pre-advanced during a $2002 read, then tick
-            // the remaining cycles one-at-a-time for accurate NMI delivery.
-            let (extra, extra_nmi) = bus.take_ppu_preadvance();
-            let mut got_nmi = extra_nmi;
-            let remaining = delta.saturating_sub(extra as u64);
-            let mut new_deferred = false;
-            for i in 0..remaining {
-                if bus.tick_ppu(1) {
-                    if i + 1 == remaining {
-                        new_deferred = true;
-                    } else {
-                        got_nmi = true;
-                    }
-                }
-            }
-            if deferred_nmi {
-                got_nmi = true;
-            }
-            deferred_nmi = new_deferred;
-            if got_nmi {
-                if trace_nmi && nmi_count < 30 {
-                    let gap = cpu.cycles - last_nmi_cycle;
-                    eprintln!("NMI#{:02} at cycle={} pc={:#06x} gap={}", nmi_count, cpu.cycles, cpu.pc, gap);
-                    last_nmi_cycle = cpu.cycles;
-                    nmi_count += 1;
-                }
-                cpu.nmi();
-            }
-            if bus.tick_apu(delta) { cpu.irq(); }
-            total_cycles += delta;
+        let result = clock.step(cpu, bus);
+        if result.nmi && trace_nmi && nmi_count < 30 {
+            let gap = cpu.cycles - last_nmi_cycle;
+            eprintln!(
+                "NMI#{:02} at cycle={} pc={:#06x} gap={}",
+                nmi_count, cpu.cycles, cpu.pc, gap
+            );
+            last_nmi_cycle = cpu.cycles;
+            nmi_count += 1;
         }
+        total_cycles += result.cycles;
     }
 }
 
@@ -160,40 +122,70 @@ macro_rules! rom_test {
 // All ROM test files below were written by Shay Green <gblargg@gmail.com>.
 
 // instr_test-v5/rom_singles — one ROM per addressing mode / instruction group
-rom_test!(basics,     "cpu/01-basics.nes");
-rom_test!(implied,    "cpu/02-implied.nes");
-rom_test!(immediate,  "cpu/03-immediate.nes");
-rom_test!(zero_page,  "cpu/04-zero_page.nes");
-rom_test!(zp_xy,      "cpu/05-zp_xy.nes");
-rom_test!(absolute,   "cpu/06-absolute.nes");
-rom_test!(abs_xy,     "cpu/07-abs_xy.nes");
-rom_test!(ind_x,      "cpu/08-ind_x.nes");
-rom_test!(ind_y,      "cpu/09-ind_y.nes");
-rom_test!(branches,   "cpu/10-branches.nes");
-rom_test!(stack,      "cpu/11-stack.nes");
-rom_test!(jmp_jsr,    "cpu/12-jmp_jsr.nes");
-rom_test!(rts,        "cpu/13-rts.nes");
-rom_test!(rti,        "cpu/14-rti.nes");
-rom_test!(brk,        "cpu/15-brk.nes");
-rom_test!(special,    "cpu/16-special.nes");
+rom_test!(basics, "cpu/01-basics.nes");
+rom_test!(implied, "cpu/02-implied.nes");
+rom_test!(immediate, "cpu/03-immediate.nes");
+rom_test!(zero_page, "cpu/04-zero_page.nes");
+rom_test!(zp_xy, "cpu/05-zp_xy.nes");
+rom_test!(absolute, "cpu/06-absolute.nes");
+rom_test!(abs_xy, "cpu/07-abs_xy.nes");
+rom_test!(ind_x, "cpu/08-ind_x.nes");
+rom_test!(ind_y, "cpu/09-ind_y.nes");
+rom_test!(branches, "cpu/10-branches.nes");
+rom_test!(stack, "cpu/11-stack.nes");
+rom_test!(jmp_jsr, "cpu/12-jmp_jsr.nes");
+rom_test!(rts, "cpu/13-rts.nes");
+rom_test!(rti, "cpu/14-rti.nes");
+rom_test!(brk, "cpu/15-brk.nes");
+rom_test!(special, "cpu/16-special.nes");
 
 // instr_test-v5 — full suite (Mapper 1 / MMC1, 256 KB PRG-ROM)
 rom_test!(official_only, "cpu/official_only.nes");
 
 // cpu_interrupts_v2 — interrupt timing and sequencing
-rom_test!(cpu_interrupts_v2_cli_latency,      "cpu/cpu_interrupts_v2/rom_singles/1-cli_latency.nes");
-rom_test!(cpu_interrupts_v2_nmi_and_brk,      "cpu/cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes");
-rom_test!(cpu_interrupts_v2_nmi_and_irq,      "cpu/cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes");
-rom_test!(cpu_interrupts_v2_irq_and_dma,      "cpu/cpu_interrupts_v2/rom_singles/4-irq_and_dma.nes");
-rom_test!(cpu_interrupts_v2_branch_delays_irq, "cpu/cpu_interrupts_v2/rom_singles/5-branch_delays_irq.nes");
-rom_test!(cpu_interrupts_v2_all,              "cpu/cpu_interrupts_v2/cpu_interrupts.nes");
+rom_test!(
+    cpu_interrupts_v2_cli_latency,
+    "cpu/cpu_interrupts_v2/rom_singles/1-cli_latency.nes"
+);
+rom_test!(
+    cpu_interrupts_v2_nmi_and_brk,
+    "cpu/cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes"
+);
+rom_test!(
+    cpu_interrupts_v2_nmi_and_irq,
+    "cpu/cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes"
+);
+rom_test!(
+    cpu_interrupts_v2_irq_and_dma,
+    "cpu/cpu_interrupts_v2/rom_singles/4-irq_and_dma.nes"
+);
+rom_test!(
+    cpu_interrupts_v2_branch_delays_irq,
+    "cpu/cpu_interrupts_v2/rom_singles/5-branch_delays_irq.nes"
+);
+rom_test!(
+    cpu_interrupts_v2_all,
+    "cpu/cpu_interrupts_v2/cpu_interrupts.nes"
+);
 
 // instr_misc — instruction behaviour edge cases
-rom_test!(instr_misc_abs_x_wrap,    "cpu/instr_misc/rom_singles/01-abs_x_wrap.nes");
-rom_test!(instr_misc_branch_wrap,   "cpu/instr_misc/rom_singles/02-branch_wrap.nes");
-rom_test!(instr_misc_dummy_reads,   "cpu/instr_misc/rom_singles/03-dummy_reads.nes");
-rom_test!(instr_misc_dummy_reads_apu, "cpu/instr_misc/rom_singles/04-dummy_reads_apu.nes");
-rom_test!(instr_misc_all,           "cpu/instr_misc/instr_misc.nes");
+rom_test!(
+    instr_misc_abs_x_wrap,
+    "cpu/instr_misc/rom_singles/01-abs_x_wrap.nes"
+);
+rom_test!(
+    instr_misc_branch_wrap,
+    "cpu/instr_misc/rom_singles/02-branch_wrap.nes"
+);
+rom_test!(
+    instr_misc_dummy_reads,
+    "cpu/instr_misc/rom_singles/03-dummy_reads.nes"
+);
+rom_test!(
+    instr_misc_dummy_reads_apu,
+    "cpu/instr_misc/rom_singles/04-dummy_reads_apu.nes"
+);
+rom_test!(instr_misc_all, "cpu/instr_misc/instr_misc.nes");
 
 // instr_timing — cycle-accurate instruction timing (Mapper 1 / MMC1)
 rom_test!(instr_timing, "cpu/instr_timing/instr_timing.nes");
@@ -225,22 +217,27 @@ fn nmi_brk_crc_trace() {
     let mut crc_count = 0u32;
 
     loop {
-        let sig_valid = bus.read(0x6001) == SIG[0]
-            && bus.read(0x6002) == SIG[1]
-            && bus.read(0x6003) == SIG[2];
+        let sig_valid =
+            bus.read(0x6001) == SIG[0] && bus.read(0x6002) == SIG[1] && bus.read(0x6003) == SIG[2];
         if sig_valid {
             let status = bus.read(0x6000);
             if status < 0x80 {
-                return;  // pass — just collecting trace
+                return; // pass — just collecting trace
             }
         }
-        if total_cycles >= MAX_CYCLES { panic!("timeout"); }
+        if total_cycles >= MAX_CYCLES {
+            panic!("timeout");
+        }
 
         let cycles_before = cpu.cycles;
         if bus.dma_active() {
             bus.tick_dma();
-            if bus.tick_ppu(1) { cpu.nmi(); }
-            if bus.tick_apu(1) { cpu.irq(); }
+            if bus.tick_ppu(1) {
+                cpu.nmi();
+            }
+            if bus.tick_apu(1) {
+                cpu.irq();
+            }
             total_cycles += 1;
         } else {
             let pc_now = cpu.pc;
@@ -259,10 +256,16 @@ fn nmi_brk_crc_trace() {
             let mut got_nmi = extra_nmi;
             let remaining = delta.saturating_sub(extra as u64);
             for _ in 0..remaining {
-                if bus.tick_ppu(1) { got_nmi = true; }
+                if bus.tick_ppu(1) {
+                    got_nmi = true;
+                }
             }
-            if got_nmi { cpu.nmi(); }
-            if bus.tick_apu(delta) { cpu.irq(); }
+            if got_nmi {
+                cpu.nmi();
+            }
+            if bus.tick_apu(delta) {
+                cpu.irq();
+            }
             total_cycles += delta;
         }
     }
@@ -279,9 +282,10 @@ fn nmi_brk_disasm() {
     let mut bus = Bus::new();
     bus.insert_cartridge(cartridge);
     // Dump ROM bytes around the sync loop and row-test setup
-    for &base in &[0xE200u16, 0xE220u16, 0xE240u16, 0xE260u16, 0xE280u16,
-                   0xE2A0u16, 0xE2C0u16, 0xE2E0u16, 0xE300u16, 0xE320u16,
-                   0xE340u16, 0xE440u16, 0xE460u16, 0xE480u16] {
+    for &base in &[
+        0xE200u16, 0xE220u16, 0xE240u16, 0xE260u16, 0xE280u16, 0xE2A0u16, 0xE2C0u16, 0xE2E0u16,
+        0xE300u16, 0xE320u16, 0xE340u16, 0xE440u16, 0xE460u16, 0xE480u16,
+    ] {
         eprint!("${:04X}:", base);
         for offset in 0..32u16 {
             eprint!(" {:02X}", bus.read(base + offset));
@@ -315,7 +319,7 @@ fn nmi_brk_row_trace() {
     const STA2000_ADDR: u16 = 0xE32B;
     // Return points of JSR calls between STA$2000 and BRK:
     const AFTER_E442_1: u16 = 0xE332; // after JSR $E442(timing_offset) → PHP
-    const AFTER_E458:   u16 = 0xE339; // after JSR $E458($73) → LDA #$D7
+    const AFTER_E458: u16 = 0xE339; // after JSR $E458($73) → LDA #$D7
     const AFTER_E442_2: u16 = 0xE33E; // after JSR $E442($D7) → PLA
     let mut last_nmi_cycle: u64 = 0;
     let mut last_brk_t1_cycle: u64 = 0;
@@ -323,13 +327,11 @@ fn nmi_brk_row_trace() {
     let mut cycle_after_e442_1: u64 = 0;
     let mut cycle_after_e458: u64 = 0;
     let mut cycle_after_e442_2: u64 = 0;
-    let mut nmi_count: u32 = 0;
     let mut deferred_nmi = false;
 
     loop {
-        let sig_valid = bus.read(0x6001) == SIG[0]
-            && bus.read(0x6002) == SIG[1]
-            && bus.read(0x6003) == SIG[2];
+        let sig_valid =
+            bus.read(0x6001) == SIG[0] && bus.read(0x6002) == SIG[1] && bus.read(0x6003) == SIG[2];
         if sig_valid {
             let status = bus.read(0x6000);
             if status < 0x80 {
@@ -347,8 +349,12 @@ fn nmi_brk_row_trace() {
         let pc_now = cpu.pc;
         if bus.dma_active() {
             bus.tick_dma();
-            if bus.tick_ppu(1) { cpu.nmi(); }
-            if bus.tick_apu(1) { cpu.irq(); }
+            if bus.tick_ppu(1) {
+                cpu.nmi();
+            }
+            if bus.tick_apu(1) {
+                cpu.irq();
+            }
             total_cycles += 1;
         } else {
             // Capture PC before tick to detect when $E350 is reached (LDA $1F)
@@ -381,9 +387,15 @@ fn nmi_brk_row_trace() {
                 last_sta2000_t1_cycle = cpu.cycles;
             }
             // Detect return points of JSR calls (opcode fetch, delta=1).
-            if pc_now == AFTER_E442_1 && delta == 1 { cycle_after_e442_1 = cpu.cycles; }
-            if pc_now == AFTER_E458   && delta == 1 { cycle_after_e458   = cpu.cycles; }
-            if pc_now == AFTER_E442_2 && delta == 1 { cycle_after_e442_2 = cpu.cycles; }
+            if pc_now == AFTER_E442_1 && delta == 1 {
+                cycle_after_e442_1 = cpu.cycles;
+            }
+            if pc_now == AFTER_E458 && delta == 1 {
+                cycle_after_e458 = cpu.cycles;
+            }
+            if pc_now == AFTER_E442_2 && delta == 1 {
+                cycle_after_e442_2 = cpu.cycles;
+            }
 
             let (extra, extra_nmi) = bus.take_ppu_preadvance();
             let mut got_nmi = extra_nmi;
@@ -404,10 +416,11 @@ fn nmi_brk_row_trace() {
             deferred_nmi = new_deferred;
             if got_nmi {
                 last_nmi_cycle = cpu.cycles;
-                nmi_count += 1;
                 cpu.nmi();
             }
-            if bus.tick_apu(delta) { cpu.irq(); }
+            if bus.tick_apu(delta) {
+                cpu.irq();
+            }
             total_cycles += delta;
         }
     }
@@ -442,16 +455,17 @@ fn nmi_brk_micro_trace() {
     const TRACE_ROWS: [u32; 3] = [7, 8, 9];
 
     loop {
-        let sig_valid = bus.read(0x6001) == SIG[0]
-            && bus.read(0x6002) == SIG[1]
-            && bus.read(0x6003) == SIG[2];
+        let sig_valid =
+            bus.read(0x6001) == SIG[0] && bus.read(0x6002) == SIG[1] && bus.read(0x6003) == SIG[2];
         if sig_valid {
             let status = bus.read(0x6000);
             if status < 0x80 {
                 return; // just collecting trace
             }
         }
-        if total_cycles >= MAX_CYCLES { panic!("timeout"); }
+        if total_cycles >= MAX_CYCLES {
+            panic!("timeout");
+        }
 
         let cycles_before = cpu.cycles;
         let pc_now = cpu.pc;
@@ -459,8 +473,12 @@ fn nmi_brk_micro_trace() {
 
         if bus.dma_active() {
             bus.tick_dma();
-            if bus.tick_ppu(1) { cpu.nmi(); }
-            if bus.tick_apu(1) { cpu.irq(); }
+            if bus.tick_ppu(1) {
+                cpu.nmi();
+            }
+            if bus.tick_apu(1) {
+                cpu.irq();
+            }
             total_cycles += 1;
         } else {
             if pc_now == 0xE350 && prev_pc != 0xE350 {
@@ -473,7 +491,10 @@ fn nmi_brk_micro_trace() {
                 }
             }
             if pc_now == STA2000_ADDR && prev_pc != STA2000_ADDR && trace_this_row {
-                eprintln!("  [row {}] STA $2000 (NMI armed) at cycle={}", row, cpu.cycles);
+                eprintln!(
+                    "  [row {}] STA $2000 (NMI armed) at cycle={}",
+                    row, cpu.cycles
+                );
             }
             prev_pc = pc_now;
 
@@ -503,16 +524,36 @@ fn nmi_brk_micro_trace() {
             if got_nmi {
                 cpu.nmi();
             }
-            if bus.tick_apu(delta) { cpu.irq(); }
+            if bus.tick_apu(delta) {
+                cpu.irq();
+            }
             total_cycles += delta;
 
             if trace_this_row {
                 eprintln!(
                     "  [row {}] pc={:#06x} delta={} cycles={} ql:{}->{} pending_nmi:{}->{} nmi_pending:{}->{}{}{}",
-                    row, pc_now, delta, cpu.cycles,
-                    ql_before, ql_after, pn_before, pn_after, np_before, np_after,
-                    if got_nmi { "  <== NMI EDGE (cpu.nmi() called)" } else { "" },
-                    if new_deferred { "  [defer-armed]" } else if delivered_deferred { "  [deferred-delivered]" } else { "" }
+                    row,
+                    pc_now,
+                    delta,
+                    cpu.cycles,
+                    ql_before,
+                    ql_after,
+                    pn_before,
+                    pn_after,
+                    np_before,
+                    np_after,
+                    if got_nmi {
+                        "  <== NMI EDGE (cpu.nmi() called)"
+                    } else {
+                        ""
+                    },
+                    if new_deferred {
+                        "  [defer-armed]"
+                    } else if delivered_deferred {
+                        "  [deferred-delivered]"
+                    } else {
+                        ""
+                    }
                 );
             }
         }
@@ -544,21 +585,25 @@ fn nmi_irq_generic_trace() {
     let mut event_count = 0u32;
 
     loop {
-        let sig_valid = bus.read(0x6001) == SIG[0]
-            && bus.read(0x6002) == SIG[1]
-            && bus.read(0x6003) == SIG[2];
+        let sig_valid =
+            bus.read(0x6001) == SIG[0] && bus.read(0x6002) == SIG[1] && bus.read(0x6003) == SIG[2];
         if sig_valid {
             let status = bus.read(0x6000);
             if status < 0x80 {
                 return; // just collecting trace
             }
         }
-        if total_cycles >= MAX_CYCLES { panic!("timeout"); }
+        if total_cycles >= MAX_CYCLES {
+            panic!("timeout");
+        }
 
         let v1f = bus.read(0x1F) as u16;
         let v1d = bus.read(0x1D) as u16;
         if (v1f != last_1f || v1d != last_1d) && event_count < 200 {
-            eprintln!("RESULT change at cycle={} pc={:#06x}: $1F={:#04x} $1D={:#04x}", cpu.cycles, cpu.pc, v1f, v1d);
+            eprintln!(
+                "RESULT change at cycle={} pc={:#06x}: $1F={:#04x} $1D={:#04x}",
+                cpu.cycles, cpu.pc, v1f, v1d
+            );
             last_1f = v1f;
             last_1d = v1d;
             event_count += 1;
@@ -567,8 +612,12 @@ fn nmi_irq_generic_trace() {
         let cycles_before = cpu.cycles;
         if bus.dma_active() {
             bus.tick_dma();
-            if bus.tick_ppu(1) { cpu.nmi(); }
-            if bus.tick_apu(1) { cpu.irq(); }
+            if bus.tick_ppu(1) {
+                cpu.nmi();
+            }
+            if bus.tick_apu(1) {
+                cpu.irq();
+            }
             total_cycles += 1;
         } else {
             cpu.tick(&mut bus);
@@ -644,14 +693,17 @@ fn nmi_irq_row_trace() {
     const CAPTURE: u16 = 0xE364; // LDX $1F
 
     loop {
-        let sig_valid = bus.read(0x6001) == SIG[0]
-            && bus.read(0x6002) == SIG[1]
-            && bus.read(0x6003) == SIG[2];
+        let sig_valid =
+            bus.read(0x6001) == SIG[0] && bus.read(0x6002) == SIG[1] && bus.read(0x6003) == SIG[2];
         if sig_valid {
             let status = bus.read(0x6000);
-            if status < 0x80 { return; }
+            if status < 0x80 {
+                return;
+            }
         }
-        if total_cycles >= MAX_CYCLES { panic!("timeout"); }
+        if total_cycles >= MAX_CYCLES {
+            panic!("timeout");
+        }
 
         let cycles_before = cpu.cycles;
         let pc_now = cpu.pc;
@@ -662,7 +714,11 @@ fn nmi_irq_row_trace() {
                 let irq_col = bus.read(0x1D);
                 eprintln!(
                     "Row {:2}: NMI_col={:#04x} IRQ_col={:#04x}  delay_call_cyc={} lda1_cyc={} lda1-delay={}  nmi_cyc={} nmi-lda1={:+} had_nmi={}",
-                    row, nmi_col, irq_col, last_delay_call_cycle, last_lda1_cycle,
+                    row,
+                    nmi_col,
+                    irq_col,
+                    last_delay_call_cycle,
+                    last_lda1_cycle,
                     last_lda1_cycle as i64 - last_delay_call_cycle as i64,
                     last_nmi_cycle,
                     last_nmi_cycle as i64 - last_lda1_cycle as i64,
@@ -682,8 +738,12 @@ fn nmi_irq_row_trace() {
 
         if bus.dma_active() {
             bus.tick_dma();
-            if bus.tick_ppu(1) { cpu.nmi(); }
-            if bus.tick_apu(1) { cpu.irq(); }
+            if bus.tick_ppu(1) {
+                cpu.nmi();
+            }
+            if bus.tick_apu(1) {
+                cpu.irq();
+            }
             total_cycles += 1;
         } else {
             cpu.tick(&mut bus);
@@ -710,7 +770,9 @@ fn nmi_irq_row_trace() {
                 have_nmi_this_row = true;
                 cpu.nmi();
             }
-            if bus.tick_apu(delta) { cpu.irq(); }
+            if bus.tick_apu(delta) {
+                cpu.irq();
+            }
             total_cycles += delta;
         }
     }
@@ -760,14 +822,17 @@ fn nmi_irq_stage_trace() {
     ];
 
     loop {
-        let sig_valid = bus.read(0x6001) == SIG[0]
-            && bus.read(0x6002) == SIG[1]
-            && bus.read(0x6003) == SIG[2];
+        let sig_valid =
+            bus.read(0x6001) == SIG[0] && bus.read(0x6002) == SIG[1] && bus.read(0x6003) == SIG[2];
         if sig_valid {
             let status = bus.read(0x6000);
-            if status < 0x80 { return; }
+            if status < 0x80 {
+                return;
+            }
         }
-        if total_cycles >= MAX_CYCLES { panic!("timeout"); }
+        if total_cycles >= MAX_CYCLES {
+            panic!("timeout");
+        }
 
         let cycles_before = cpu.cycles;
         let pc_now = cpu.pc;
@@ -788,8 +853,12 @@ fn nmi_irq_stage_trace() {
 
         if bus.dma_active() {
             bus.tick_dma();
-            if bus.tick_ppu(1) { cpu.nmi(); }
-            if bus.tick_apu(1) { cpu.irq(); }
+            if bus.tick_ppu(1) {
+                cpu.nmi();
+            }
+            if bus.tick_apu(1) {
+                cpu.irq();
+            }
             total_cycles += 1;
         } else {
             let (pn_before, np_before, ql_before) = cpu.debug_nmi_state();
@@ -799,7 +868,15 @@ fn nmi_irq_stage_trace() {
                 let (pn_after, np_after, ql_after) = cpu.debug_nmi_state();
                 eprintln!(
                     "  fine pc={:#06x} delta={} cycles={} ql:{}->{} pending_nmi:{}->{} nmi_pending:{}->{}",
-                    pc_now, delta, cpu.cycles, ql_before, ql_after, pn_before, pn_after, np_before, np_after
+                    pc_now,
+                    delta,
+                    cpu.cycles,
+                    ql_before,
+                    ql_after,
+                    pn_before,
+                    pn_after,
+                    np_before,
+                    np_after
                 );
             }
             let (extra, extra_nmi) = bus.take_ppu_preadvance();
@@ -821,13 +898,19 @@ fn nmi_irq_stage_trace() {
             deferred_nmi = new_deferred;
             if got_nmi {
                 if (0..12).contains(&row) {
-                    eprintln!("row {} NMI_EDGE cycle={} pc={:#06x}", row, cpu.cycles, pc_now);
+                    eprintln!(
+                        "row {} NMI_EDGE cycle={} pc={:#06x}",
+                        row, cpu.cycles, pc_now
+                    );
                 }
                 cpu.nmi();
             }
             if bus.tick_apu(delta) {
                 if (0..12).contains(&row) && !logged_irq_this_row {
-                    eprintln!("row {} IRQ_EDGE(first) cycle={} pc={:#06x}", row, cpu.cycles, pc_now);
+                    eprintln!(
+                        "row {} IRQ_EDGE(first) cycle={} pc={:#06x}",
+                        row, cpu.cycles, pc_now
+                    );
                     logged_irq_this_row = true;
                 }
                 cpu.irq();
@@ -853,10 +936,13 @@ fn isolate_delay_routines() {
 
     // $E440-$E48A verbatim.
     const DELAY_CODE: &[u8] = &[
-        0xE9, 0x07, 0xC9, 0x07, 0xB0, 0xFA, 0x4A, 0xB0, 0x00, 0xF0, 0x05, 0x4A, 0xF0, 0x04, 0x90, 0x02, // E440
-        0xD0, 0x00, 0x60, 0xC9, 0x00, 0xD0, 0x01, 0x60, 0x48, 0xA9, 0xD7, 0x20, 0x42, 0xE4, 0x68, 0x18, // E450
-        0x69, 0xFF, 0xD0, 0xF4, 0x60, 0xC9, 0x00, 0xD0, 0x01, 0x60, 0x48, 0xA9, 0xCA, 0x20, 0x42, 0xE4, // E460
-        0xA9, 0xFF, 0x20, 0x58, 0xE4, 0x68, 0x18, 0x69, 0xFF, 0xD0, 0xEF, 0x60,                          // E470
+        0xE9, 0x07, 0xC9, 0x07, 0xB0, 0xFA, 0x4A, 0xB0, 0x00, 0xF0, 0x05, 0x4A, 0xF0, 0x04, 0x90,
+        0x02, // E440
+        0xD0, 0x00, 0x60, 0xC9, 0x00, 0xD0, 0x01, 0x60, 0x48, 0xA9, 0xD7, 0x20, 0x42, 0xE4, 0x68,
+        0x18, // E450
+        0x69, 0xFF, 0xD0, 0xF4, 0x60, 0xC9, 0x00, 0xD0, 0x01, 0x60, 0x48, 0xA9, 0xCA, 0x20, 0x42,
+        0xE4, // E460
+        0xA9, 0xFF, 0x20, 0x58, 0xE4, 0x68, 0x18, 0x69, 0xFF, 0xD0, 0xEF, 0x60, // E470
     ];
 
     // Measures total cycles for: LDA #a_val ; JSR target ; <lands here>
@@ -898,13 +984,25 @@ fn isolate_delay_routines() {
     // $E442 entry: "delay A cycles" (from JSR to RTS, per the modulo-7 loop).
     for &a in &[0u8, 1, 6, 7, 8, 14, 15, 0x15, 0x18, 0x37, 0xB8, 0xD7] {
         let total = measure(0xE442, a);
-        eprintln!("E442(A={:#04x}={:3}): total={} (routine-only, total-8) = {}", a, a, total, total.saturating_sub(8));
+        eprintln!(
+            "E442(A={:#04x}={:3}): total={} (routine-only, total-8) = {}",
+            a,
+            a,
+            total,
+            total.saturating_sub(8)
+        );
     }
     eprintln!("---");
     // $E458 entry: coarse loop calling E442(A=$D7) repeatedly, A times.
     for &a in &[1u8, 2, 3, 0x73, 0x74] {
         let total = measure(0xE458, a);
-        eprintln!("E458(A={:#04x}={:3}): total={} (routine-only, total-8) = {}", a, a, total, total.saturating_sub(8));
+        eprintln!(
+            "E458(A={:#04x}={:3}): total={} (routine-only, total-8) = {}",
+            a,
+            a,
+            total,
+            total.saturating_sub(8)
+        );
     }
 }
 
@@ -921,7 +1019,9 @@ fn isolate_delay_routines() {
 #[ignore]
 fn sweep_vbl_poll_loop() {
     // BIT $2002 (E207-equiv); loop: BIT $2002 (E20A-equiv); BPL loop (E20D-equiv); halt.
-    const CODE: &[u8] = &[0x2C, 0x02, 0x20, 0x2C, 0x02, 0x20, 0x10, 0xFB, 0x4C, 0x08, 0x03];
+    const CODE: &[u8] = &[
+        0x2C, 0x02, 0x20, 0x2C, 0x02, 0x20, 0x10, 0xFB, 0x4C, 0x08, 0x03,
+    ];
     let base = 0x0300u16;
     let halt = base + 8;
 
@@ -963,7 +1063,9 @@ fn sweep_vbl_poll_loop() {
                     }
                 }
             }
-            if deferred_nmi { got_nmi = true; }
+            if deferred_nmi {
+                got_nmi = true;
+            }
             deferred_nmi = new_deferred;
             let _ = got_nmi; // NMI is masked off ($2000 untouched here); irrelevant to this loop.
         }
@@ -1135,10 +1237,16 @@ fn verify_sync_vbl_contract() {
             let mut new_deferred = false;
             for i in 0..remaining {
                 if bus.tick_ppu(1) {
-                    if i + 1 == remaining { new_deferred = true; } else { got_nmi = true; }
+                    if i + 1 == remaining {
+                        new_deferred = true;
+                    } else {
+                        got_nmi = true;
+                    }
                 }
             }
-            if deferred_nmi { got_nmi = true; }
+            if deferred_nmi {
+                got_nmi = true;
+            }
             deferred_nmi = new_deferred;
             let _ = got_nmi; // NMI masked off throughout sync_vbl; irrelevant here.
         }
@@ -1149,11 +1257,17 @@ fn verify_sync_vbl_contract() {
         (!immediate, later, ret_cycles)
     }
 
-    for &pre_cycles in &[0u64, 100, 1000, 10000, 27390, 27395, 82175, 82182, 82183, 150000] {
+    for &pre_cycles in &[
+        0u64, 100, 1000, 10000, 27390, 27395, 82175, 82182, 82183, 150000,
+    ] {
         let (immediate_clear, later_set, ret_cycles) = run_sync_vbl(&data, pre_cycles);
         eprintln!(
             "pre_cycles={:8} immediate_clear={} later_set={} ret_cycles={} contract_ok={}",
-            pre_cycles, immediate_clear, later_set, ret_cycles, immediate_clear && later_set
+            pre_cycles,
+            immediate_clear,
+            later_set,
+            ret_cycles,
+            immediate_clear && later_set
         );
     }
 }
@@ -1163,9 +1277,11 @@ fn verify_sync_vbl_contract() {
 // one CPU cycle at a time, recording the first cycle (relative to the write)
 // at which `tick()` reports the IRQ line asserted. Compares against the
 // hand-derived expectation from `src/apu/mod.rs`'s own MODE0 table:
-// frame_reset_delay(4) + first IRQ step (29828) = 29832 cycles after the
-// write. This directly tests whether the APU's own internal timing table
-// fires at the documented absolute cycle, with zero CPU/PPU involvement.
+// frame_reset_delay(7) + first IRQ step (29828) = 29835 cycles after the
+// write's APPLICATION (the delay is anchored to the start of the writing
+// instruction — see the $4017 handler's derivation comment). This directly
+// tests whether the APU's own internal timing table fires at the expected
+// absolute cycle, with zero CPU/PPU involvement.
 //   cargo test isolate_apu_frame_irq_timing -- --nocapture --ignored
 #[test]
 #[ignore]
@@ -1181,9 +1297,10 @@ fn isolate_apu_frame_irq_timing() {
         }
     }
     eprintln!(
-        "First IRQ asserted at cycle={:?} after $4017=$00 write (expected: 4 + 29828 = 29832)",
+        "First IRQ asserted at cycle={:?} after $4017=$00 write (expected: 7 + 29828 = 29835)",
         first_irq_cycle
     );
+    assert_eq!(first_irq_cycle, Some(29_835));
 }
 
 // Diagnostic: fine-grained NMI-vs-IRQ arbitration trace for a chosen row of
@@ -1223,9 +1340,13 @@ fn nmi_irq_row0_arbitration_trace() {
                 && bus.read(0x6003) == SIG[2];
             if sig_valid {
                 let status = bus.read(0x6000);
-                if status < 0x80 { return; }
+                if status < 0x80 {
+                    return;
+                }
             }
-            if total_cycles >= MAX_CYCLES { panic!("timeout"); }
+            if total_cycles >= MAX_CYCLES {
+                panic!("timeout");
+            }
 
             let cycles_before = cpu.cycles;
             let pc_now = cpu.pc;
@@ -1235,7 +1356,9 @@ fn nmi_irq_row0_arbitration_trace() {
                 if row == trace_row {
                     eprintln!(
                         "row {} result: $1F={:#04x} $1D={:#04x}",
-                        row, bus.read(0x1F), bus.read(0x1D)
+                        row,
+                        bus.read(0x1F),
+                        bus.read(0x1D)
                     );
                     return;
                 }
@@ -1245,12 +1368,16 @@ fn nmi_irq_row0_arbitration_trace() {
 
             if bus.dma_active() {
                 bus.tick_dma();
-                if bus.tick_ppu(1) { cpu.nmi(); }
-                if bus.tick_apu(1) { cpu.irq(); }
+                if bus.tick_ppu(1) {
+                    cpu.nmi();
+                }
+                if bus.tick_apu(1) {
+                    cpu.irq();
+                }
                 total_cycles += 1;
             } else {
                 let (pn_before, np_before, ql_before) = cpu.debug_nmi_state();
-                let (irqp_before, pirq_before, inhibit_before, flagi_before) = cpu.debug_irq_state();
+                let (irqp_before, inhibit_before, flagi_before) = cpu.debug_irq_state();
                 cpu.tick(&mut bus);
                 let delta = cpu.cycles - cycles_before;
 
@@ -1260,12 +1387,20 @@ fn nmi_irq_row0_arbitration_trace() {
                 let mut new_deferred = false;
                 for i in 0..remaining {
                     if bus.tick_ppu(1) {
-                        if i + 1 == remaining { new_deferred = true; } else { got_nmi = true; }
+                        if i + 1 == remaining {
+                            new_deferred = true;
+                        } else {
+                            got_nmi = true;
+                        }
                     }
                 }
-                if deferred_nmi { got_nmi = true; }
+                if deferred_nmi {
+                    got_nmi = true;
+                }
                 deferred_nmi = new_deferred;
-                if got_nmi { cpu.nmi(); }
+                if got_nmi {
+                    cpu.nmi();
+                }
 
                 let mut got_irq;
                 if defer_irq {
@@ -1283,23 +1418,39 @@ fn nmi_irq_row0_arbitration_trace() {
                             }
                         }
                     }
-                    if deferred_irq { got_irq = true; }
+                    if deferred_irq {
+                        got_irq = true;
+                    }
                     deferred_irq = new_deferred_irq;
                 } else {
                     got_irq = bus.tick_apu(delta);
                 }
-                if got_irq { cpu.irq(); }
+                if got_irq {
+                    cpu.irq();
+                }
 
                 if fine_trace {
                     let (pn_after, np_after, ql_after) = cpu.debug_nmi_state();
-                    let (irqp_after, pirq_after, inhibit_after, flagi_after) = cpu.debug_irq_state();
+                    let (irqp_after, inhibit_after, flagi_after) = cpu.debug_irq_state();
                     eprintln!(
-                        "  pc={:#06x} delta={} cycles={} ql:{}->{} nmi:{}/{}->{}/{} irq_pending:{}->{} pending_irq:{}->{} inhibit:{}->{} I:{}->{} got_nmi={} got_irq={}",
-                        pc_now, delta, cpu.cycles, ql_before, ql_after,
-                        pn_before, np_before, pn_after, np_after,
-                        irqp_before, irqp_after, pirq_before, pirq_after,
-                        inhibit_before, inhibit_after, flagi_before, flagi_after,
-                        got_nmi, got_irq
+                        "  pc={:#06x} delta={} cycles={} ql:{}->{} nmi:{}/{}->{}/{} irq_pending:{}->{} inhibit:{}->{} I:{}->{} got_nmi={} got_irq={}",
+                        pc_now,
+                        delta,
+                        cpu.cycles,
+                        ql_before,
+                        ql_after,
+                        pn_before,
+                        np_before,
+                        pn_after,
+                        np_after,
+                        irqp_before,
+                        irqp_after,
+                        inhibit_before,
+                        inhibit_after,
+                        flagi_before,
+                        flagi_after,
+                        got_nmi,
+                        got_irq
                     );
                 }
                 total_cycles += delta;
@@ -1340,14 +1491,17 @@ fn nmi_irq_all_rows_summary() {
     let mut preempt_report: Option<String> = None;
 
     loop {
-        let sig_valid = bus.read(0x6001) == SIG[0]
-            && bus.read(0x6002) == SIG[1]
-            && bus.read(0x6003) == SIG[2];
+        let sig_valid =
+            bus.read(0x6001) == SIG[0] && bus.read(0x6002) == SIG[1] && bus.read(0x6003) == SIG[2];
         if sig_valid {
             let status = bus.read(0x6000);
-            if status < 0x80 { return; }
+            if status < 0x80 {
+                return;
+            }
         }
-        if total_cycles >= MAX_CYCLES { panic!("timeout"); }
+        if total_cycles >= MAX_CYCLES {
+            panic!("timeout");
+        }
 
         let cycles_before = cpu.cycles;
         let pc_now = cpu.pc;
@@ -1357,24 +1511,33 @@ fn nmi_irq_all_rows_summary() {
                 eprintln!(
                     "row {:2}: preempt={:<28} $1F={:#04x} $1D={:#04x}",
                     row,
-                    preempt_report.clone().unwrap_or_else(|| "none(clean)".to_string()),
-                    bus.read(0x1F), bus.read(0x1D)
+                    preempt_report
+                        .clone()
+                        .unwrap_or_else(|| "none(clean)".to_string()),
+                    bus.read(0x1F),
+                    bus.read(0x1D)
                 );
             }
             row += 1;
             preempt_report = None;
-            if row > 11 { return; }
+            if row > 11 {
+                return;
+            }
         }
         prev_pc = pc_now;
 
         if bus.dma_active() {
             bus.tick_dma();
-            if bus.tick_ppu(1) { cpu.nmi(); }
-            if bus.tick_apu(1) { cpu.irq(); }
+            if bus.tick_ppu(1) {
+                cpu.nmi();
+            }
+            if bus.tick_apu(1) {
+                cpu.irq();
+            }
             total_cycles += 1;
         } else {
             let (pn_before, _np_before, ql_before) = cpu.debug_nmi_state();
-            let (irqp_before, _pirq_before, _inhibit_before, _flagi_before) = cpu.debug_irq_state();
+            let (irqp_before, _inhibit_before, _flagi_before) = cpu.debug_irq_state();
             cpu.tick(&mut bus);
             let delta = cpu.cycles - cycles_before;
 
@@ -1383,7 +1546,8 @@ fn nmi_irq_all_rows_summary() {
             // row's test window, while it hasn't been reported yet this row.
             let (_pn_after, _np_after, ql_after) = cpu.debug_nmi_state();
             if preempt_report.is_none()
-                && ql_before == 0 && ql_after == 5
+                && ql_before == 0
+                && ql_after == 5
                 && (0xE357..=0xE363).contains(&pc_now)
             {
                 let who = if pn_before {
@@ -1402,13 +1566,23 @@ fn nmi_irq_all_rows_summary() {
             let mut new_deferred = false;
             for i in 0..remaining {
                 if bus.tick_ppu(1) {
-                    if i + 1 == remaining { new_deferred = true; } else { got_nmi = true; }
+                    if i + 1 == remaining {
+                        new_deferred = true;
+                    } else {
+                        got_nmi = true;
+                    }
                 }
             }
-            if deferred_nmi { got_nmi = true; }
+            if deferred_nmi {
+                got_nmi = true;
+            }
             deferred_nmi = new_deferred;
-            if got_nmi { cpu.nmi(); }
-            if bus.tick_apu(delta) { cpu.irq(); }
+            if got_nmi {
+                cpu.nmi();
+            }
+            if bus.tick_apu(delta) {
+                cpu.irq();
+            }
             total_cycles += delta;
         }
     }

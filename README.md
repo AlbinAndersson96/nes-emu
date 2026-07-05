@@ -16,10 +16,10 @@ A NES emulator written in Rust.
 | Controllers | Partial (serial shift register wired, no input source) |
 | Display output | Complete (winit + pixels, WSL2-compatible) |
 
-154 of 159 blargg ROM tests pass: all 17 `instr_test-v5` tests, `instr_timing`,
-all 5 `instr_misc` tests, and `cpu_interrupts_v2/1-cli_latency`. The remaining
-4 failures in `cpu_interrupts_v2` require sub-instruction cycle-accurate emulation
-(see CLAUDE.md "Known gaps").
+All 159 blargg CPU ROM tests pass: all 17 `instr_test-v5` tests, `instr_timing`,
+all 5 `instr_misc` tests, and all of `cpu_interrupts_v2` (tests 1-5 plus the
+combined suite). 4 of 5 blargg PPU tests pass; see CLAUDE.md "Known gaps" for
+the remaining PPU test failures.
 
 ## Building and running
 
@@ -35,7 +35,9 @@ cargo fmt
 
 ```
 src/
-  main.rs            — entry point, per-cycle emulation loop, WSL2 GPU setup
+  main.rs            — entry point, event loop, WSL2 GPU setup
+  app.rs             — App state machine (ROM loading, per-frame stepping)
+  system.rs          — SystemClock: shared per-cycle stepping + interrupt delivery rules
   bus.rs             — system bus: RAM, PPU, APU, controllers, cartridge; OAM/DMC DMA
   renderer.rs        — winit window + pixels framebuffer; NES palette → RGBA
   cartridge.rs       — iNES parser; mapper 0 (NROM) and mapper 1 (MMC1)
@@ -57,19 +59,25 @@ src/
     mod.rs           — TestBus used by unit tests
     bus.rs           — bus unit tests
     cpu.rs           — CPU unit tests
-    roms.rs          — blargg ROM test harness
+    ppu.rs           — PPU unit tests
+    roms.rs          — blargg CPU ROM test harness
+    ppu_roms.rs      — blargg PPU ROM test harness (screenshot comparison)
+    sprite_hit_roms.rs — blargg sprite-0-hit ROM test harness
 docs/
   bus.md             — address map and bus design notes
   cpu_instructions.md — 6502 instruction reference
+  cpu_interrupts.md  — NMI/IRQ/BRK dispatch, hijacking, and polling rules
   apu.md             — APU register reference and implementation notes
   ppu.md             — PPU implementation reference and checklist
-tests/roms/          — blargg ROM files (instr_test-v5, cpu_interrupts_v2, instr_misc, instr_timing)
+  investigations/    — chronological debugging logs (reference, not maintained docs)
+tests/roms/          — blargg ROM files (cpu/ and ppu/ suites)
 ```
 
 ## Docs
 
 - [`docs/bus.md`](docs/bus.md) — NES address map and bus design
 - [`docs/cpu_instructions.md`](docs/cpu_instructions.md) — 6502 instruction reference
+- [`docs/cpu_interrupts.md`](docs/cpu_interrupts.md) — interrupt dispatch, hijacking, and polling rules
 - [`docs/apu.md`](docs/apu.md) — APU channel registers and frame counter
 - [`docs/ppu.md`](docs/ppu.md) — PPU implementation reference
 
@@ -85,7 +93,7 @@ The ROM test files in `tests/roms/` are from two suites, both written by
 
 ## What's next
 
-- Sub-instruction cycle-accurate CPU emulation (to fix the 5 remaining blargg tests in `cpu_interrupts_v2`)
+- Remaining PPU test failures (sprite-0-hit timing; see CLAUDE.md "Known gaps")
 - APU audio output (sample generation is implemented; audio device / SDL output not yet wired)
 - Additional mappers (UxROM, CNxROM, MMC3, …)
 - Controller input (keyboard / gamepad mapping)

@@ -67,7 +67,11 @@ impl NoiseChannel {
     pub fn clock_timer(&mut self) {
         if self.timer == 0 {
             self.timer = self.timer_period;
-            let other_bit = if self.mode { (self.lfsr >> 6) & 1 } else { (self.lfsr >> 1) & 1 };
+            let other_bit = if self.mode {
+                (self.lfsr >> 6) & 1
+            } else {
+                (self.lfsr >> 1) & 1
+            };
             let feedback = (self.lfsr & 1) ^ other_bit;
             self.lfsr = (self.lfsr >> 1) | (feedback << 14);
         } else {

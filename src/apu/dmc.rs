@@ -1,7 +1,6 @@
 /// Output timer periods for the DMC (NTSC), in CPU cycles, indexed by $4010 bits 3–0.
 const NTSC_RATE: [u16; 16] = [
-    428, 380, 340, 320, 286, 254, 226, 214,
-    190, 160, 142, 128, 106,  84,  72,  54,
+    428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106, 84, 72, 54,
 ];
 
 /// Delta-modulation channel ($4010–$4013).
