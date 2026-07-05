@@ -86,6 +86,10 @@ const PLACEHOLDER_TEXT: &str = "DROP .NES ROM OR PRESS CTRL+O";
 const PLACEHOLDER_BG_INDEX: u8 = 0x0F; // black
 const PLACEHOLDER_FG_INDEX: u8 = 0x30; // white
 
+// Fits "199 FPS" (widest plausible reading) at the 16px size present() draws at.
+const FPS_BOX_WIDTH: usize = 76;
+const FPS_BOX_HEIGHT: usize = 16;
+
 /// Rasterizes `text` into `frame`, left-aligned with its baseline at
 /// `(origin_x, baseline_y)`, painting pixels above the 50% coverage
 /// threshold as `fg_index`. Pixels that land outside the 256x240 buffer are
@@ -182,8 +186,12 @@ impl Renderer {
 
     pub fn present(&mut self, frame: &[u8; 256 * 240], fps: f64) -> Result<(), pixels::Error> {
         let mut buf = *frame;
-        for y in 0..14usize {
-            for x in 0..36usize {
+        // 16px text: at 10px the DejaVu Sans Mono glyphs (curved ones like
+        // 'S' especially) fell below the hard 50%-coverage threshold in enough
+        // places to render as illegible fragments. 16px keeps every glyph in
+        // "199 FPS" (the widest plausible reading) legible; box sized to match.
+        for y in 0..FPS_BOX_HEIGHT {
+            for x in 0..FPS_BOX_WIDTH {
                 buf[y * 256 + x] = PLACEHOLDER_BG_INDEX;
             }
         }
@@ -193,8 +201,8 @@ impl Renderer {
             &self.font,
             &text,
             2,
-            11,
-            10.0,
+            13,
+            16.0,
             PLACEHOLDER_FG_INDEX,
         );
         nes_to_rgba(&buf, self.pixels.frame_mut());
@@ -305,6 +313,59 @@ mod tests {
                 "text must not reach the rightmost column (row {row})"
             );
         }
+    }
+
+    #[test]
+    fn fps_overlay_text_is_legible_at_16px() {
+        // Regression test for a real bug: 10px was too small for the DejaVu
+        // Sans Mono glyphs to survive draw_text's hard 50%-coverage
+        // threshold — curved letters like 'S' rendered as disconnected
+        // fragments. At 16px every glyph in the widest plausible reading
+        // ("199 FPS") must produce a single connected blob of foreground
+        // pixels per character, not scattered specks.
+        let font_bytes = include_bytes!("../assets/fonts/DejaVuSansMono.ttf") as &[u8];
+        let font = fontdue::Font::from_bytes(font_bytes, fontdue::FontSettings::default())
+            .expect("embedded font must parse");
+        let mut frame = [0x0Fu8; 256 * 240];
+        draw_text(&mut frame, &font, "199 FPS", 2, 13, 16.0, 0x30);
+
+        // Count 4-connected foreground blobs across the whole buffer via
+        // flood fill. Fragmented rendering produces many tiny blobs (one
+        // per stray pixel); legible glyphs produce one blob per character
+        // (7, ignoring the space) — a handful, not dozens.
+        let mut visited = [false; 256 * 240];
+        let mut blob_count = 0;
+        for start in 0..256 * 240 {
+            if frame[start] != 0x30 || visited[start] {
+                continue;
+            }
+            blob_count += 1;
+            let mut stack = vec![start];
+            while let Some(idx) = stack.pop() {
+                if visited[idx] || frame[idx] != 0x30 {
+                    continue;
+                }
+                visited[idx] = true;
+                let x = idx % 256;
+                let y = idx / 256;
+                if x > 0 {
+                    stack.push(idx - 1);
+                }
+                if x < 255 {
+                    stack.push(idx + 1);
+                }
+                if y > 0 {
+                    stack.push(idx - 256);
+                }
+                if y < 239 {
+                    stack.push(idx + 256);
+                }
+            }
+        }
+        assert!(
+            blob_count <= 10,
+            "expected roughly one connected blob per glyph (~7 for \"199 FPS\"), got {blob_count} — glyphs are fragmenting"
+        );
     }
 
     #[test]
