@@ -184,7 +184,11 @@ impl Renderer {
         })
     }
 
-    pub fn present(&mut self, frame: &[u8; 256 * 240], fps: Option<f64>) -> Result<(), pixels::Error> {
+    pub fn present(
+        &mut self,
+        frame: &[u8; 256 * 240],
+        fps: Option<f64>,
+    ) -> Result<(), pixels::Error> {
         match fps {
             Some(fps) => {
                 let mut buf = *frame;
