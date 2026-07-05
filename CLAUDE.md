@@ -17,6 +17,8 @@ cargo clippy         # lint
 cargo fmt            # format
 ```
 
+- **`build.rs`** — seeds `keybindings.toml` (copied from `assets/keybindings.toml`) next to the compiled binary on first build; never overwrites an existing copy, so user edits survive rebuilds.
+
 ## Module structure
 
 - **`src/cpu/mod.rs`** — `Cpu` struct, register file, micro-op queue, `tick()` entry point. The `Bus` trait (`fn read(&mut self, u16) -> u8` / `fn write(&mut self, u16, u8)`) is defined here. `tick()` executes exactly one micro-op from the queue; when the queue empties a new instruction is decoded (via `RunInstruction`) or an interrupt is serviced. IRQ is level-triggered: `irq_pending` is re-asserted each call to `tick_apu` when the APU line is high, so masked IRQs cannot accumulate.
@@ -34,6 +36,7 @@ cargo fmt            # format
 - **`src/ppu/mod.rs`** — Full `Ppu` implementation. Dot/scanline-accurate NTSC timing (341 dots × 262 scanlines). Implements all CPU-visible registers ($2000–$2007, $4014), the Loopy v/t/x/w scroll registers, background tile pipeline (nametable + attribute + CHR fetches into 16-bit shift registers), sprite evaluation and pattern fetch for up to 8 sprites per scanline, sprite-0 hit, priority multiplexer, palette RAM (32 bytes), NMI edge detection, and OAM DMA write helper. Outputs a 256×240 frame buffer of NES palette indices.
 - **`src/renderer.rs`** — `Renderer` wraps a `winit` window and a `pixels` framebuffer. `present(&frame)` maps the PPU's palette-index frame through the NES master palette to RGBA and blits it to the window. `maybe_configure_wsl2_gpu()` in `main.rs` sets `WGPU_BACKEND=vulkan` and points `VK_ICD_FILENAMES` at the Mesa LLVMpipe ICD when running under WSL2.
 - **`src/cartridge.rs`** — iNES parser; supports NROM (mapper 0) and MMC1 (mapper 1). MMC1 implements the full 5-bit serial shift register protocol and all four PRG bank modes (32 KB switch, fix-first, fix-last). 8 KB PRG-RAM at $6000–$7FFF is always present regardless of the iNES header flag, because blargg test ROMs write their results there unconditionally.
+- **`src/input.rs`** — `KeyMap`: maps keyboard `VirtualKeyCode`s to (controller port, button bit) pairs, loaded from a TOML config file at startup (`KeyMap::load`) or a hardcoded fallback (`KeyMap::default`). Button bit order matches the NES's real serial order (A, B, Select, Start, Up, Down, Left, Right).
 - **`src/tests/mod.rs`** — `TestBus`: flat 64 KB address space used by unit tests (no mirroring, no side effects).
 - **`src/tests/bus.rs`** — bus unit tests.
 - **`src/tests/cpu.rs`** — CPU unit tests.
@@ -44,6 +47,7 @@ cargo fmt            # format
 - **`docs/cpu_interrupts.md`** — NMI/IRQ/BRK dispatch, the micro-op interrupt-service sequence, NMI hijacking BRK or an in-progress IRQ, and the interrupt-polling-granularity (deferred-edge) fix. Start here before touching interrupt timing; links to the full investigation log for anything not yet resolved.
 - **`docs/apu.md`** — APU channel register reference, frame counter sequences, mixer formula, and implementation notes.
 - **`docs/ppu.md`** — Full PPU implementation reference: memory map, registers, OAM, Loopy registers, rendering pipeline, scrolling, pixel priority, hardware quirks, and implementation checklist.
+- **`docs/input.md`** — Controller keybinding config file format, defaults table, and fallback behavior.
 - **`docs/investigations/cpu_interrupt_debug_log.md`** — chronological investigation log for the `cpu_interrupts_v2` ROM tests: hypotheses tried, what was ruled out and why, and open questions. Reference material, not a maintained doc — read `docs/cpu_interrupts.md` first for the current understanding.
 
 ## Key design notes
