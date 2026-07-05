@@ -86,26 +86,27 @@ const PLACEHOLDER_TEXT: &str = "DROP .NES ROM OR PRESS CTRL+O";
 const PLACEHOLDER_BG_INDEX: u8 = 0x0F; // black
 const PLACEHOLDER_FG_INDEX: u8 = 0x30; // white
 
-/// Rasterizes `PLACEHOLDER_TEXT` centered in a 256x240 palette-index buffer.
-/// Pure and window-independent so it can be unit tested directly.
-pub(crate) fn render_placeholder_frame(font: &fontdue::Font) -> [u8; 256 * 240] {
-    let mut frame = [PLACEHOLDER_BG_INDEX; 256 * 240];
-    let px_size = 12.0;
+// Fits "199 FPS" (widest plausible reading) at the 16px size present() draws at.
+const FPS_BOX_WIDTH: usize = 76;
+const FPS_BOX_HEIGHT: usize = 16;
 
-    // First pass: rasterize each glyph and measure total width to center the line.
-    let mut glyphs: Vec<(fontdue::Metrics, Vec<u8>)> = Vec::with_capacity(PLACEHOLDER_TEXT.len());
-    let mut total_width = 0i32;
-    for ch in PLACEHOLDER_TEXT.chars() {
+/// Rasterizes `text` into `frame`, left-aligned with its baseline at
+/// `(origin_x, baseline_y)`, painting pixels above the 50% coverage
+/// threshold as `fg_index`. Pixels that land outside the 256x240 buffer are
+/// silently clipped. Pure and window-independent so it can be unit tested
+/// directly.
+pub(crate) fn draw_text(
+    frame: &mut [u8; 256 * 240],
+    font: &fontdue::Font,
+    text: &str,
+    origin_x: i32,
+    baseline_y: i32,
+    px_size: f32,
+    fg_index: u8,
+) {
+    let mut pen_x = origin_x;
+    for ch in text.chars() {
         let (metrics, bitmap) = font.rasterize(ch, px_size);
-        total_width += metrics.advance_width.round() as i32;
-        glyphs.push((metrics, bitmap));
-    }
-
-    let start_x = (256 - total_width).max(0) / 2;
-    let baseline_y = 240 / 2;
-    let mut pen_x = start_x;
-
-    for (metrics, bitmap) in &glyphs {
         let glyph_x = pen_x + metrics.xmin;
         let glyph_y = baseline_y - metrics.ymin - metrics.height as i32;
         for gy in 0..metrics.height {
@@ -120,12 +121,37 @@ pub(crate) fn render_placeholder_frame(font: &fontdue::Font) -> [u8; 256 * 240] 
                     continue;
                 }
                 if coverage > 127 {
-                    frame[py as usize * 256 + px as usize] = PLACEHOLDER_FG_INDEX;
+                    frame[py as usize * 256 + px as usize] = fg_index;
                 }
             }
         }
         pen_x += metrics.advance_width.round() as i32;
     }
+}
+
+/// Rasterizes `PLACEHOLDER_TEXT` centered in a 256x240 palette-index buffer.
+/// Pure and window-independent so it can be unit tested directly.
+pub(crate) fn render_placeholder_frame(font: &fontdue::Font) -> [u8; 256 * 240] {
+    let mut frame = [PLACEHOLDER_BG_INDEX; 256 * 240];
+    let px_size = 12.0;
+
+    let total_width: i32 = PLACEHOLDER_TEXT
+        .chars()
+        .map(|ch| font.metrics(ch, px_size).advance_width.round() as i32)
+        .sum();
+
+    let start_x = (256 - total_width).max(0) / 2;
+    let baseline_y = 240 / 2;
+
+    draw_text(
+        &mut frame,
+        font,
+        PLACEHOLDER_TEXT,
+        start_x,
+        baseline_y,
+        px_size,
+        PLACEHOLDER_FG_INDEX,
+    );
 
     frame
 }
@@ -133,6 +159,7 @@ pub(crate) fn render_placeholder_frame(font: &fontdue::Font) -> [u8; 256 * 240] 
 pub struct Renderer {
     window: Window,
     pixels: Pixels,
+    font: fontdue::Font,
     placeholder_frame: [u8; 256 * 240],
 }
 
@@ -152,12 +179,40 @@ impl Renderer {
         Ok(Self {
             window,
             pixels,
+            font,
             placeholder_frame,
         })
     }
 
-    pub fn present(&mut self, frame: &[u8; 256 * 240]) -> Result<(), pixels::Error> {
-        nes_to_rgba(frame, self.pixels.frame_mut());
+    pub fn present(
+        &mut self,
+        frame: &[u8; 256 * 240],
+        fps: Option<f64>,
+    ) -> Result<(), pixels::Error> {
+        match fps {
+            Some(fps) => {
+                let mut buf = *frame;
+                for y in 0..FPS_BOX_HEIGHT {
+                    for x in 0..FPS_BOX_WIDTH {
+                        buf[y * 256 + x] = PLACEHOLDER_BG_INDEX;
+                    }
+                }
+                let text = format!("{:.0} FPS", fps.round());
+                draw_text(
+                    &mut buf,
+                    &self.font,
+                    &text,
+                    2,
+                    13,
+                    16.0,
+                    PLACEHOLDER_FG_INDEX,
+                );
+                nes_to_rgba(&buf, self.pixels.frame_mut());
+            }
+            None => {
+                nes_to_rgba(frame, self.pixels.frame_mut());
+            }
+        }
         self.pixels.render()
     }
 
@@ -265,5 +320,82 @@ mod tests {
                 "text must not reach the rightmost column (row {row})"
             );
         }
+    }
+
+    #[test]
+    fn fps_overlay_text_is_legible_at_16px() {
+        // Regression test for a real bug: 10px was too small for the DejaVu
+        // Sans Mono glyphs to survive draw_text's hard 50%-coverage
+        // threshold — curved letters like 'S' rendered as disconnected
+        // fragments. At 16px every glyph in the widest plausible reading
+        // ("199 FPS") must produce a single connected blob of foreground
+        // pixels per character, not scattered specks.
+        let font_bytes = include_bytes!("../assets/fonts/DejaVuSansMono.ttf") as &[u8];
+        let font = fontdue::Font::from_bytes(font_bytes, fontdue::FontSettings::default())
+            .expect("embedded font must parse");
+        let mut frame = [0x0Fu8; 256 * 240];
+        draw_text(&mut frame, &font, "199 FPS", 2, 13, 16.0, 0x30);
+
+        // Count 4-connected foreground blobs across the whole buffer via
+        // flood fill. Fragmented rendering produces many tiny blobs (one
+        // per stray pixel); legible glyphs produce one blob per character
+        // (7, ignoring the space) — a handful, not dozens.
+        let mut visited = [false; 256 * 240];
+        let mut blob_count = 0;
+        for start in 0..256 * 240 {
+            if frame[start] != 0x30 || visited[start] {
+                continue;
+            }
+            blob_count += 1;
+            let mut stack = vec![start];
+            while let Some(idx) = stack.pop() {
+                if visited[idx] || frame[idx] != 0x30 {
+                    continue;
+                }
+                visited[idx] = true;
+                let x = idx % 256;
+                let y = idx / 256;
+                if x > 0 {
+                    stack.push(idx - 1);
+                }
+                if x < 255 {
+                    stack.push(idx + 1);
+                }
+                if y > 0 {
+                    stack.push(idx - 256);
+                }
+                if y < 239 {
+                    stack.push(idx + 256);
+                }
+            }
+        }
+        assert!(
+            blob_count <= 10,
+            "expected roughly one connected blob per glyph (~7 for \"199 FPS\"), got {blob_count} — glyphs are fragmenting"
+        );
+    }
+
+    #[test]
+    fn draw_text_paints_visible_pixels() {
+        let font_bytes = include_bytes!("../assets/fonts/DejaVuSansMono.ttf") as &[u8];
+        let font = fontdue::Font::from_bytes(font_bytes, fontdue::FontSettings::default())
+            .expect("embedded font must parse");
+        let mut frame = [0x0Fu8; 256 * 240];
+        draw_text(&mut frame, &font, "60 FPS", 2, 11, 10.0, 0x30);
+        assert!(
+            frame.contains(&0x30),
+            "expected some foreground-colored pixels from drawn text"
+        );
+    }
+
+    #[test]
+    fn draw_text_out_of_bounds_does_not_panic() {
+        let font_bytes = include_bytes!("../assets/fonts/DejaVuSansMono.ttf") as &[u8];
+        let font = fontdue::Font::from_bytes(font_bytes, fontdue::FontSettings::default())
+            .expect("embedded font must parse");
+        let mut frame = [0x0Fu8; 256 * 240];
+        // Origins far outside the 256x240 buffer on every axis — must clip, not panic.
+        draw_text(&mut frame, &font, "X", -1000, -1000, 10.0, 0x30);
+        draw_text(&mut frame, &font, "X", 1000, 1000, 10.0, 0x30);
     }
 }

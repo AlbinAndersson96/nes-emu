@@ -17,3 +17,6 @@ b = "N"
 a = "M"
 select = "Comma"
 start = "Period"
+
+[app]
+fps_toggle = "F"

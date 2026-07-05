@@ -137,6 +137,15 @@ fn main() {
                     }
                 }
 
+                let is_fps_toggle = input.state == ElementState::Pressed
+                    && modifiers.ctrl()
+                    && input
+                        .virtual_keycode
+                        .is_some_and(|k| key_map.is_fps_toggle(k));
+                if is_fps_toggle {
+                    app.toggle_fps_overlay();
+                }
+
                 if let Some(keycode) = input.virtual_keycode {
                     if let Some((port, bit)) = key_map.on_key(keycode) {
                         match input.state {

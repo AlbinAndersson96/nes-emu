@@ -5,6 +5,7 @@ use crate::renderer::Renderer;
 use crate::system::SystemClock;
 use std::fs;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 pub enum AppState {
     NoRom,
@@ -18,6 +19,10 @@ pub enum AppState {
 pub struct App {
     pub state: AppState,
     pub renderer: Renderer,
+    fps: f64,
+    frames_since_update: u32,
+    last_fps_update: Instant,
+    fps_overlay_enabled: bool,
 }
 
 const CYCLES_PER_FRAME: u64 = 29_781;
@@ -50,11 +55,41 @@ fn set_controller_buttons_on(state: &mut AppState, port: usize, buttons: u8) {
     }
 }
 
+/// Folds one presented frame into the FPS running window. Returns `true`
+/// when the 500ms window elapsed and `fps` was recomputed (and the counter
+/// reset), `false` if the window is still accumulating. Takes `now`
+/// explicitly so it can be unit tested without real wall-clock delays.
+fn update_fps(
+    fps: &mut f64,
+    frames_since_update: &mut u32,
+    last_update: &mut Instant,
+    now: Instant,
+) -> bool {
+    *frames_since_update += 1;
+    let elapsed = now.duration_since(*last_update);
+    if elapsed >= Duration::from_millis(500) {
+        *fps = *frames_since_update as f64 / elapsed.as_secs_f64();
+        *frames_since_update = 0;
+        *last_update = now;
+        true
+    } else {
+        false
+    }
+}
+
+fn toggle_flag(flag: &mut bool) {
+    *flag = !*flag;
+}
+
 impl App {
     pub fn new(renderer: Renderer) -> Self {
         Self {
             state: AppState::NoRom,
             renderer,
+            fps: 0.0,
+            frames_since_update: 0,
+            last_fps_update: Instant::now(),
+            fps_overlay_enabled: false,
         }
     }
 
@@ -79,7 +114,14 @@ impl App {
                 }
                 if bus.ppu.frame_ready {
                     bus.ppu.frame_ready = false;
-                    self.renderer.present(&bus.ppu.frame).unwrap();
+                    update_fps(
+                        &mut self.fps,
+                        &mut self.frames_since_update,
+                        &mut self.last_fps_update,
+                        Instant::now(),
+                    );
+                    let fps = self.fps_overlay_enabled.then_some(self.fps);
+                    self.renderer.present(&bus.ppu.frame, fps).unwrap();
                 }
             }
         }
@@ -87,6 +129,10 @@ impl App {
 
     pub fn set_controller_buttons(&mut self, port: usize, buttons: u8) {
         set_controller_buttons_on(&mut self.state, port, buttons);
+    }
+
+    pub fn toggle_fps_overlay(&mut self) {
+        toggle_flag(&mut self.fps_overlay_enabled);
     }
 }
 
@@ -176,5 +222,52 @@ mod tests {
         let mut state = AppState::NoRom;
         set_controller_buttons_on(&mut state, 0, 0xFF);
         assert!(matches!(state, AppState::NoRom));
+    }
+
+    #[test]
+    fn fps_does_not_update_before_half_second_window_elapses() {
+        let mut fps = 0.0;
+        let mut frames = 0u32;
+        let start = Instant::now();
+        let mut last_update = start;
+
+        for i in 0..30u64 {
+            let now = start + Duration::from_millis(i * 10); // spans 0..290ms
+            let updated = update_fps(&mut fps, &mut frames, &mut last_update, now);
+            assert!(!updated, "must not update before 500ms elapses");
+        }
+        assert_eq!(fps, 0.0);
+        assert_eq!(frames, 30);
+    }
+
+    #[test]
+    fn fps_updates_and_resets_after_half_second_window() {
+        let mut fps = 0.0;
+        let mut frames = 0u32;
+        let start = Instant::now();
+        let mut last_update = start;
+
+        for i in 0..30u64 {
+            let now = start + Duration::from_millis(i * 10);
+            update_fps(&mut fps, &mut frames, &mut last_update, now);
+        }
+
+        // 31st frame arrives at 510ms, past the 500ms window.
+        let now = start + Duration::from_millis(510);
+        let updated = update_fps(&mut fps, &mut frames, &mut last_update, now);
+
+        assert!(updated, "must update once 500ms elapses");
+        assert!((fps - 60.78).abs() < 1.0, "expected ~60.78 fps, got {fps}");
+        assert_eq!(frames, 0, "counter must reset after computing fps");
+        assert_eq!(last_update, now, "window start must reset to now");
+    }
+
+    #[test]
+    fn toggle_flag_flips_bool_back_and_forth() {
+        let mut enabled = false;
+        toggle_flag(&mut enabled);
+        assert!(enabled);
+        toggle_flag(&mut enabled);
+        assert!(!enabled);
     }
 }
