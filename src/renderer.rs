@@ -86,26 +86,23 @@ const PLACEHOLDER_TEXT: &str = "DROP .NES ROM OR PRESS CTRL+O";
 const PLACEHOLDER_BG_INDEX: u8 = 0x0F; // black
 const PLACEHOLDER_FG_INDEX: u8 = 0x30; // white
 
-/// Rasterizes `PLACEHOLDER_TEXT` centered in a 256x240 palette-index buffer.
-/// Pure and window-independent so it can be unit tested directly.
-pub(crate) fn render_placeholder_frame(font: &fontdue::Font) -> [u8; 256 * 240] {
-    let mut frame = [PLACEHOLDER_BG_INDEX; 256 * 240];
-    let px_size = 12.0;
-
-    // First pass: rasterize each glyph and measure total width to center the line.
-    let mut glyphs: Vec<(fontdue::Metrics, Vec<u8>)> = Vec::with_capacity(PLACEHOLDER_TEXT.len());
-    let mut total_width = 0i32;
-    for ch in PLACEHOLDER_TEXT.chars() {
+/// Rasterizes `text` into `frame`, left-aligned with its baseline at
+/// `(origin_x, baseline_y)`, painting pixels above the 50% coverage
+/// threshold as `fg_index`. Pixels that land outside the 256x240 buffer are
+/// silently clipped. Pure and window-independent so it can be unit tested
+/// directly.
+pub(crate) fn draw_text(
+    frame: &mut [u8; 256 * 240],
+    font: &fontdue::Font,
+    text: &str,
+    origin_x: i32,
+    baseline_y: i32,
+    px_size: f32,
+    fg_index: u8,
+) {
+    let mut pen_x = origin_x;
+    for ch in text.chars() {
         let (metrics, bitmap) = font.rasterize(ch, px_size);
-        total_width += metrics.advance_width.round() as i32;
-        glyphs.push((metrics, bitmap));
-    }
-
-    let start_x = (256 - total_width).max(0) / 2;
-    let baseline_y = 240 / 2;
-    let mut pen_x = start_x;
-
-    for (metrics, bitmap) in &glyphs {
         let glyph_x = pen_x + metrics.xmin;
         let glyph_y = baseline_y - metrics.ymin - metrics.height as i32;
         for gy in 0..metrics.height {
@@ -120,12 +117,37 @@ pub(crate) fn render_placeholder_frame(font: &fontdue::Font) -> [u8; 256 * 240] 
                     continue;
                 }
                 if coverage > 127 {
-                    frame[py as usize * 256 + px as usize] = PLACEHOLDER_FG_INDEX;
+                    frame[py as usize * 256 + px as usize] = fg_index;
                 }
             }
         }
         pen_x += metrics.advance_width.round() as i32;
     }
+}
+
+/// Rasterizes `PLACEHOLDER_TEXT` centered in a 256x240 palette-index buffer.
+/// Pure and window-independent so it can be unit tested directly.
+pub(crate) fn render_placeholder_frame(font: &fontdue::Font) -> [u8; 256 * 240] {
+    let mut frame = [PLACEHOLDER_BG_INDEX; 256 * 240];
+    let px_size = 12.0;
+
+    let total_width: i32 = PLACEHOLDER_TEXT
+        .chars()
+        .map(|ch| font.metrics(ch, px_size).advance_width.round() as i32)
+        .sum();
+
+    let start_x = (256 - total_width).max(0) / 2;
+    let baseline_y = 240 / 2;
+
+    draw_text(
+        &mut frame,
+        font,
+        PLACEHOLDER_TEXT,
+        start_x,
+        baseline_y,
+        px_size,
+        PLACEHOLDER_FG_INDEX,
+    );
 
     frame
 }
@@ -265,5 +287,29 @@ mod tests {
                 "text must not reach the rightmost column (row {row})"
             );
         }
+    }
+
+    #[test]
+    fn draw_text_paints_visible_pixels() {
+        let font_bytes = include_bytes!("../assets/fonts/DejaVuSansMono.ttf") as &[u8];
+        let font = fontdue::Font::from_bytes(font_bytes, fontdue::FontSettings::default())
+            .expect("embedded font must parse");
+        let mut frame = [0x0Fu8; 256 * 240];
+        draw_text(&mut frame, &font, "60 FPS", 2, 11, 10.0, 0x30);
+        assert!(
+            frame.iter().any(|&p| p == 0x30),
+            "expected some foreground-colored pixels from drawn text"
+        );
+    }
+
+    #[test]
+    fn draw_text_out_of_bounds_does_not_panic() {
+        let font_bytes = include_bytes!("../assets/fonts/DejaVuSansMono.ttf") as &[u8];
+        let font = fontdue::Font::from_bytes(font_bytes, fontdue::FontSettings::default())
+            .expect("embedded font must parse");
+        let mut frame = [0x0Fu8; 256 * 240];
+        // Origins far outside the 256x240 buffer on every axis — must clip, not panic.
+        draw_text(&mut frame, &font, "X", -1000, -1000, 10.0, 0x30);
+        draw_text(&mut frame, &font, "X", 1000, 1000, 10.0, 0x30);
     }
 }
