@@ -58,7 +58,12 @@ fn set_controller_buttons_on(state: &mut AppState, port: usize, buttons: u8) {
 /// when the 500ms window elapsed and `fps` was recomputed (and the counter
 /// reset), `false` if the window is still accumulating. Takes `now`
 /// explicitly so it can be unit tested without real wall-clock delays.
-fn update_fps(fps: &mut f64, frames_since_update: &mut u32, last_update: &mut Instant, now: Instant) -> bool {
+fn update_fps(
+    fps: &mut f64,
+    frames_since_update: &mut u32,
+    last_update: &mut Instant,
+    now: Instant,
+) -> bool {
     *frames_since_update += 1;
     let elapsed = now.duration_since(*last_update);
     if elapsed >= Duration::from_millis(500) {

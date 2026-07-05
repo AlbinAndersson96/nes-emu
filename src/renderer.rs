@@ -188,7 +188,15 @@ impl Renderer {
             }
         }
         let text = format!("{:.0} FPS", fps.round());
-        draw_text(&mut buf, &self.font, &text, 2, 11, 10.0, PLACEHOLDER_FG_INDEX);
+        draw_text(
+            &mut buf,
+            &self.font,
+            &text,
+            2,
+            11,
+            10.0,
+            PLACEHOLDER_FG_INDEX,
+        );
         nes_to_rgba(&buf, self.pixels.frame_mut());
         self.pixels.render()
     }
@@ -307,7 +315,7 @@ mod tests {
         let mut frame = [0x0Fu8; 256 * 240];
         draw_text(&mut frame, &font, "60 FPS", 2, 11, 10.0, 0x30);
         assert!(
-            frame.iter().any(|&p| p == 0x30),
+            frame.contains(&0x30),
             "expected some foreground-colored pixels from drawn text"
         );
     }
