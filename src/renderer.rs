@@ -155,6 +155,7 @@ pub(crate) fn render_placeholder_frame(font: &fontdue::Font) -> [u8; 256 * 240] 
 pub struct Renderer {
     window: Window,
     pixels: Pixels,
+    font: fontdue::Font,
     placeholder_frame: [u8; 256 * 240],
 }
 
@@ -174,12 +175,21 @@ impl Renderer {
         Ok(Self {
             window,
             pixels,
+            font,
             placeholder_frame,
         })
     }
 
-    pub fn present(&mut self, frame: &[u8; 256 * 240]) -> Result<(), pixels::Error> {
-        nes_to_rgba(frame, self.pixels.frame_mut());
+    pub fn present(&mut self, frame: &[u8; 256 * 240], fps: f64) -> Result<(), pixels::Error> {
+        let mut buf = *frame;
+        for y in 0..14usize {
+            for x in 0..36usize {
+                buf[y * 256 + x] = PLACEHOLDER_BG_INDEX;
+            }
+        }
+        let text = format!("{:.0} FPS", fps.round());
+        draw_text(&mut buf, &self.font, &text, 2, 11, 10.0, PLACEHOLDER_FG_INDEX);
+        nes_to_rgba(&buf, self.pixels.frame_mut());
         self.pixels.render()
     }
 

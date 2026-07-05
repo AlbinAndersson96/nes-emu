@@ -79,7 +79,7 @@ impl App {
                 }
                 if bus.ppu.frame_ready {
                     bus.ppu.frame_ready = false;
-                    self.renderer.present(&bus.ppu.frame).unwrap();
+                    self.renderer.present(&bus.ppu.frame, 0.0).unwrap();
                 }
             }
         }
