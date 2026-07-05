@@ -44,6 +44,12 @@ fn load_rom_into(state: &mut AppState, data: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+fn set_controller_buttons_on(state: &mut AppState, port: usize, buttons: u8) {
+    if let AppState::Running { bus, .. } = state {
+        bus.set_controller_state(port, buttons);
+    }
+}
+
 impl App {
     pub fn new(renderer: Renderer) -> Self {
         Self {
@@ -77,6 +83,10 @@ impl App {
                 }
             }
         }
+    }
+
+    pub fn set_controller_buttons(&mut self, port: usize, buttons: u8) {
+        set_controller_buttons_on(&mut self.state, port, buttons);
     }
 }
 
@@ -142,5 +152,29 @@ mod tests {
             }
             AppState::NoRom => panic!("expected Running after a successful swap"),
         }
+    }
+
+    #[test]
+    fn set_controller_buttons_updates_bus_when_running() {
+        use crate::cpu::Bus as CpuBus;
+
+        let mut state = AppState::NoRom;
+        load_rom_into(&mut state, &test_rom_bytes()).unwrap();
+        set_controller_buttons_on(&mut state, 0, 0xFF);
+        match &mut state {
+            AppState::Running { bus, .. } => {
+                bus.write(0x4016, 1);
+                bus.write(0x4016, 0);
+                assert_eq!(bus.read(0x4016), 1);
+            }
+            AppState::NoRom => panic!("expected Running state"),
+        }
+    }
+
+    #[test]
+    fn set_controller_buttons_is_noop_when_no_rom() {
+        let mut state = AppState::NoRom;
+        set_controller_buttons_on(&mut state, 0, 0xFF);
+        assert!(matches!(state, AppState::NoRom));
     }
 }
