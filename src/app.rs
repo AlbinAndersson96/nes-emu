@@ -22,6 +22,7 @@ pub struct App {
     fps: f64,
     frames_since_update: u32,
     last_fps_update: Instant,
+    fps_overlay_enabled: bool,
 }
 
 const CYCLES_PER_FRAME: u64 = 29_781;
@@ -76,6 +77,10 @@ fn update_fps(
     }
 }
 
+fn toggle_flag(flag: &mut bool) {
+    *flag = !*flag;
+}
+
 impl App {
     pub fn new(renderer: Renderer) -> Self {
         Self {
@@ -84,6 +89,7 @@ impl App {
             fps: 0.0,
             frames_since_update: 0,
             last_fps_update: Instant::now(),
+            fps_overlay_enabled: false,
         }
     }
 
@@ -114,7 +120,8 @@ impl App {
                         &mut self.last_fps_update,
                         Instant::now(),
                     );
-                    self.renderer.present(&bus.ppu.frame, Some(self.fps)).unwrap();
+                    let fps = self.fps_overlay_enabled.then_some(self.fps);
+                    self.renderer.present(&bus.ppu.frame, fps).unwrap();
                 }
             }
         }
@@ -122,6 +129,10 @@ impl App {
 
     pub fn set_controller_buttons(&mut self, port: usize, buttons: u8) {
         set_controller_buttons_on(&mut self.state, port, buttons);
+    }
+
+    pub fn toggle_fps_overlay(&mut self) {
+        toggle_flag(&mut self.fps_overlay_enabled);
     }
 }
 
@@ -249,5 +260,14 @@ mod tests {
         assert!((fps - 60.78).abs() < 1.0, "expected ~60.78 fps, got {fps}");
         assert_eq!(frames, 0, "counter must reset after computing fps");
         assert_eq!(last_update, now, "window start must reset to now");
+    }
+
+    #[test]
+    fn toggle_flag_flips_bool_back_and_forth() {
+        let mut enabled = false;
+        toggle_flag(&mut enabled);
+        assert!(enabled);
+        toggle_flag(&mut enabled);
+        assert!(!enabled);
     }
 }
