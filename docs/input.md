@@ -49,6 +49,25 @@ for the full list (letters/digits are their own variants, e.g. `"Z"`,
 | Select | Q | Comma |
 | Start | E | Period |
 
+## App shortcuts
+
+| Action | Combo |
+|---|---|
+| Toggle FPS overlay | Ctrl+`fps_toggle` (default: Ctrl+F) |
+| Open ROM | Ctrl+O (not configurable) |
+
+`fps_toggle` lives in an optional `[app]` section:
+
+```toml
+[app]
+fps_toggle = "F"
+```
+
+If `[app]` is missing entirely (e.g. an older `keybindings.toml` written
+before this option existed), it defaults to `F` — same fallback tolerance
+as a missing file, just scoped to this one section instead of the whole
+file.
+
 ## Fallback behavior
 
 If `keybindings.toml` is missing, unreadable, or fails to parse (either
