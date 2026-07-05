@@ -336,9 +336,9 @@ M — mode: 0 = 4-step, 1 = 5-step
 I — IRQ inhibit flag: 1 = disable frame IRQ
 ```
 
-Writing to $4017 resets the frame counter divider. The reset takes effect 2 or 3 CPU cycles
-after the write (on the next odd APU cycle). In 5-step mode, an extra half-frame clock fires
-immediately on write.
+Writing to $4017 resets the frame counter divider. The reset takes effect 3 or 4 CPU cycles
+after the write cycle, depending on the write's alignment to the APU's divide-by-2 clock.
+In 5-step mode, an extra half-frame clock fires immediately on write.
 
 Setting the IRQ inhibit flag also clears the frame IRQ flag in $4015.
 
@@ -434,8 +434,17 @@ Disabling a channel ($4015 bit → 0) forces the length counter to 0 immediately
 ### $4017 write timing
 
 The reset of the frame sequencer does not happen on the same CPU cycle as the write. It
-takes effect 2 cycles later (if the write occurs on an even APU cycle) or 3 cycles later
-(odd APU cycle). This 2–3 cycle jitter is tested by `cpu_interrupts_v2`.
+takes effect 3 or 4 CPU cycles after the write cycle, depending on the write's alignment
+to the APU's divide-by-2 clock; blargg's `sync_apu` routine exists to pin that alignment.
+This jitter is tested by `cpu_interrupts_v2` (tests 3-5).
+
+In this emulator the $4017 write is applied while the APU still sits at the start of the
+writing instruction (the caller only ticks the APU after the whole instruction), so
+`frame_reset_delay` is 7 as measured from the write's application: 4 unticked instruction
+cycles + the 3-cycle aligned-case hardware delay. See the derivation comment in the $4017
+write handler in `src/apu/mod.rs` — do not "correct" it to 3-4 without re-reading that.
+The same free-running divide-by-2 clock (`Apu::cycle_parity`) decides whether an OAM DMA
+stalls 513 or 514 cycles (`Bus::oam_dma`).
 
 ### DMC DMA stall
 

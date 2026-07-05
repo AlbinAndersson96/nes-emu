@@ -47,10 +47,6 @@ fn read_output(bus: &mut Bus) -> String {
     out
 }
 
-fn run_until_complete(bus: &mut Bus, cpu: &mut Cpu) {
-    run_until_complete_trace(bus, cpu, false);
-}
-
 fn run_until_complete_trace(bus: &mut Bus, cpu: &mut Cpu, trace_nmi: bool) {
     let mut total_cycles: u64 = 0;
     let mut nmi_count: u32 = 0;
@@ -331,7 +327,6 @@ fn nmi_brk_row_trace() {
     let mut cycle_after_e442_1: u64 = 0;
     let mut cycle_after_e458: u64 = 0;
     let mut cycle_after_e442_2: u64 = 0;
-    let mut nmi_count: u32 = 0;
     let mut deferred_nmi = false;
 
     loop {
@@ -421,7 +416,6 @@ fn nmi_brk_row_trace() {
             deferred_nmi = new_deferred;
             if got_nmi {
                 last_nmi_cycle = cpu.cycles;
-                nmi_count += 1;
                 cpu.nmi();
             }
             if bus.tick_apu(delta) {
@@ -1283,9 +1277,11 @@ fn verify_sync_vbl_contract() {
 // one CPU cycle at a time, recording the first cycle (relative to the write)
 // at which `tick()` reports the IRQ line asserted. Compares against the
 // hand-derived expectation from `src/apu/mod.rs`'s own MODE0 table:
-// frame_reset_delay(4) + first IRQ step (29828) = 29832 cycles after the
-// write. This directly tests whether the APU's own internal timing table
-// fires at the documented absolute cycle, with zero CPU/PPU involvement.
+// frame_reset_delay(7) + first IRQ step (29828) = 29835 cycles after the
+// write's APPLICATION (the delay is anchored to the start of the writing
+// instruction — see the $4017 handler's derivation comment). This directly
+// tests whether the APU's own internal timing table fires at the expected
+// absolute cycle, with zero CPU/PPU involvement.
 //   cargo test isolate_apu_frame_irq_timing -- --nocapture --ignored
 #[test]
 #[ignore]
@@ -1301,9 +1297,10 @@ fn isolate_apu_frame_irq_timing() {
         }
     }
     eprintln!(
-        "First IRQ asserted at cycle={:?} after $4017=$00 write (expected: 4 + 29828 = 29832)",
+        "First IRQ asserted at cycle={:?} after $4017=$00 write (expected: 7 + 29828 = 29835)",
         first_irq_cycle
     );
+    assert_eq!(first_irq_cycle, Some(29_835));
 }
 
 // Diagnostic: fine-grained NMI-vs-IRQ arbitration trace for a chosen row of
