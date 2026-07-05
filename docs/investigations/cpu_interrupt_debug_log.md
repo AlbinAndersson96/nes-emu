@@ -1472,3 +1472,36 @@ apply everywhere automatically. Porting the harness loop refinements to `main.rs
 natural next hygiene task.
 
 ---
+
+### 2026-07-05 (same session) — hygiene: run-loop unification (`SystemClock`) + dead `pending_irq` removed
+
+Both hygiene items flagged at the close of the investigation are done; no behavior change
+(verified: full `cargo test` byte-identical at 182 passed / 4 failed before and after).
+
+**Run-loop unification.** The blargg-verified stepping logic moved verbatim from
+`run_until_complete_trace` into a new shared `SystemClock` (`src/system.rs`): one `step()`
+per CPU tick or DMA stall cycle, carrying the deferred-NMI-edge rule, per-cycle APU ticking
+with `Cpu::irq_on_last_cycle` flagging, and DMA interrupt deferral, plus the loop-persistent
+state they need. Consumers:
+- the ROM test harness (`run_until_complete_trace`, `src/tests/roms.rs`) — now a thin loop
+  around `SystemClock::step` (kept: sig-polling, timeout, the NMI trace hook via
+  `StepResult::nmi`);
+- the real run loop (`App::step_frame`, `src/app.rs`) — previously a stale duplicate with
+  none of the interrupt-delivery refinements. `AppState::Running` now owns a `SystemClock`,
+  and `load_rom_into` gained the same post-reset `tick_ppu(7)`/`tick_apu(8)` pre-advance the
+  harness does (it had none).
+New public `Cpu::instruction_boundary()` replaces the harness's `#[cfg(test)]`
+queue-length peek. The `#[ignore]`d diagnostic tracers keep their private historical loop
+copies (unchanged, already documented as stale-prone — trust `SystemClock`, not them).
+
+**Dead `pending_irq` removed.** Orphaned when the branch dispatch special-case was removed
+(nothing set it anymore). Field, its clears in `BranchPageFix`/`VectorFetchHi`, and its arm
+of the RunInstruction-end deferred-fire condition deleted; `debug_irq_state()` is now a
+3-tuple (three tracer call sites updated).
+
+Note on runtime verification: the GUI app can't be launched in this environment (headless);
+the port is exercised by `app.rs`'s unit tests plus the fact that the identical `SystemClock`
+path now runs all 159 blargg ROMs. Worth a quick real-ROM smoke run on a desktop next time
+the app is touched.
+
+---

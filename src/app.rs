@@ -2,12 +2,17 @@ use crate::bus::Bus;
 use crate::cartridge::Cartridge;
 use crate::cpu::Cpu;
 use crate::renderer::Renderer;
+use crate::system::SystemClock;
 use std::fs;
 use std::path::Path;
 
 pub enum AppState {
     NoRom,
-    Running { cpu: Cpu, bus: Bus },
+    Running {
+        cpu: Cpu,
+        bus: Bus,
+        clock: SystemClock,
+    },
 }
 
 pub struct App {
@@ -27,7 +32,15 @@ fn load_rom_into(state: &mut AppState, data: &[u8]) -> Result<(), String> {
     bus.insert_cartridge(cartridge);
     let mut cpu = Cpu::new();
     cpu.reset(&mut bus);
-    *state = AppState::Running { cpu, bus };
+    // Pre-advance PPU by 7 cycles (the real 6502 reset takes 7 cycles on
+    // hardware). APU advances by 8 to match cpu.cycles starting at 8.
+    let _ = bus.tick_ppu(7);
+    let _ = bus.tick_apu(8);
+    *state = AppState::Running {
+        cpu,
+        bus,
+        clock: SystemClock::new(),
+    };
     Ok(())
 }
 
@@ -49,38 +62,14 @@ impl App {
             AppState::NoRom => {
                 let _ = self.renderer.present_placeholder();
             }
-            AppState::Running { cpu, bus } => {
+            AppState::Running { cpu, bus, clock } => {
+                // SystemClock carries the blargg-verified interrupt-delivery
+                // rules (deferred NMI edges, per-cycle APU ticking, DMA
+                // interrupt deferral) — the same stepping code the ROM test
+                // harness uses.
                 let mut elapsed = 0u64;
                 while elapsed < CYCLES_PER_FRAME {
-                    let cycles_before = cpu.cycles;
-                    if bus.dma_active() {
-                        bus.tick_dma();
-                        if bus.tick_ppu(1) {
-                            cpu.nmi();
-                        }
-                        if bus.tick_apu(1) {
-                            cpu.irq();
-                        }
-                        elapsed += 1;
-                    } else {
-                        cpu.tick(bus);
-                        let delta = cpu.cycles - cycles_before;
-                        let (extra, extra_nmi) = bus.take_ppu_preadvance();
-                        let mut got_nmi = extra_nmi;
-                        let remaining = delta.saturating_sub(extra as u64);
-                        for _ in 0..remaining {
-                            if bus.tick_ppu(1) {
-                                got_nmi = true;
-                            }
-                        }
-                        if got_nmi {
-                            cpu.nmi();
-                        }
-                        if bus.tick_apu(delta) {
-                            cpu.irq();
-                        }
-                        elapsed += delta;
-                    }
+                    elapsed += clock.step(cpu, bus).cycles;
                 }
                 if bus.ppu.frame_ready {
                     bus.ppu.frame_ready = false;
@@ -140,7 +129,7 @@ mod tests {
         let mut state = AppState::NoRom;
         load_rom_into(&mut state, &test_rom_bytes()).unwrap();
         // Advance a little so we can prove the swap resets cycles.
-        if let AppState::Running { cpu, bus } = &mut state {
+        if let AppState::Running { cpu, bus, .. } = &mut state {
             cpu.tick(bus);
         }
         let result = load_rom_into(&mut state, &test_rom_bytes());

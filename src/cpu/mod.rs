@@ -46,7 +46,6 @@ pub struct Cpu {
     /// Low byte of the interrupt vector read by VectorFetch; consumed by VectorFetchHi.
     pub(in crate::cpu) vector_lo: u8,
     pub(in crate::cpu) pending_nmi: bool,
-    pub(in crate::cpu) pending_irq: bool,
     /// Correct high byte of the branch target when a page crossing occurs.
     /// Set by the branch() helper; consumed by BranchPageFix.
     pub(in crate::cpu) branch_target_hi: u8,
@@ -104,7 +103,6 @@ impl Cpu {
             queue_head: 0,
             vector_lo: 0,
             pending_nmi: false,
-            pending_irq: false,
             branch_target_hi: 0,
             vector_base: 0,
             branch_delay_irq: false,
@@ -140,6 +138,14 @@ impl Cpu {
         self.irq_pending
     }
 
+    /// True when the micro-op queue is empty, i.e. the last tick completed an
+    /// instruction (or interrupt sequence) and the next tick is a dispatch.
+    /// Run loops use this to tell whether a tick's final cycle was also an
+    /// instruction's final cycle (see Cpu::irq_on_last_cycle).
+    pub fn instruction_boundary(&self) -> bool {
+        self.queue_len == 0
+    }
+
     /// Suppress interrupt servicing for the next queue-empty dispatch (the pending
     /// flags survive; the interrupt fires one instruction later). Run loops call
     /// this when an interrupt first asserts during a DMA stall: the interrupt
@@ -157,15 +163,10 @@ impl Cpu {
     }
 
     /// Diagnostic accessor for the NMI-vs-IRQ arbitration tracer:
-    /// (irq_pending, pending_irq, irq_inhibit_next, flag(FLAG_I)).
+    /// (irq_pending, irq_inhibit_next, flag(FLAG_I)).
     #[cfg(test)]
-    pub(crate) fn debug_irq_state(&self) -> (bool, bool, bool, bool) {
-        (
-            self.irq_pending,
-            self.pending_irq,
-            self.irq_inhibit_next,
-            self.flag(FLAG_I),
-        )
+    pub(crate) fn debug_irq_state(&self) -> (bool, bool, bool) {
+        (self.irq_pending, self.irq_inhibit_next, self.flag(FLAG_I))
     }
 
     pub fn reset(&mut self, bus: &mut dyn Bus) {
@@ -311,9 +312,8 @@ impl Cpu {
                 if self.queue_len == 0 {
                     let blocked = self.irq_deferred_blocked;
                     self.irq_deferred_blocked = false;
-                    if self.pending_deferred_irq || self.pending_irq {
+                    if self.pending_deferred_irq {
                         self.pending_deferred_irq = false;
-                        self.pending_irq = false;
                         if !blocked {
                             self.cycles += 1; // T1 phantom
                             let _ = bus.read(self.pc);
@@ -328,9 +328,8 @@ impl Cpu {
                 // irq_pending: the IRQ line asserted during the branch's T1-T3
                 // (an IRQ already visible at dispatch preempts the branch like
                 // any other instruction and never reaches this micro-op).
-                // Aborts T4 if the IRQ line is not masked. pending_irq is a
-                // legacy check — nothing sets it anymore.
-                let irq_abort = self.pending_irq || (!self.flag(FLAG_I) && self.irq_pending);
+                // Aborts T4 if the IRQ line is not masked.
+                let irq_abort = !self.flag(FLAG_I) && self.irq_pending;
                 if irq_abort {
                     // IRQ aborts T4: the fixup cycle still elapses, but the page
                     // fix is not applied — cpu.pc stays the page-wrong address,
@@ -340,7 +339,6 @@ impl Cpu {
                     // cpu_interrupts_v2/5-branch_delays_irq's
                     // test_branch_taken_pagecross rows 2-5, whose readme values
                     // are consistent only with the aborted cycle elapsing.
-                    self.pending_irq = false;
                     self.irq_pending = false;
                     self.cycles += 1; // aborted fixup cycle (no page fix applied)
                     self.cycles += 1; // T1 phantom at page_wrong_pc
@@ -395,7 +393,6 @@ impl Cpu {
                 let hi = bus.read(self.vector_base.wrapping_add(1)) as u16;
                 let lo = self.vector_lo as u16;
                 self.pc = (hi << 8) | lo;
-                self.pending_irq = false;
                 self.interrupt_poll_suppressed = true;
             }
         }

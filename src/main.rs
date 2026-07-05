@@ -5,6 +5,7 @@ mod cartridge;
 mod cpu;
 mod ppu;
 mod renderer;
+mod system;
 #[cfg(test)]
 mod tests;
 

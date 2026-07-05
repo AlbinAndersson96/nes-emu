@@ -4,6 +4,7 @@ use crate::bus::Bus;
 use crate::cartridge::Cartridge;
 use crate::cpu::Bus as CpuBus;
 use crate::cpu::Cpu;
+use crate::system::SystemClock;
 
 // Signature written by the test ROM to $6001-$6003 once output is valid.
 const SIG: [u8; 3] = [0xDE, 0xB0, 0x61];
@@ -54,22 +55,11 @@ fn run_until_complete_trace(bus: &mut Bus, cpu: &mut Cpu, trace_nmi: bool) {
     let mut total_cycles: u64 = 0;
     let mut nmi_count: u32 = 0;
     let mut last_nmi_cycle: u64 = 0;
-    // An NMI edge landing on any single-cycle tick's own last (only) cycle isn't
-    // visible to real 6502 hardware's interrupt poll (sampled going into a cycle,
-    // using state from before it begins) — it only becomes externally visible one
-    // tick later than an edge on an earlier cycle would. See docs/cpu_interrupts.md
-    // for how this was derived (matches readme expected-output tables for
-    // cpu_interrupts_v2/2-nmi_and_brk; not fully verified for every sub-case).
-    let mut deferred_nmi = false;
-    // Interrupts that first assert during a DMA stall missed the stalled
-    // instruction's poll point (polling happens on an instruction's penultimate
-    // cycle, before the DMA halts the CPU). They are delivered when the DMA ends,
-    // with the CPU's next dispatch poll suppressed, so the first post-DMA
-    // instruction executes before the interrupt is serviced — matching
-    // cpu_interrupts_v2/4-irq_and_dma's expected table (the long "8" band).
-    let mut dma_nmi_deferred = false;
-    let mut dma_irq_deferred = false;
-    let mut in_dma = false;
+    // All interrupt-delivery rules (deferred NMI edges, per-cycle APU ticking
+    // with last-cycle IRQ flagging, DMA interrupt deferral) live in the shared
+    // SystemClock — the same stepping code main.rs runs. See
+    // docs/cpu_interrupts.md for how each rule was derived and verified.
+    let mut clock = SystemClock::new();
 
     loop {
         let sig_valid =
@@ -91,85 +81,17 @@ fn run_until_complete_trace(bus: &mut Bus, cpu: &mut Cpu, trace_nmi: bool) {
             panic!("timed out after {} cycles", total_cycles);
         }
 
-        // Per-cycle execution: DMA stalls the CPU; one tick per clock.
-        // For CPU ticks, advance PPU/APU by however many cycles that tick consumed
-        // (RunInstruction is a bulk micro-op; fetch tick consumes 0 cycles).
-        let cycles_before = cpu.cycles;
-        if bus.dma_active() {
-            in_dma = true;
-            bus.tick_dma();
-            if bus.tick_ppu(1) {
-                dma_nmi_deferred = true;
-            }
-            if bus.tick_apu(1) && !cpu.irq_line_pending() {
-                dma_irq_deferred = true;
-            }
-            total_cycles += 1;
-        } else {
-            if in_dma {
-                in_dma = false;
-                if dma_nmi_deferred || dma_irq_deferred {
-                    if dma_nmi_deferred {
-                        cpu.nmi();
-                    }
-                    if dma_irq_deferred {
-                        cpu.irq();
-                    }
-                    cpu.suppress_next_interrupt_poll();
-                }
-                dma_nmi_deferred = false;
-                dma_irq_deferred = false;
-            }
-            cpu.tick(bus);
-            let delta = cpu.cycles - cycles_before;
-            // Consume any PPU cycles pre-advanced during a $2002 read, then tick
-            // the remaining cycles one-at-a-time for accurate NMI delivery.
-            let (extra, extra_nmi) = bus.take_ppu_preadvance();
-            let mut got_nmi = extra_nmi;
-            let remaining = delta.saturating_sub(extra as u64);
-            let mut new_deferred = false;
-            for i in 0..remaining {
-                if bus.tick_ppu(1) {
-                    if i + 1 == remaining {
-                        new_deferred = true;
-                    } else {
-                        got_nmi = true;
-                    }
-                }
-            }
-            if deferred_nmi {
-                got_nmi = true;
-            }
-            deferred_nmi = new_deferred;
-            if got_nmi {
-                if trace_nmi && nmi_count < 30 {
-                    let gap = cpu.cycles - last_nmi_cycle;
-                    eprintln!(
-                        "NMI#{:02} at cycle={} pc={:#06x} gap={}",
-                        nmi_count, cpu.cycles, cpu.pc, gap
-                    );
-                    last_nmi_cycle = cpu.cycles;
-                    nmi_count += 1;
-                }
-                cpu.nmi();
-            }
-            // Tick the APU one cycle at a time so an IRQ line that FIRST
-            // asserts on the instruction's final cycle can be flagged: a taken
-            // branch ignores IRQ on its last clock (cpu.irq_on_last_cycle +
-            // branch_delay_irq), while assertions on earlier cycles service
-            // normally at the next dispatch.
-            let instr_done = cpu.debug_nmi_state().2 == 0;
-            for i in 0..delta {
-                if bus.tick_apu(1) {
-                    if !cpu.irq_line_pending() && instr_done && i + 1 == delta {
-                        cpu.irq_on_last_cycle();
-                    } else {
-                        cpu.irq();
-                    }
-                }
-            }
-            total_cycles += delta;
+        let result = clock.step(cpu, bus);
+        if result.nmi && trace_nmi && nmi_count < 30 {
+            let gap = cpu.cycles - last_nmi_cycle;
+            eprintln!(
+                "NMI#{:02} at cycle={} pc={:#06x} gap={}",
+                nmi_count, cpu.cycles, cpu.pc, gap
+            );
+            last_nmi_cycle = cpu.cycles;
+            nmi_count += 1;
         }
+        total_cycles += result.cycles;
     }
 }
 
@@ -1458,8 +1380,7 @@ fn nmi_irq_row0_arbitration_trace() {
                 total_cycles += 1;
             } else {
                 let (pn_before, np_before, ql_before) = cpu.debug_nmi_state();
-                let (irqp_before, pirq_before, inhibit_before, flagi_before) =
-                    cpu.debug_irq_state();
+                let (irqp_before, inhibit_before, flagi_before) = cpu.debug_irq_state();
                 cpu.tick(&mut bus);
                 let delta = cpu.cycles - cycles_before;
 
@@ -1513,10 +1434,9 @@ fn nmi_irq_row0_arbitration_trace() {
 
                 if fine_trace {
                     let (pn_after, np_after, ql_after) = cpu.debug_nmi_state();
-                    let (irqp_after, pirq_after, inhibit_after, flagi_after) =
-                        cpu.debug_irq_state();
+                    let (irqp_after, inhibit_after, flagi_after) = cpu.debug_irq_state();
                     eprintln!(
-                        "  pc={:#06x} delta={} cycles={} ql:{}->{} nmi:{}/{}->{}/{} irq_pending:{}->{} pending_irq:{}->{} inhibit:{}->{} I:{}->{} got_nmi={} got_irq={}",
+                        "  pc={:#06x} delta={} cycles={} ql:{}->{} nmi:{}/{}->{}/{} irq_pending:{}->{} inhibit:{}->{} I:{}->{} got_nmi={} got_irq={}",
                         pc_now,
                         delta,
                         cpu.cycles,
@@ -1528,8 +1448,6 @@ fn nmi_irq_row0_arbitration_trace() {
                         np_after,
                         irqp_before,
                         irqp_after,
-                        pirq_before,
-                        pirq_after,
                         inhibit_before,
                         inhibit_after,
                         flagi_before,
@@ -1622,7 +1540,7 @@ fn nmi_irq_all_rows_summary() {
             total_cycles += 1;
         } else {
             let (pn_before, _np_before, ql_before) = cpu.debug_nmi_state();
-            let (irqp_before, _pirq_before, _inhibit_before, _flagi_before) = cpu.debug_irq_state();
+            let (irqp_before, _inhibit_before, _flagi_before) = cpu.debug_irq_state();
             cpu.tick(&mut bus);
             let delta = cpu.cycles - cycles_before;
 

@@ -115,9 +115,10 @@ affect the dispatch *after* the next one, not the very next one.
 
 Before this was modeled, this emulator made an edge landing on an instruction's
 last cycle visible immediately (one dispatch too early). The fix
-(`run_until_complete_trace`, `src/tests/roms.rs`) ticks the PPU one cycle at a
-time after each CPU tick and defers delivery of `cpu.nmi()` by exactly one extra
-tick when the edge lands on the final sub-cycle of that tick's delta:
+(`SystemClock::step`, `src/system.rs` — shared by the real run loop and the ROM
+test harness) ticks the PPU one cycle at a time after each CPU tick and defers
+delivery of `cpu.nmi()` by exactly one extra tick when the edge lands on the
+final sub-cycle of that tick's delta:
 
 ```rust
 for i in 0..remaining {
@@ -136,8 +137,11 @@ if got_nmi { cpu.nmi(); }
 
 This is NMI-specific and deliberately **not** applied to IRQ. NMI is edge-triggered
 and the defer models exactly when that edge becomes externally visible. IRQ is
-level-triggered and already re-sampled fresh every tick (`bus.tick_apu(delta)`
-once per instruction) — applying the same one-tick defer to IRQ was tried and
+level-triggered and re-sampled fresh every cycle (`SystemClock::step` ticks the
+APU one cycle at a time; a level FIRST asserting on an instruction's final cycle
+is flagged via `Cpu::irq_on_last_cycle` for the taken-branch last-clock ignore,
+but is otherwise visible at the next dispatch as before) — applying the same
+one-tick defer to IRQ was tried and
 **confirmed to regress** a previously-correct case
 (`cpu_interrupts_v2/3-nmi_and_irq` row 0): delaying IRQ's visibility by one cycle
 let an instruction that should have been preempted by IRQ execute cleanly instead,

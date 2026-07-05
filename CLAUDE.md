@@ -21,6 +21,7 @@ cargo fmt            # format
 
 - **`src/cpu/mod.rs`** — `Cpu` struct, register file, micro-op queue, `tick()` entry point. The `Bus` trait (`fn read(&mut self, u16) -> u8` / `fn write(&mut self, u16, u8)`) is defined here. `tick()` executes exactly one micro-op from the queue; when the queue empties a new instruction is decoded (via `RunInstruction`) or an interrupt is serviced. IRQ is level-triggered: `irq_pending` is re-asserted each call to `tick_apu` when the APU line is high, so masked IRQs cannot accumulate.
 - **`src/cpu/instructions.rs`** — `execute()` dispatcher; one match arm per opcode including all unofficial opcodes (LAX, SAX, DCP, ISB, SLO, SRE, RLA, RRA, SHA, SHX, SHY, TAS, ANC, ALR, ARR, XAA, LAS).
+- **`src/system.rs`** — `SystemClock`: the shared per-tick stepping loop (CPU tick or DMA stall cycle, then per-cycle PPU/APU ticking) carrying the blargg-verified interrupt-delivery rules: deferred NMI edges (an edge on a tick's last cycle is delivered one tick later), last-cycle IRQ flagging (`Cpu::irq_on_last_cycle`, needed for the taken-branch last-clock ignore), and DMA interrupt deferral (interrupts first asserting during a DMA stall are delivered at DMA end with one dispatch poll suppressed). Used by BOTH the real run loop (`App::step_frame`) and the ROM test harness — change it in one place only.
 - **`src/bus.rs`** — `Bus` struct implements `CpuBus`. Wires RAM, PPU, APU, controllers, and cartridge into the 16-bit address space. Exposes `bus.ppu` and `bus.apu` publicly. `tick_apu(cycles)` advances the APU and returns the current IRQ line level.
 - **`src/apu/mod.rs`** — `Apu` struct: orchestrates all five channels, the NTSC frame counter (4-step / 5-step modes), and the audio mixer. `tick(cpu_cycles)` drives the frame counter and channel timers, then returns `take_irq()` which yields the live IRQ line level (`frame_irq_flag && !irq_inhibit || dmc.irq_flag`) without consuming anything. Reading `$4015` clears `frame_irq_flag`; writing `$4017` with bit 6 set (irq_inhibit) also clears it.
 - **`src/apu/pulse.rs`** — Pulse channel with duty cycle sequencer, length counter, envelope, and sweep unit.
@@ -36,7 +37,7 @@ cargo fmt            # format
 - **`src/tests/mod.rs`** — `TestBus`: flat 64 KB address space used by unit tests (no mirroring, no side effects).
 - **`src/tests/bus.rs`** — bus unit tests.
 - **`src/tests/cpu.rs`** — CPU unit tests.
-- **`src/tests/roms.rs`** — Blargg CPU ROM test harness. Polls $6000/$6001–$6003 for test completion. Per-cycle run loop: when DMA is active calls `bus.tick_dma()`; otherwise calls `cpu.tick(bus)`, then ticks the PPU and APU one cycle at a time (PPU NMI edges are delivered via `cpu.nmi()` with a one-tick defer for last-cycle edges; APU IRQ level via `cpu.irq()`, or `cpu.irq_on_last_cycle()` for a line first asserting on an instruction's final cycle; interrupts first asserting during DMA are deferred to DMA end with one dispatch poll suppressed). Runs the `instr_test-v5` suite (17 tests, all passing), `instr_timing` (passing), all 5 `instr_misc` tests (passing), plus `cpu_interrupts_v2` (all 6 passing).
+- **`src/tests/roms.rs`** — Blargg CPU ROM test harness. Polls $6000/$6001–$6003 for test completion; steps the machine via the shared `SystemClock` (`src/system.rs`), which carries all the per-cycle interrupt-delivery rules. Note: the `#[ignore]`d diagnostic tracers in this file keep their own private copies of older run loops and can go stale — trust `SystemClock`, not them. Runs the `instr_test-v5` suite (17 tests, all passing), `instr_timing` (passing), all 5 `instr_misc` tests (passing), plus `cpu_interrupts_v2` (all 6 passing).
 - **`src/tests/ppu_roms.rs`** — Blargg PPU ROM test harness. Runs each ROM for 300 frames (~5 s NES time), then reads the result code from the nametable (the ROMs render `$XX` in ASCII tiles at nametable-0 row 5, col 2–4) and looks up its meaning from the per-ROM table in the README. On failure the panic message includes the result code and its description. Also saves a PNG screenshot to `tests/screenshots/ppu/output/` and pixel-compares against a golden in `tests/screenshots/ppu/golden/` if one exists. To bless a new golden: `cp tests/screenshots/ppu/output/<name>.png tests/screenshots/ppu/golden/<name>.png`.
 - **`docs/bus.md`** — NES address map and bus design notes.
 - **`docs/cpu_instructions.md`** — 6502 instruction reference (official opcodes, addressing modes, cycle counts).
@@ -47,7 +48,7 @@ cargo fmt            # format
 
 ## Key design notes
 
-**PPU ticking**: The run loop (and test harness) must call `bus.tick_ppu(delta)` after every `cpu.tick()`. It returns `true` when an NMI edge is detected; the caller should then call `cpu.nmi()`. Without this, `$2002` always returns 0 and the blargg test framework loops forever waiting for VBlank.
+**PPU ticking**: The run loop (and test harness) must call `bus.tick_ppu(delta)` after every `cpu.tick()`. It returns `true` when an NMI edge is detected; the caller should then call `cpu.nmi()`. Without this, `$2002` always returns 0 and the blargg test framework loops forever waiting for VBlank. Use `SystemClock::step` (`src/system.rs`) instead of hand-rolling this — it also implements the deferred-edge and DMA rules.
 
 **APU ticking**: `bus.tick_apu(...)` must also be called after every `cpu.tick()` (the test harness ticks it one cycle at a time). It returns `true` when the APU's IRQ line is currently asserted; the caller should then call `cpu.irq()` — or `cpu.irq_on_last_cycle()` when the line first asserts on an instruction's final cycle (needed for the taken-branch last-clock IRQ ignore). The APU IRQ line is level-triggered: it stays asserted until `frame_irq_flag` is cleared (by reading `$4015` or writing `$4017` with bit 6 set). Because `tick_apu` is called every cycle, a masked IRQ cannot accumulate and fire unexpectedly when FLAG_I is later cleared. Note `bus.tick_apu` internally repays the 4-cycle pre-advance done by `$4015` reads.
 
@@ -95,7 +96,7 @@ These are confirmed missing features tied to failing blargg ROM tests. The proje
 
 ### Remaining failures
 
-None on the CPU side. The run loop in `main.rs` still lacks the test harness's per-cycle NMI/IRQ delivery refinements (deferred NMI edges, per-cycle APU ticking, DMA interrupt deferral) — the blargg-verified behavior currently lives in `src/tests/roms.rs`; porting it to `main.rs` is a known hygiene task.
+None on the CPU side. The blargg-verified per-cycle interrupt-delivery behavior lives in `SystemClock` (`src/system.rs`), shared by the real run loop (`App::step_frame`) and the ROM test harness — the previously-noted harness/main.rs divergence is resolved.
 
 ### Failing PPU tests
 
