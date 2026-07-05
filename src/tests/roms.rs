@@ -153,8 +153,20 @@ fn run_until_complete_trace(bus: &mut Bus, cpu: &mut Cpu, trace_nmi: bool) {
                 }
                 cpu.nmi();
             }
-            if bus.tick_apu(delta) {
-                cpu.irq();
+            // Tick the APU one cycle at a time so an IRQ line that FIRST
+            // asserts on the instruction's final cycle can be flagged: a taken
+            // branch ignores IRQ on its last clock (cpu.irq_on_last_cycle +
+            // branch_delay_irq), while assertions on earlier cycles service
+            // normally at the next dispatch.
+            let instr_done = cpu.debug_nmi_state().2 == 0;
+            for i in 0..delta {
+                if bus.tick_apu(1) {
+                    if !cpu.irq_line_pending() && instr_done && i + 1 == delta {
+                        cpu.irq_on_last_cycle();
+                    } else {
+                        cpu.irq();
+                    }
+                }
             }
             total_cycles += delta;
         }

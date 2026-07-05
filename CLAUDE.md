@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-A NES emulator written in Rust. The CPU (full 6502 instruction set including unofficial opcodes), a full PPU (background rendering, sprites, palette, scrolling, OAM DMA), and the full APU (all five channels plus frame counter) are implemented. 157 of 159 blargg ROM tests pass: all 17 `instr_test-v5` tests, `instr_timing`, all 5 `instr_misc` tests, and `cpu_interrupts_v2` tests 1-4. The remaining 2 failures require sub-instruction cycle-accurate CPU emulation (see Known gaps).
+A NES emulator written in Rust. The CPU (full 6502 instruction set including unofficial opcodes), a full PPU (background rendering, sprites, palette, scrolling, OAM DMA), and the full APU (all five channels plus frame counter) are implemented. All 159 blargg CPU ROM tests pass: all 17 `instr_test-v5` tests, `instr_timing`, all 5 `instr_misc` tests, and all of `cpu_interrupts_v2` (tests 1-5 plus the combined suite). See Known gaps for the remaining PPU test failures.
 
 ## Commands
 
@@ -36,7 +36,7 @@ cargo fmt            # format
 - **`src/tests/mod.rs`** — `TestBus`: flat 64 KB address space used by unit tests (no mirroring, no side effects).
 - **`src/tests/bus.rs`** — bus unit tests.
 - **`src/tests/cpu.rs`** — CPU unit tests.
-- **`src/tests/roms.rs`** — Blargg CPU ROM test harness. Polls $6000/$6001–$6003 for test completion. Per-cycle run loop: when DMA is active calls `bus.tick_dma()`; otherwise calls `cpu.tick(bus)`. After each cycle calls `bus.tick_ppu(delta)` (returns true → `cpu.nmi()`) and `bus.tick_apu(delta)` (returns true → `cpu.irq()`). Runs the `instr_test-v5` suite (17 tests, all passing), `instr_timing` (passing), all 5 `instr_misc` tests (passing), plus `cpu_interrupts_v2` (4 passing, 2 failing: test 5 and the combined suite — see Known gaps).
+- **`src/tests/roms.rs`** — Blargg CPU ROM test harness. Polls $6000/$6001–$6003 for test completion. Per-cycle run loop: when DMA is active calls `bus.tick_dma()`; otherwise calls `cpu.tick(bus)`, then ticks the PPU and APU one cycle at a time (PPU NMI edges are delivered via `cpu.nmi()` with a one-tick defer for last-cycle edges; APU IRQ level via `cpu.irq()`, or `cpu.irq_on_last_cycle()` for a line first asserting on an instruction's final cycle; interrupts first asserting during DMA are deferred to DMA end with one dispatch poll suppressed). Runs the `instr_test-v5` suite (17 tests, all passing), `instr_timing` (passing), all 5 `instr_misc` tests (passing), plus `cpu_interrupts_v2` (all 6 passing).
 - **`src/tests/ppu_roms.rs`** — Blargg PPU ROM test harness. Runs each ROM for 300 frames (~5 s NES time), then reads the result code from the nametable (the ROMs render `$XX` in ASCII tiles at nametable-0 row 5, col 2–4) and looks up its meaning from the per-ROM table in the README. On failure the panic message includes the result code and its description. Also saves a PNG screenshot to `tests/screenshots/ppu/output/` and pixel-compares against a golden in `tests/screenshots/ppu/golden/` if one exists. To bless a new golden: `cp tests/screenshots/ppu/output/<name>.png tests/screenshots/ppu/golden/<name>.png`.
 - **`docs/bus.md`** — NES address map and bus design notes.
 - **`docs/cpu_instructions.md`** — 6502 instruction reference (official opcodes, addressing modes, cycle counts).
@@ -49,7 +49,7 @@ cargo fmt            # format
 
 **PPU ticking**: The run loop (and test harness) must call `bus.tick_ppu(delta)` after every `cpu.tick()`. It returns `true` when an NMI edge is detected; the caller should then call `cpu.nmi()`. Without this, `$2002` always returns 0 and the blargg test framework loops forever waiting for VBlank.
 
-**APU ticking**: `bus.tick_apu(delta)` must also be called after every `cpu.tick()`. It returns `true` when the APU's IRQ line is currently asserted; the caller should then call `cpu.irq()`. The APU IRQ line is level-triggered: it stays asserted until `frame_irq_flag` is cleared (by reading `$4015` or writing `$4017` with bit 6 set). Because `tick_apu` is called every cycle, a masked IRQ cannot accumulate and fire unexpectedly when FLAG_I is later cleared.
+**APU ticking**: `bus.tick_apu(...)` must also be called after every `cpu.tick()` (the test harness ticks it one cycle at a time). It returns `true` when the APU's IRQ line is currently asserted; the caller should then call `cpu.irq()` — or `cpu.irq_on_last_cycle()` when the line first asserts on an instruction's final cycle (needed for the taken-branch last-clock IRQ ignore). The APU IRQ line is level-triggered: it stays asserted until `frame_irq_flag` is cleared (by reading `$4015` or writing `$4017` with bit 6 set). Because `tick_apu` is called every cycle, a masked IRQ cannot accumulate and fire unexpectedly when FLAG_I is later cleared. Note `bus.tick_apu` internally repays the 4-cycle pre-advance done by `$4015` reads.
 
 **SHY / SHX page-cross behavior**: On a page-crossing access, these opcodes write to the *pre-carry* address `(addr_hi << 8) | ((lo + index) & 0xFF)` rather than the effective address. `addr_hi` is the high byte of the *operand*, not the effective address. This is required for the `07-abs_xy` ROM test.
 
@@ -70,7 +70,7 @@ tests/screenshots/
 
 ## Known gaps
 
-These are confirmed missing features tied to failing blargg ROM tests. The project currently passes **157 of 159** blargg CPU tests and **4 of 5** blargg PPU tests.
+These are confirmed missing features tied to failing blargg ROM tests. The project currently passes **all 159** blargg CPU tests and **4 of 5** blargg PPU tests.
 
 ### Fixed (previously listed here)
 
@@ -91,13 +91,11 @@ These are confirmed missing features tied to failing blargg ROM tests. The proje
 
 8. **`cpu_interrupts_v2/3-nmi_and_irq`** — **now passes.** Two fixes beyond the ones above: `frame_reset_delay = 7` (see item 7), and the `$2002` read pre-advance now samples PPU state on the read cycle's final dot instead of one dot past it (`Bus::read` + `Ppu::tick_dots`). `sync_vbl` dot-locks blargg test code to VBlank onset through that read, and since a frame is a non-integer 29780⅔ CPU cycles, the one-dot sampling error only crossed a cycle boundary on this test's 2-frame delay chain — making its whole table one row early while 1-frame tests (like test 2) were unaffected. Earlier sessions' "confirmed contradiction" for this test dissolved once the source was read correctly: the NMI is a real VBL edge (not the $2000 instant-fire quirk), the NMI handler's `bit SNDCHN` acks the APU IRQ (hence `IRQ=00` rows), and rows 10-11 additionally depend on the interrupt-sequences-don't-poll rule.
 
-### Remaining failures (all require sub-instruction cycle-accurate emulation)
+9. **`cpu_interrupts_v2/5-branch_delays_irq` and the combined suite** — **now pass** (with them, all 159 blargg CPU ROM tests pass). Four fixes: (a) `$4015` reads pre-advance the APU 4 cycles so the frame-IRQ flag is sampled at the read cycle instead of the instruction's start (`APU_READ_PREADVANCE`, `src/bus.rs`; `tick_apu` repays the debt internally so total APU time is conserved); (b) an IRQ already visible at a branch's dispatch preempts the branch like any other instruction (the old dispatch-path special case is removed); (c) an IRQ-aborted branch page-fix cycle still elapses before the 7-cycle interrupt sequence (handler entry at branch T1+11); (d) the taken-branch last-clock IRQ ignore applies only to an IRQ that *first* asserts on that clock — the test harness ticks the APU per cycle and flags such assertions via `Cpu::irq_on_last_cycle`, and dispatch defers only `branch_delay_irq && irq_asserted_on_last_cycle`. Each fix was verified against a specific sub-table of the ROM's readme.
 
-The remaining failures (`cpu_interrupts_v2` test 5 plus the combined suite) exercise interrupt-sequencing behaviour that depends on *which cycle within a multi-cycle instruction* a signal arrives.
+### Remaining failures
 
-- **`cpu_interrupts_v2/5-branch_delays_irq`** — the PC column (the test's nominal subject: a taken branch ignoring IRQ on its last clock, and the page-cross abort case) now matches the readme exactly. The only remaining defect is the CK column, uniformly `expected - 4`: `$4015` reads sample the APU 4 cycles early (the read is applied while the APU still sits at the reading instruction's start, but the read cycle is the instruction's 4th/last cycle). Fixing it naively breaks `sync_apu`'s read-vs-write relative alignment; the read and write anchors must move together and `sync_apu`'s parity-lock convergence must be made to work first — see the investigation log's 2026-07-04 test-5 entry for the full analysis and the bounded next step.
-
-- **`cpu_interrupts_v2` combined suite** — fails because test 5 fails.
+None on the CPU side. The run loop in `main.rs` still lacks the test harness's per-cycle NMI/IRQ delivery refinements (deferred NMI edges, per-cycle APU ticking, DMA interrupt deferral) — the blargg-verified behavior currently lives in `src/tests/roms.rs`; porting it to `main.rs` is a known hygiene task.
 
 ### Failing PPU tests
 

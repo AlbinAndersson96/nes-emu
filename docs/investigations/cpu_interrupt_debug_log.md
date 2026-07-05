@@ -1406,3 +1406,69 @@ physical parity-conditional reset delay and re-check CK. Expect `frame_reset_del
 re-derivable as the aligned-parity case of the physical model.
 
 ---
+
+### 2026-07-05 (new session) — test 5 (branch_delays_irq) FIXED AND PASSING; combined suite PASSES; all 159 blargg CPU ROM tests now pass
+
+Four distinct fixes, each verified against a specific readme sub-table. The suite went
+180/6 → **182 passed / 4 failed** (remaining: `power_up_palette` + 3 `sprite_hit_roms`,
+both outside this investigation's scope). All six `cpu_interrupts_v2` tests pass.
+
+**(1) The previous session's "attempt 1" failure was a mechanical overdraw, not a wrong
+model.** Re-examined before pursuing the sync_apu-convergence plan: the $4015 read is
+applied inside the `RunInstruction` tick, whose harness delta is only 3 (the dispatch
+tick's cycle is APU-ticked separately) — so the old 4-cycle pre-advance overdrew by 1 and
+the harness's `saturating_sub` silently swallowed it, drifting the APU 1 cycle ahead per
+$4015 read. That drift is what broke test 3's framework, not the read-anchor model.
+**Fix:** debt-carrying inside the bus — `Bus::tick_apu` repays `apu_preadvance_cycles`
+before advancing, so run loops need no contract at all and total APU time is conserved
+across tick boundaries (`APU_READ_PREADVANCE = 4`, `src/bus.rs`). With that, the CK column
+came out exact and test 3 stayed green. sync_apu's `bne` branch now sees the flag (it takes
+the +1 path uniformly, matching hardware's aligned case uniformly) — everything downstream
+shifts consistently, so no parity model is needed after all. The `sync_apu` parity-lock
+plan from the previous entry became unnecessary.
+
+**(2) OAM DMA parity anchor re-flipped (odd→513, even→514).** The sync_apu +1 shift from
+(1) uniformly flips the parity of `$4014` write cycles in tests that sync first. The
+polarity anchor was always empirical (our absolute cycle 0 is arbitrary); re-anchored so
+test 4's `+526/+527` boundary matches again. Both anchors can't be justified from nesdev's
+"odd CPU cycle" wording alone — our counter's phase relative to hardware's get/put clock is
+unknowable; the readme tables are the ground truth.
+
+**(3) An IRQ already visible at a branch's dispatch preempts it like any other
+instruction.** Removed the dispatch-path special case that set `pending_irq` and always let
+branches execute first. All four sub-test tables agree: the earliest rows push the branch's
+own address (`test_branch_not_taken` rows 0-1 were pushing 06 instead of 04 before this).
+The mid-branch arrival cases are covered by the level-refresh (`irq_pending`) feeding
+`BranchPageFix`'s abort check and the next dispatch. `pending_irq` is now never set — dead
+field retained (the `#[ignore]`d tracers destructure `debug_irq_state`'s 4-tuple); flagged
+for cleanup.
+
+**(4) The aborted page-fix cycle still elapses.** Cross-calibrating CK across
+`test_branch_taken_pagecross`'s matching rows (0-1, 5-9) vs the off-by-one rows 2-4 showed
+hardware's abort-band handler entry at branch T1 + 11, i.e. the aborted T4 is spent (page
+fix skipped, page-wrong PC pushed) and the full 7-cycle sequence follows. Our abort path
+skipped that cycle (entry at +10). Added the elapsed cycle in `BranchPageFix`'s abort arm.
+
+**(5) The taken-branch last-clock ignore applies only to an IRQ that FIRST asserts on that
+clock.** `branch_delay_irq` used to defer whatever was pending at the next dispatch —
+wrong for IRQs asserted during the branch's T1/T2, which hardware services right after the
+branch (`test_branch_taken` rows 2-3: pushed 07, not 0A). Distinguishing T2 from T3
+arrivals needs per-cycle APU ticking: the harness now ticks the APU one cycle at a time
+(mirroring the PPU loop) and calls the new `Cpu::irq_on_last_cycle()` for a line that first
+asserts on an instruction-completing tick's final cycle; the dispatch defers only when
+`branch_delay_irq && irq_asserted_on_last_cycle`. Rows 4-8 (the readme's `*** special
+case`) still defer correctly; rows 2-3 now service at branch+10.
+
+**Result: `5-branch_delays_irq` passes — all four sub-tests match their readme tables
+row-for-row (all four CRCs) — and `cpu_interrupts_v2` (combined) passes.** Zero regressions
+anywhere (`cli_latency`'s branch-heavy CLI/PLP cases were the main risk for (3)/(5) and
+stay green; `instr_timing` unaffected by (4) since it never takes the abort path).
+
+**Known divergence note:** the per-cycle APU ticking + `irq_on_last_cycle` + DMA-deferral
+logic live in the test harness's run loop (`src/tests/roms.rs`); `main.rs`'s real run loop
+still ticks the APU in bulk and lacks the NMI defer machinery too (pre-existing, noted
+before). The bus-level changes ($4015 pre-advance with internal repay, DMA length parity)
+apply everywhere automatically. Porting the harness loop refinements to `main.rs` is the
+natural next hygiene task.
+
+---

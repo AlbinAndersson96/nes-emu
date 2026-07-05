@@ -17,6 +17,9 @@ use crate::ppu::Ppu;
 ///   $4017        Controller 2 / APU frame counter
 ///   $4018–$401F  Disabled
 ///   $4020–$FFFF  Cartridge (mapper, PRG-ROM, WRAM)
+/// CPU cycles the APU is pre-advanced when $4015 is read (see Bus::read).
+const APU_READ_PREADVANCE: u32 = 4;
+
 pub struct Bus {
     ram: [u8; 2048],
     cartridge: Option<Cartridge>,
@@ -38,6 +41,12 @@ pub struct Bus {
     ppu_preadvance_cycles: u32,
     /// NMI that fired during a $2002 pre-advance; the run loop must deliver it.
     ppu_preadvance_nmi: bool,
+    /// CPU cycles by which the APU was pre-advanced during a $4015 read (the
+    /// read cycle is the 4th/last cycle of the reading instruction, but the
+    /// bus applies reads while the APU has only been ticked through the
+    /// instruction's first cycle). Repaid internally by tick_apu, so run
+    /// loops need no changes and total APU time is conserved.
+    apu_preadvance_cycles: u32,
 }
 
 impl Bus {
@@ -57,6 +66,7 @@ impl Bus {
             dmc_dma_cycles_left: 0,
             ppu_preadvance_cycles: 0,
             ppu_preadvance_nmi: false,
+            apu_preadvance_cycles: 0,
         }
     }
 
@@ -124,7 +134,10 @@ impl Bus {
     /// If the DMC reader needs a byte, arms a 4-cycle DMA stall; tick_dma() will
     /// fetch and supply the byte on the final cycle of the stall.
     pub fn tick_apu(&mut self, cpu_cycles: u64) -> bool {
-        let irq = self.apu.tick(cpu_cycles as u32);
+        // Repay any $4015-read pre-advance first so total APU time is conserved.
+        let repay = (self.apu_preadvance_cycles as u64).min(cpu_cycles);
+        self.apu_preadvance_cycles -= repay as u32;
+        let irq = self.apu.tick((cpu_cycles - repay) as u32);
         if self.apu.dmc_needs_dma() && self.dmc_dma_cycles_left == 0 {
             self.dmc_dma_cycles_left = 4;
         }
@@ -149,7 +162,7 @@ impl Bus {
     /// parity now equals the write cycle's parity.
     fn oam_dma(&mut self, page: u8) {
         self.oam_dma_active = true;
-        self.oam_dma_len = if self.apu.cycle_parity() { 514 } else { 513 };
+        self.oam_dma_len = if self.apu.cycle_parity() { 513 } else { 514 };
         self.oam_dma_cycles_left = self.oam_dma_len;
         self.oam_dma_page = page;
         self.oam_dma_byte_idx = 0;
@@ -200,7 +213,21 @@ impl CpuBus for Bus {
             }
 
             // APU / I/O
-            0x4000..=0x4015 => self.apu.read(addr),
+            0x4015 => {
+                // The $4015 read cycle is the reading instruction's 4th/last
+                // cycle, but this read is applied while the APU has only been
+                // ticked through the instruction's first (dispatch) cycle.
+                // Pre-advance so the frame-IRQ flag value (and the read-clear
+                // side effect) are sampled at the read cycle rather than 3-4
+                // cycles before it; tick_apu repays the debt so total APU time
+                // is conserved. Calibrated against the CK column of
+                // cpu_interrupts_v2/5-branch_delays_irq (a 1-cycle-per-iteration
+                // sampling-window walk over the flag's set moment).
+                self.apu.tick(APU_READ_PREADVANCE);
+                self.apu_preadvance_cycles += APU_READ_PREADVANCE;
+                self.apu.read(addr)
+            }
+            0x4000..=0x4014 => self.apu.read(addr),
             0x4016 => self.controller_shift[0] & 0x01,
             0x4017 => self.controller_shift[1] & 0x01,
 

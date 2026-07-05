@@ -180,11 +180,29 @@ knowing if debugging these tests further:
   applied. See the $4017 write handler in `src/apu/mod.rs` for the derivation;
   the old flat 4 made the IRQ fire 3 cycles early relative to the instruction
   stream and was the root cause of `4-irq_and_dma`'s 3-row table shift.
-- One known residual: `$4015` reads sample the APU 4 cycles early (the read is
-  applied while the APU still sits at the reading instruction's start). This
-  is the sole remaining defect behind `5-branch_delays_irq` (its CK column);
-  fixing it requires moving the read and write anchors together so `sync_apu`
-  still parity-locks — see the debug log's final entries before touching it.
+- `$4015` reads pre-advance the APU 4 cycles so the frame-IRQ flag (and its
+  read-clear side effect) are sampled at the read cycle rather than the
+  reading instruction's start (`APU_READ_PREADVANCE`, `src/bus.rs`);
+  `Bus::tick_apu` repays the debt internally so total APU time is conserved.
+  This fixed `5-branch_delays_irq`'s CK column (a 1-cycle-per-iteration
+  sampling-window walk over the flag's set moment, previously uniformly -4).
+
+## Branch instructions and IRQ
+
+Confirmed against all four sub-tables of `cpu_interrupts_v2/5-branch_delays_irq`
+(which passes in full):
+
+- An IRQ already visible at a branch's dispatch preempts the branch exactly like
+  any other instruction (the pushed PC is the branch's own address).
+- An IRQ asserting during a taken page-crossing branch's T1-T3 aborts the T4
+  page-fix: the cycle still elapses but the fix is not applied, the page-wrong
+  PC is pushed, and the full 7-cycle interrupt sequence follows (handler entry
+  at branch T1 + 11).
+- A taken non-page-crossing branch ignores an IRQ on its last clock (T3) — but
+  only one that FIRST asserts on that clock; one asserted during T1/T2 services
+  normally right after the branch. Modeled by `Cpu::irq_on_last_cycle()` (called
+  by the run loop, which ticks the APU one cycle at a time) plus
+  `branch_delay_irq`; the deferred IRQ then fires after the next instruction.
 
 These three subsystems being independently proven correct is *why* the
 `3-nmi_and_irq` contradiction above is genuinely unresolved rather than just
