@@ -10,14 +10,14 @@ afterward will not overwrite your edits (see `build.rs`).
 
 ```toml
 [player1]
-up = "Up"
-down = "Down"
-left = "Left"
-right = "Right"
+up = "W"
+down = "S"
+left = "A"
+right = "D"
 b = "Z"
 a = "X"
-select = "A"
-start = "S"
+select = "Q"
+start = "E"
 
 [player2]
 up = "I"
@@ -40,14 +40,14 @@ for the full list (letters/digits are their own variants, e.g. `"Z"`,
 
 | Button | P1 key | P2 key |
 |---|---|---|
-| Up | Up | I |
-| Down | Down | K |
-| Left | Left | J |
-| Right | Right | L |
+| Up | W | I |
+| Down | S | K |
+| Left | A | J |
+| Right | D | L |
 | B | Z | N |
 | A | X | M |
-| Select | A | Comma |
-| Start | S | Period |
+| Select | Q | Comma |
+| Start | E | Period |
 
 ## Fallback behavior
 

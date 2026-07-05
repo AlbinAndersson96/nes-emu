@@ -1,12 +1,12 @@
 [player1]
-up = "Up"
-down = "Down"
-left = "Left"
-right = "Right"
+up = "W"
+down = "S"
+left = "A"
+right = "D"
 b = "Z"
 a = "X"
-select = "A"
-start = "S"
+select = "Q"
+start = "E"
 
 [player2]
 up = "I"

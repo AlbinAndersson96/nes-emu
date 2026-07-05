@@ -103,14 +103,14 @@ impl Default for KeyMap {
     fn default() -> Self {
         Self::from_raw(RawConfig {
             player1: RawKeyBindings {
-                up: VirtualKeyCode::Up,
-                down: VirtualKeyCode::Down,
-                left: VirtualKeyCode::Left,
-                right: VirtualKeyCode::Right,
+                up: VirtualKeyCode::W,
+                down: VirtualKeyCode::S,
+                left: VirtualKeyCode::A,
+                right: VirtualKeyCode::D,
                 b: VirtualKeyCode::Z,
                 a: VirtualKeyCode::X,
-                select: VirtualKeyCode::A,
-                start: VirtualKeyCode::S,
+                select: VirtualKeyCode::Q,
+                start: VirtualKeyCode::E,
             },
             player2: RawKeyBindings {
                 up: VirtualKeyCode::I,
@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn missing_file_falls_back_to_default() {
         let map = KeyMap::load(Path::new("/nonexistent/path/keybindings.toml"));
-        assert_eq!(map.on_key(VirtualKeyCode::Up), Some((0, BUTTON_UP)));
+        assert_eq!(map.on_key(VirtualKeyCode::W), Some((0, BUTTON_UP)));
         assert_eq!(map.on_key(VirtualKeyCode::I), Some((1, BUTTON_UP)));
     }
 
@@ -173,7 +173,7 @@ mod tests {
         let path = std::env::temp_dir().join("nes_emu_test_invalid_keybindings.toml");
         fs::write(&path, "not valid toml [[[").unwrap();
         let map = KeyMap::load(&path);
-        assert_eq!(map.on_key(VirtualKeyCode::Up), Some((0, BUTTON_UP)));
+        assert_eq!(map.on_key(VirtualKeyCode::W), Some((0, BUTTON_UP)));
         let _ = fs::remove_file(&path);
     }
 
@@ -181,14 +181,14 @@ mod tests {
     fn default_map_has_no_collisions_between_players() {
         let map = KeyMap::default();
         let p1_keys = [
-            VirtualKeyCode::Up,
-            VirtualKeyCode::Down,
-            VirtualKeyCode::Left,
-            VirtualKeyCode::Right,
+            VirtualKeyCode::W,
+            VirtualKeyCode::S,
+            VirtualKeyCode::A,
+            VirtualKeyCode::D,
             VirtualKeyCode::Z,
             VirtualKeyCode::X,
-            VirtualKeyCode::A,
-            VirtualKeyCode::S,
+            VirtualKeyCode::Q,
+            VirtualKeyCode::E,
         ];
         for key in p1_keys {
             assert_eq!(map.on_key(key).unwrap().0, 0);
