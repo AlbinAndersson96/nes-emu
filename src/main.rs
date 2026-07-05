@@ -3,6 +3,7 @@ mod apu;
 mod bus;
 mod cartridge;
 mod cpu;
+mod input;
 mod ppu;
 mod renderer;
 mod system;
