@@ -3,6 +3,7 @@ mod apu;
 mod bus;
 mod cartridge;
 mod cpu;
+mod input;
 mod ppu;
 mod renderer;
 mod system;
@@ -10,6 +11,7 @@ mod system;
 mod tests;
 
 use app::App;
+use input::KeyMap;
 use renderer::Renderer;
 use std::{
     env, fs,
@@ -66,6 +68,12 @@ fn main() {
     };
 
     let mut app = App::new(renderer);
+
+    let key_map = env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("keybindings.toml")))
+        .map_or_else(KeyMap::default, |path| KeyMap::load(&path));
+    let mut button_state: [u8; 2] = [0, 0];
 
     if let Some(rom_path) = args.get(1) {
         if let Err(e) = app.load_rom(&PathBuf::from(rom_path)) {
@@ -126,6 +134,16 @@ fn main() {
                         if let Err(e) = app.load_rom(&path) {
                             eprintln!("error: cannot load ROM: {}", e);
                         }
+                    }
+                }
+
+                if let Some(keycode) = input.virtual_keycode {
+                    if let Some((port, bit)) = key_map.on_key(keycode) {
+                        match input.state {
+                            ElementState::Pressed => button_state[port] |= bit,
+                            ElementState::Released => button_state[port] &= !bit,
+                        }
+                        app.set_controller_buttons(port, button_state[port]);
                     }
                 }
             }

@@ -1,0 +1,19 @@
+[player1]
+up = "W"
+down = "S"
+left = "A"
+right = "D"
+b = "Z"
+a = "X"
+select = "Q"
+start = "E"
+
+[player2]
+up = "I"
+down = "K"
+left = "J"
+right = "L"
+b = "N"
+a = "M"
+select = "Comma"
+start = "Period"

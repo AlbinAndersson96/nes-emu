@@ -146,6 +146,9 @@ impl Bus {
 
     /// Strobe the controller shift registers. Writing 1 to bit 0 of $4016
     /// continuously reloads the latch; writing 0 freezes it and starts serial read.
+    ///
+    /// `buttons` bit order (LSB first, matches real NES serial order):
+    /// bit0=A, bit1=B, bit2=Select, bit3=Start, bit4=Up, bit5=Down, bit6=Left, bit7=Right.
     pub fn set_controller_state(&mut self, port: usize, buttons: u8) {
         if port < 2 {
             self.controller_latch[port] = buttons;
@@ -228,8 +231,16 @@ impl CpuBus for Bus {
                 self.apu.read(addr)
             }
             0x4000..=0x4014 => self.apu.read(addr),
-            0x4016 => self.controller_shift[0] & 0x01,
-            0x4017 => self.controller_shift[1] & 0x01,
+            0x4016 => {
+                let bit = self.controller_shift[0] & 0x01;
+                self.controller_shift[0] = (self.controller_shift[0] >> 1) | 0x80;
+                bit
+            }
+            0x4017 => {
+                let bit = self.controller_shift[1] & 0x01;
+                self.controller_shift[1] = (self.controller_shift[1] >> 1) | 0x80;
+                bit
+            }
 
             // Disabled region
             0x4018..=0x401F => 0,
