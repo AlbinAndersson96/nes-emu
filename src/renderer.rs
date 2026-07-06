@@ -1,5 +1,5 @@
 use pixels::{Pixels, SurfaceTexture};
-use winit::{
+use tao::{
     dpi::LogicalSize,
     event_loop::EventLoop,
     window::{Window, WindowBuilder, WindowId},
@@ -228,6 +228,10 @@ impl Renderer {
 
     pub fn window_id(&self) -> WindowId {
         self.window.id()
+    }
+
+    pub fn window(&self) -> &Window {
+        &self.window
     }
 }
 

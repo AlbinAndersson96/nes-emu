@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use serde::Deserialize;
-use winit::event::VirtualKeyCode;
+use tao::keyboard::KeyCode;
 
 pub const BUTTON_A: u8 = 1 << 0;
 pub const BUTTON_B: u8 = 1 << 1;
@@ -16,25 +16,25 @@ pub const BUTTON_RIGHT: u8 = 1 << 7;
 
 #[derive(Deserialize)]
 struct RawKeyBindings {
-    up: VirtualKeyCode,
-    down: VirtualKeyCode,
-    left: VirtualKeyCode,
-    right: VirtualKeyCode,
-    a: VirtualKeyCode,
-    b: VirtualKeyCode,
-    select: VirtualKeyCode,
-    start: VirtualKeyCode,
+    up: KeyCode,
+    down: KeyCode,
+    left: KeyCode,
+    right: KeyCode,
+    a: KeyCode,
+    b: KeyCode,
+    select: KeyCode,
+    start: KeyCode,
 }
 
 #[derive(Deserialize)]
 struct RawAppConfig {
-    fps_toggle: VirtualKeyCode,
+    fps_toggle: KeyCode,
 }
 
 impl Default for RawAppConfig {
     fn default() -> Self {
         Self {
-            fps_toggle: VirtualKeyCode::F,
+            fps_toggle: KeyCode::KeyF,
         }
     }
 }
@@ -48,7 +48,7 @@ struct RawConfig {
 }
 
 impl RawKeyBindings {
-    fn into_pairs(self, port: usize) -> [(VirtualKeyCode, (usize, u8)); 8] {
+    fn into_pairs(self, port: usize) -> [(KeyCode, (usize, u8)); 8] {
         [
             (self.up, (port, BUTTON_UP)),
             (self.down, (port, BUTTON_DOWN)),
@@ -65,8 +65,8 @@ impl RawKeyBindings {
 /// Maps keyboard keys to (controller port, button bit) pairs. Built either
 /// from a parsed `RawConfig` or the hardcoded default (see `Default` impl).
 pub struct KeyMap {
-    bindings: HashMap<VirtualKeyCode, (usize, u8)>,
-    fps_toggle: VirtualKeyCode,
+    bindings: HashMap<KeyCode, (usize, u8)>,
+    fps_toggle: KeyCode,
 }
 
 impl KeyMap {
@@ -113,13 +113,13 @@ impl KeyMap {
     }
 
     /// Looks up which (port, button bit) a keycode is bound to, if any.
-    pub fn on_key(&self, keycode: VirtualKeyCode) -> Option<(usize, u8)> {
+    pub fn on_key(&self, keycode: KeyCode) -> Option<(usize, u8)> {
         self.bindings.get(&keycode).copied()
     }
 
     /// True if `keycode` is the configured FPS-overlay toggle key (paired
     /// with Ctrl by the caller — this only checks the letter).
-    pub fn is_fps_toggle(&self, keycode: VirtualKeyCode) -> bool {
+    pub fn is_fps_toggle(&self, keycode: KeyCode) -> bool {
         keycode == self.fps_toggle
     }
 }
@@ -128,24 +128,24 @@ impl Default for KeyMap {
     fn default() -> Self {
         Self::from_raw(RawConfig {
             player1: RawKeyBindings {
-                up: VirtualKeyCode::W,
-                down: VirtualKeyCode::S,
-                left: VirtualKeyCode::A,
-                right: VirtualKeyCode::D,
-                b: VirtualKeyCode::Z,
-                a: VirtualKeyCode::X,
-                select: VirtualKeyCode::Q,
-                start: VirtualKeyCode::E,
+                up: KeyCode::KeyW,
+                down: KeyCode::KeyS,
+                left: KeyCode::KeyA,
+                right: KeyCode::KeyD,
+                b: KeyCode::KeyZ,
+                a: KeyCode::KeyX,
+                select: KeyCode::KeyQ,
+                start: KeyCode::KeyE,
             },
             player2: RawKeyBindings {
-                up: VirtualKeyCode::I,
-                down: VirtualKeyCode::K,
-                left: VirtualKeyCode::J,
-                right: VirtualKeyCode::L,
-                b: VirtualKeyCode::N,
-                a: VirtualKeyCode::M,
-                select: VirtualKeyCode::Comma,
-                start: VirtualKeyCode::Period,
+                up: KeyCode::KeyI,
+                down: KeyCode::KeyK,
+                left: KeyCode::KeyJ,
+                right: KeyCode::KeyL,
+                b: KeyCode::KeyN,
+                a: KeyCode::KeyM,
+                select: KeyCode::Comma,
+                start: KeyCode::Period,
             },
             app: RawAppConfig::default(),
         })
@@ -160,38 +160,38 @@ mod tests {
     fn valid_toml_parses_expected_bindings() {
         let toml_text = r#"
             [player1]
-            up = "Up"
-            down = "Down"
-            left = "Left"
-            right = "Right"
-            b = "Z"
-            a = "X"
-            select = "A"
-            start = "S"
+            up = "ArrowUp"
+            down = "ArrowDown"
+            left = "ArrowLeft"
+            right = "ArrowRight"
+            b = "KeyZ"
+            a = "KeyX"
+            select = "KeyA"
+            start = "KeyS"
 
             [player2]
-            up = "I"
-            down = "K"
-            left = "J"
-            right = "L"
-            b = "N"
-            a = "M"
+            up = "KeyI"
+            down = "KeyK"
+            left = "KeyJ"
+            right = "KeyL"
+            b = "KeyN"
+            a = "KeyM"
             select = "Comma"
             start = "Period"
         "#;
         let raw: RawConfig = toml::from_str(toml_text).expect("valid toml must parse");
         let map = KeyMap::from_raw(raw);
-        assert_eq!(map.on_key(VirtualKeyCode::Up), Some((0, BUTTON_UP)));
-        assert_eq!(map.on_key(VirtualKeyCode::L), Some((1, BUTTON_RIGHT)));
-        assert_eq!(map.on_key(VirtualKeyCode::Period), Some((1, BUTTON_START)));
-        assert_eq!(map.on_key(VirtualKeyCode::Q), None);
+        assert_eq!(map.on_key(KeyCode::ArrowUp), Some((0, BUTTON_UP)));
+        assert_eq!(map.on_key(KeyCode::KeyL), Some((1, BUTTON_RIGHT)));
+        assert_eq!(map.on_key(KeyCode::Period), Some((1, BUTTON_START)));
+        assert_eq!(map.on_key(KeyCode::KeyQ), None);
     }
 
     #[test]
     fn missing_file_falls_back_to_default() {
         let map = KeyMap::load(Path::new("/nonexistent/path/keybindings.toml"));
-        assert_eq!(map.on_key(VirtualKeyCode::W), Some((0, BUTTON_UP)));
-        assert_eq!(map.on_key(VirtualKeyCode::I), Some((1, BUTTON_UP)));
+        assert_eq!(map.on_key(KeyCode::KeyW), Some((0, BUTTON_UP)));
+        assert_eq!(map.on_key(KeyCode::KeyI), Some((1, BUTTON_UP)));
     }
 
     #[test]
@@ -199,7 +199,7 @@ mod tests {
         let path = std::env::temp_dir().join("nes_emu_test_invalid_keybindings.toml");
         fs::write(&path, "not valid toml [[[").unwrap();
         let map = KeyMap::load(&path);
-        assert_eq!(map.on_key(VirtualKeyCode::W), Some((0, BUTTON_UP)));
+        assert_eq!(map.on_key(KeyCode::KeyW), Some((0, BUTTON_UP)));
         let _ = fs::remove_file(&path);
     }
 
@@ -207,27 +207,27 @@ mod tests {
     fn default_map_has_no_collisions_between_players() {
         let map = KeyMap::default();
         let p1_keys = [
-            VirtualKeyCode::W,
-            VirtualKeyCode::S,
-            VirtualKeyCode::A,
-            VirtualKeyCode::D,
-            VirtualKeyCode::Z,
-            VirtualKeyCode::X,
-            VirtualKeyCode::Q,
-            VirtualKeyCode::E,
+            KeyCode::KeyW,
+            KeyCode::KeyS,
+            KeyCode::KeyA,
+            KeyCode::KeyD,
+            KeyCode::KeyZ,
+            KeyCode::KeyX,
+            KeyCode::KeyQ,
+            KeyCode::KeyE,
         ];
         for key in p1_keys {
             assert_eq!(map.on_key(key).unwrap().0, 0);
         }
         let p2_keys = [
-            VirtualKeyCode::I,
-            VirtualKeyCode::K,
-            VirtualKeyCode::J,
-            VirtualKeyCode::L,
-            VirtualKeyCode::N,
-            VirtualKeyCode::M,
-            VirtualKeyCode::Comma,
-            VirtualKeyCode::Period,
+            KeyCode::KeyI,
+            KeyCode::KeyK,
+            KeyCode::KeyJ,
+            KeyCode::KeyL,
+            KeyCode::KeyN,
+            KeyCode::KeyM,
+            KeyCode::Comma,
+            KeyCode::Period,
         ];
         for key in p2_keys {
             assert_eq!(map.on_key(key).unwrap().0, 1);
@@ -238,66 +238,66 @@ mod tests {
     fn missing_app_section_falls_back_to_f_toggle() {
         let toml_text = r#"
             [player1]
-            up = "W"
-            down = "S"
-            left = "A"
-            right = "D"
-            b = "Z"
-            a = "X"
-            select = "Q"
-            start = "E"
+            up = "KeyW"
+            down = "KeyS"
+            left = "KeyA"
+            right = "KeyD"
+            b = "KeyZ"
+            a = "KeyX"
+            select = "KeyQ"
+            start = "KeyE"
 
             [player2]
-            up = "I"
-            down = "K"
-            left = "J"
-            right = "L"
-            b = "N"
-            a = "M"
+            up = "KeyI"
+            down = "KeyK"
+            left = "KeyJ"
+            right = "KeyL"
+            b = "KeyN"
+            a = "KeyM"
             select = "Comma"
             start = "Period"
         "#;
         let raw: RawConfig = toml::from_str(toml_text).expect("valid toml must parse");
         let map = KeyMap::from_raw(raw);
-        assert!(map.is_fps_toggle(VirtualKeyCode::F));
-        assert!(!map.is_fps_toggle(VirtualKeyCode::G));
+        assert!(map.is_fps_toggle(KeyCode::KeyF));
+        assert!(!map.is_fps_toggle(KeyCode::KeyG));
     }
 
     #[test]
     fn explicit_app_section_overrides_toggle_key() {
         let toml_text = r#"
             [player1]
-            up = "W"
-            down = "S"
-            left = "A"
-            right = "D"
-            b = "Z"
-            a = "X"
-            select = "Q"
-            start = "E"
+            up = "KeyW"
+            down = "KeyS"
+            left = "KeyA"
+            right = "KeyD"
+            b = "KeyZ"
+            a = "KeyX"
+            select = "KeyQ"
+            start = "KeyE"
 
             [player2]
-            up = "I"
-            down = "K"
-            left = "J"
-            right = "L"
-            b = "N"
-            a = "M"
+            up = "KeyI"
+            down = "KeyK"
+            left = "KeyJ"
+            right = "KeyL"
+            b = "KeyN"
+            a = "KeyM"
             select = "Comma"
             start = "Period"
 
             [app]
-            fps_toggle = "G"
+            fps_toggle = "KeyG"
         "#;
         let raw: RawConfig = toml::from_str(toml_text).expect("valid toml must parse");
         let map = KeyMap::from_raw(raw);
-        assert!(map.is_fps_toggle(VirtualKeyCode::G));
-        assert!(!map.is_fps_toggle(VirtualKeyCode::F));
+        assert!(map.is_fps_toggle(KeyCode::KeyG));
+        assert!(!map.is_fps_toggle(KeyCode::KeyF));
     }
 
     #[test]
     fn default_map_has_f_as_fps_toggle() {
         let map = KeyMap::default();
-        assert!(map.is_fps_toggle(VirtualKeyCode::F));
+        assert!(map.is_fps_toggle(KeyCode::KeyF));
     }
 }

@@ -19,9 +19,10 @@ use std::{
     process,
     time::{Duration, Instant},
 };
-use winit::{
-    event::{ElementState, Event, ModifiersState, VirtualKeyCode, WindowEvent},
+use tao::{
+    event::{ElementState, Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
+    keyboard::{KeyCode, ModifiersState},
 };
 
 const FRAME_DURATION: Duration = Duration::from_nanos(16_666_667);
@@ -92,6 +93,7 @@ fn main() {
             Event::WindowEvent {
                 window_id,
                 event: WindowEvent::CloseRequested,
+                ..
             } if window_id == app.renderer.window_id() => {
                 *control_flow = ControlFlow::Exit;
             }
@@ -120,12 +122,18 @@ fn main() {
             }
 
             Event::WindowEvent {
-                event: WindowEvent::KeyboardInput { input, .. },
+                event: WindowEvent::KeyboardInput { event, is_synthetic, .. },
                 ..
             } => {
-                let is_ctrl_o = input.state == ElementState::Pressed
-                    && input.virtual_keycode == Some(VirtualKeyCode::O)
-                    && modifiers.ctrl();
+                if is_synthetic {
+                    // tao synthesizes these on focus-in for keys already held down;
+                    // ignoring them preserves reacting only to real press/release.
+                    return;
+                }
+
+                let is_ctrl_o = event.state == ElementState::Pressed
+                    && event.physical_key == KeyCode::KeyO
+                    && modifiers.control_key();
                 if is_ctrl_o {
                     if let Some(path) = rfd::FileDialog::new()
                         .add_filter("NES ROM", &["nes"])
@@ -137,23 +145,20 @@ fn main() {
                     }
                 }
 
-                let is_fps_toggle = input.state == ElementState::Pressed
-                    && modifiers.ctrl()
-                    && input
-                        .virtual_keycode
-                        .is_some_and(|k| key_map.is_fps_toggle(k));
+                let is_fps_toggle = event.state == ElementState::Pressed
+                    && modifiers.control_key()
+                    && key_map.is_fps_toggle(event.physical_key);
                 if is_fps_toggle {
                     app.toggle_fps_overlay();
                 }
 
-                if let Some(keycode) = input.virtual_keycode {
-                    if let Some((port, bit)) = key_map.on_key(keycode) {
-                        match input.state {
-                            ElementState::Pressed => button_state[port] |= bit,
-                            ElementState::Released => button_state[port] &= !bit,
-                        }
-                        app.set_controller_buttons(port, button_state[port]);
+                if let Some((port, bit)) = key_map.on_key(event.physical_key) {
+                    match event.state {
+                        ElementState::Pressed => button_state[port] |= bit,
+                        ElementState::Released => button_state[port] &= !bit,
+                        _ => {}
                     }
+                    app.set_controller_buttons(port, button_state[port]);
                 }
             }
 
