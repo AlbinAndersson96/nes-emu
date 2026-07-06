@@ -1,4 +1,3 @@
-use muda::accelerator::{Accelerator, Code, Modifiers};
 use muda::{Menu, MenuId, MenuItem, Submenu};
 
 pub struct AppMenuIds {
@@ -8,11 +7,7 @@ pub struct AppMenuIds {
 fn build_menu() -> Menu {
     let menu = Menu::new();
     let file_menu = Submenu::new("File", true);
-    let load_rom = MenuItem::new(
-        "Load ROM",
-        true,
-        Some(Accelerator::new(Some(Modifiers::CONTROL), Code::KeyO)),
-    );
+    let load_rom = MenuItem::new("Load ROM", true, None);
     file_menu
         .append(&load_rom)
         .expect("appending Load ROM to the File submenu cannot fail");
