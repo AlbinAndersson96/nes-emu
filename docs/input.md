@@ -31,8 +31,8 @@ start = "Period"
 ```
 
 Both `[player1]` and `[player2]` sections are required, each with all 8
-keys. Key values are `tao::keyboard::KeyCode` variant names — see
-[tao's `KeyCode` docs](https://docs.rs/tao/latest/tao/keyboard/enum.KeyCode.html)
+keys. Key values are `winit::keyboard::KeyCode` variant names — see
+[winit's `KeyCode` docs](https://docs.rs/winit/latest/winit/keyboard/enum.KeyCode.html)
 for the full list (letters are `"KeyA"`.."KeyZ"`, digits are `"Digit0"`.."Digit9"`;
 arrow keys are `"ArrowUp"`/`"ArrowDown"`/`"ArrowLeft"`/`"ArrowRight"`).
 

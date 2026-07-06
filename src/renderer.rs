@@ -312,10 +312,6 @@ impl Renderer {
     pub fn window_id(&self) -> WindowId {
         self.window.id()
     }
-
-    pub fn window(&self) -> &Window {
-        &self.window
-    }
 }
 
 #[cfg(test)]

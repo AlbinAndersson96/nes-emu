@@ -57,10 +57,9 @@ fn load_rom_via_dialog(app: &mut App) {
     if let Some(path) = rfd::FileDialog::new()
         .add_filter("NES ROM", &["nes"])
         .pick_file()
+        && let Err(e) = app.load_rom(&path)
     {
-        if let Err(e) = app.load_rom(&path) {
-            eprintln!("error: cannot load ROM: {}", e);
-        }
+        eprintln!("error: cannot load ROM: {}", e);
     }
 }
 
@@ -86,11 +85,11 @@ impl ApplicationHandler for WinitApp {
             }
         };
         let mut app = App::new(renderer);
-        if let Some(rom_path) = self.pending_rom_path.take() {
-            if let Err(e) = app.load_rom(&rom_path) {
-                eprintln!("error: invalid ROM: {}", e);
-                process::exit(1);
-            }
+        if let Some(rom_path) = self.pending_rom_path.take()
+            && let Err(e) = app.load_rom(&rom_path)
+        {
+            eprintln!("error: invalid ROM: {}", e);
+            process::exit(1);
         }
         self.app = Some(app);
         self.next_frame = Instant::now();
@@ -161,10 +160,8 @@ impl ApplicationHandler for WinitApp {
                 }
             }
 
-            WindowEvent::RedrawRequested => {
-                if app.renderer.redraw(menu::draw) {
-                    load_rom_via_dialog(app);
-                }
+            WindowEvent::RedrawRequested if app.renderer.redraw(menu::draw) => {
+                load_rom_via_dialog(app);
             }
 
             _ => {}
