@@ -4,6 +4,7 @@ mod bus;
 mod cartridge;
 mod cpu;
 mod input;
+mod menu;
 mod ppu;
 mod renderer;
 mod system;

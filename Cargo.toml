@@ -11,6 +11,7 @@ fontdue = "0.9"
 rfd = { version = "0.14", default-features = false, features = ["gtk3"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+raw-window-handle = "0.5"
 
 [dev-dependencies]
 png = "0.17"
