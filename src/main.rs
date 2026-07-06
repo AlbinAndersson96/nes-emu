@@ -4,6 +4,7 @@ mod bus;
 mod cartridge;
 mod cpu;
 mod input;
+mod menu;
 mod ppu;
 mod renderer;
 mod system;
@@ -161,7 +162,7 @@ impl ApplicationHandler for WinitApp {
             }
 
             WindowEvent::RedrawRequested => {
-                if app.renderer.redraw(crate::menu_draw_stub) {
+                if app.renderer.redraw(menu::draw) {
                     load_rom_via_dialog(app);
                 }
             }
@@ -180,12 +181,6 @@ impl ApplicationHandler for WinitApp {
         }
         event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
     }
-}
-
-/// Placeholder until Task 2 adds `mod menu;` and replaces this with
-/// `menu::draw`. Draws nothing, never reports a click.
-fn menu_draw_stub(_ui: &mut egui::Ui) -> bool {
-    false
 }
 
 fn main() {
