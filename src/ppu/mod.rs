@@ -12,6 +12,15 @@ const SCANLINES_PER_FRAME: u16 = 262;
 const VBLANK_SCANLINE: u16 = 241;
 const PRERENDER_SCANLINE: u16 = 261;
 
+/// Dots between a sprite0_hit-affecting event (a colliding pixel, or the
+/// pre-render scanline's reset) and the flag becoming visible via $2002.
+/// Real hardware doesn't latch the flag the instant the event happens — an
+/// internal pipeline delays it. Calibrated by bisection against
+/// blargg's `sprite_hit_tests_2005.10.05` timing ROMs (valid window measured
+/// at 18-23 dots for the set side; 21 also satisfies the pre-render clear).
+/// See docs/investigations/sprite_hit_timing_debug_log.md.
+const SPRITE0_HIT_LATCH_DOTS: u8 = 21;
+
 pub struct Ppu {
     // Programmer-visible write-only registers
     ctrl: u8,     // $2000 PPUCTRL
@@ -36,6 +45,13 @@ pub struct Ppu {
     vblank: bool,
     sprite0_hit: bool,
     sprite_overflow: bool,
+    // Real hardware doesn't latch the sprite0_hit flag the instant the
+    // triggering event (a colliding pixel, or the pre-render scanline's
+    // reset) happens — an internal pipeline delays visibility by a fixed
+    // number of PPU dots, for both the set and the clear. Holds the target
+    // value and remaining countdown; the flag flips when it expires. See
+    // docs/investigations/sprite_hit_timing_debug_log.md.
+    sprite0_hit_pending: Option<(bool, u8)>,
 
     // NMI edge detector
     nmi_pending: bool,
@@ -108,6 +124,7 @@ impl Ppu {
             palette: [0u8; 32],
             vblank: false,
             sprite0_hit: false,
+            sprite0_hit_pending: None,
             sprite_overflow: false,
             nmi_pending: false,
             dot: 0,
@@ -178,10 +195,22 @@ impl Ppu {
             }
             PRERENDER_SCANLINE if self.dot == 1 => {
                 self.vblank = false;
-                self.sprite0_hit = false;
+                self.sprite0_hit_pending = Some((false, SPRITE0_HIT_LATCH_DOTS));
                 self.sprite_overflow = false;
             }
             _ => {}
+        }
+
+        // ── Sprite-0 hit pipeline delay ──────────────────────────────────────
+        // Runs unconditionally, every dot: this is an internal PPU pipeline
+        // delay, not something gated on rendering being enabled.
+        if let Some((target, n)) = self.sprite0_hit_pending {
+            if n <= 1 {
+                self.sprite0_hit = target;
+                self.sprite0_hit_pending = None;
+            } else {
+                self.sprite0_hit_pending = Some((target, n - 1));
+            }
         }
 
         // ── Background shift register clock (dots 1–256, 321–336) ────────────
@@ -602,9 +631,16 @@ impl Ppu {
             (0, 0, false, false)
         };
 
-        // Sprite-0 hit
-        if sp_is_zero && bg_col != 0 && sp_col != 0 && x != 255 {
-            self.sprite0_hit = true;
+        // Sprite-0 hit: schedule it, don't latch immediately — see
+        // sprite0_hit_pending's doc comment for why.
+        if sp_is_zero
+            && bg_col != 0
+            && sp_col != 0
+            && x != 255
+            && !self.sprite0_hit
+            && self.sprite0_hit_pending.is_none()
+        {
+            self.sprite0_hit_pending = Some((true, SPRITE0_HIT_LATCH_DOTS));
         }
 
         // Priority multiplexer
