@@ -22,11 +22,15 @@ use std::{
 };
 use tao::{
     event::{ElementState, Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
+    event_loop::ControlFlow,
     keyboard::{KeyCode, ModifiersState},
 };
 
 const FRAME_DURATION: Duration = Duration::from_nanos(16_666_667);
+
+enum UserEvent {
+    MenuEvent(muda::MenuEvent),
+}
 
 fn maybe_configure_wsl2_gpu() {
     let version = match fs::read_to_string("/proc/version") {
@@ -51,6 +55,17 @@ fn maybe_configure_wsl2_gpu() {
     }
 }
 
+fn load_rom_via_dialog(app: &mut App) {
+    if let Some(path) = rfd::FileDialog::new()
+        .add_filter("NES ROM", &["nes"])
+        .pick_file()
+    {
+        if let Err(e) = app.load_rom(&path) {
+            eprintln!("error: cannot load ROM: {}", e);
+        }
+    }
+}
+
 fn main() {
     maybe_configure_wsl2_gpu();
 
@@ -60,7 +75,7 @@ fn main() {
         process::exit(1);
     }
 
-    let event_loop = EventLoop::new();
+    let event_loop = tao::event_loop::EventLoopBuilder::<UserEvent>::with_user_event().build();
     let renderer = match Renderer::new(&event_loop) {
         Ok(r) => r,
         Err(e) => {
@@ -70,6 +85,13 @@ fn main() {
     };
 
     let mut app = App::new(renderer);
+
+    let menu_ids = menu::build_and_attach(app.renderer.window());
+
+    let proxy = event_loop.create_proxy();
+    muda::MenuEvent::set_event_handler(Some(move |event| {
+        let _ = proxy.send_event(UserEvent::MenuEvent(event));
+    }));
 
     let key_map = env::current_exe()
         .ok()
@@ -136,14 +158,7 @@ fn main() {
                     && event.physical_key == KeyCode::KeyO
                     && modifiers.control_key();
                 if is_ctrl_o {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("NES ROM", &["nes"])
-                        .pick_file()
-                    {
-                        if let Err(e) = app.load_rom(&path) {
-                            eprintln!("error: cannot load ROM: {}", e);
-                        }
-                    }
+                    load_rom_via_dialog(&mut app);
                 }
 
                 let is_fps_toggle = event.state == ElementState::Pressed
@@ -160,6 +175,12 @@ fn main() {
                         _ => {}
                     }
                     app.set_controller_buttons(port, button_state[port]);
+                }
+            }
+
+            Event::UserEvent(UserEvent::MenuEvent(e)) => {
+                if e.id == menu_ids.load_rom {
+                    load_rom_via_dialog(&mut app);
                 }
             }
 

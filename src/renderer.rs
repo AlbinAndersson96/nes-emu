@@ -164,7 +164,7 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(event_loop: &EventLoop<()>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new<T: 'static>(event_loop: &EventLoop<T>) -> Result<Self, Box<dyn std::error::Error>> {
         let window = WindowBuilder::new()
             .with_title("nes-emu")
             .with_inner_size(LogicalSize::new(512u32, 480u32))
