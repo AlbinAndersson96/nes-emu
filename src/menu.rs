@@ -2,12 +2,14 @@
 /// was clicked this frame.
 pub fn draw(ui: &mut egui::Ui) -> bool {
     let mut load_rom_clicked = false;
-    egui::containers::menu::MenuBar::new().ui(ui, |ui| {
-        ui.menu_button("File", |ui| {
-            if ui.button("Load ROM").clicked() {
-                load_rom_clicked = true;
-                ui.close();
-            }
+    egui::Panel::top("menu_bar").show(ui, |ui| {
+        egui::containers::menu::MenuBar::new().ui(ui, |ui| {
+            ui.menu_button("File", |ui| {
+                if ui.button("Load ROM").clicked() {
+                    load_rom_clicked = true;
+                    ui.close();
+                }
+            });
         });
     });
     load_rom_clicked
