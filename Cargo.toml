@@ -4,14 +4,15 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-tao = { version = "0.35", default-features = false, features = ["rwh_05", "x11", "dbus", "serde"] }
-muda = "0.19"
-pixels = "0.13"
+winit = { version = "0.30.13", features = ["serde"] }
+egui = "0.35"
+egui-winit = "0.35"
+egui-wgpu = { version = "0.35", features = ["winit", "wayland", "x11"] }
+pollster = "0.3"
 fontdue = "0.9"
 rfd = { version = "0.14", default-features = false, features = ["gtk3"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
-raw-window-handle = "0.5"
 
 [dev-dependencies]
 png = "0.17"

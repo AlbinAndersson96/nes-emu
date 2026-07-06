@@ -101,7 +101,7 @@ impl App {
     pub fn step_frame(&mut self) {
         match &mut self.state {
             AppState::NoRom => {
-                let _ = self.renderer.present_placeholder();
+                self.renderer.present_placeholder();
             }
             AppState::Running { cpu, bus, clock } => {
                 // SystemClock carries the blargg-verified interrupt-delivery
@@ -121,7 +121,7 @@ impl App {
                         Instant::now(),
                     );
                     let fps = self.fps_overlay_enabled.then_some(self.fps);
-                    self.renderer.present(&bus.ppu.frame, fps).unwrap();
+                    self.renderer.present(&bus.ppu.frame, fps);
                 }
             }
         }

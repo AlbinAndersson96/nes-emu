@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use serde::Deserialize;
-use tao::keyboard::KeyCode;
+use winit::keyboard::KeyCode;
 
 pub const BUTTON_A: u8 = 1 << 0;
 pub const BUTTON_B: u8 = 1 << 1;
