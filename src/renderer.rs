@@ -266,7 +266,6 @@ impl Renderer {
     /// the frame via the `egui_wgpu` painter. Returns `draw_menu`'s result.
     pub fn redraw(&mut self, draw_menu: impl FnOnce(&mut egui::Ui) -> bool) -> bool {
         let texture_id = self.texture.id();
-        let texture_size = self.texture.size_vec2();
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let mut draw_menu = Some(draw_menu);
         let mut load_rom_clicked = false;
@@ -275,7 +274,8 @@ impl Renderer {
                 load_rom_clicked = draw_menu(ui);
             }
             egui::CentralPanel::default().show(ui, |ui| {
-                let sized_texture = egui::load::SizedTexture::new(texture_id, texture_size);
+                let sized_texture =
+                    egui::load::SizedTexture::new(texture_id, ui.available_size());
                 ui.image(sized_texture);
             });
         });
