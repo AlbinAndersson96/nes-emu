@@ -1,8 +1,12 @@
-use pixels::{Pixels, SurfaceTexture};
+use egui_wgpu::winit::Painter;
+use egui_wgpu::{RendererOptions, WgpuConfiguration};
+use std::num::NonZeroU32;
+use std::sync::Arc;
 use winit::{
     dpi::LogicalSize,
-    event_loop::EventLoop,
-    window::{Window, WindowBuilder, WindowId},
+    event::WindowEvent,
+    event_loop::ActiveEventLoop,
+    window::{Window, WindowId},
 };
 
 pub const NES_PALETTE: [(u8, u8, u8); 64] = [
@@ -157,38 +161,72 @@ pub(crate) fn render_placeholder_frame(font: &fontdue::Font) -> [u8; 256 * 240] 
 }
 
 pub struct Renderer {
-    window: Window,
-    pixels: Pixels,
+    window: Arc<Window>,
+    ctx: egui::Context,
+    egui_state: egui_winit::State,
+    painter: Painter,
+    texture: egui::TextureHandle,
     font: fontdue::Font,
     placeholder_frame: [u8; 256 * 240],
 }
 
 impl Renderer {
-    pub fn new(event_loop: &EventLoop<()>) -> Result<Self, Box<dyn std::error::Error>> {
-        let window = WindowBuilder::new()
+    pub fn new(event_loop: &ActiveEventLoop) -> Result<Self, Box<dyn std::error::Error>> {
+        let window_attributes = Window::default_attributes()
             .with_title("nes-emu")
-            .with_inner_size(LogicalSize::new(512u32, 480u32))
-            .build(event_loop)?;
-        let size = window.inner_size();
-        let surface_texture = SurfaceTexture::new(size.width, size.height, &window);
-        let pixels = Pixels::new(256, 240, surface_texture)?;
+            .with_inner_size(LogicalSize::new(512.0, 480.0));
+        let window = Arc::new(event_loop.create_window(window_attributes)?);
+
+        let ctx = egui::Context::default();
+        let viewport_id = egui::ViewportId::ROOT;
+        let native_pixels_per_point = Some(window.scale_factor() as f32);
+        let egui_state = egui_winit::State::new(
+            ctx.clone(),
+            viewport_id,
+            &*window,
+            native_pixels_per_point,
+            None,
+            None,
+        );
+
+        let mut painter = pollster::block_on(Painter::new(
+            ctx.clone(),
+            WgpuConfiguration::default(),
+            false,
+            RendererOptions::default(),
+        ));
+        pollster::block_on(painter.set_window(viewport_id, Some(window.clone())))?;
+
+        let texture = ctx.load_texture(
+            "nes-frame",
+            egui::ColorImage::filled([256, 240], egui::Color32::BLACK),
+            egui::TextureOptions::NEAREST,
+        );
+
         let font_bytes = include_bytes!("../assets/fonts/DejaVuSansMono.ttf") as &[u8];
         let font = fontdue::Font::from_bytes(font_bytes, fontdue::FontSettings::default())
             .expect("embedded font must parse");
         let placeholder_frame = render_placeholder_frame(&font);
+
         Ok(Self {
             window,
-            pixels,
+            ctx,
+            egui_state,
+            painter,
+            texture,
             font,
             placeholder_frame,
         })
     }
 
-    pub fn present(
-        &mut self,
-        frame: &[u8; 256 * 240],
-        fps: Option<f64>,
-    ) -> Result<(), pixels::Error> {
+    fn update_texture(&mut self, frame: &[u8; 256 * 240]) {
+        let mut rgba = vec![0u8; 256 * 240 * 4];
+        nes_to_rgba(frame, &mut rgba);
+        let image = egui::ColorImage::from_rgba_unmultiplied([256, 240], &rgba);
+        self.texture.set(image, egui::TextureOptions::NEAREST);
+    }
+
+    pub fn present(&mut self, frame: &[u8; 256 * 240], fps: Option<f64>) {
         match fps {
             Some(fps) => {
                 let mut buf = *frame;
@@ -207,23 +245,68 @@ impl Renderer {
                     16.0,
                     PLACEHOLDER_FG_INDEX,
                 );
-                nes_to_rgba(&buf, self.pixels.frame_mut());
+                self.update_texture(&buf);
             }
             None => {
-                nes_to_rgba(frame, self.pixels.frame_mut());
+                self.update_texture(frame);
             }
         }
-        self.pixels.render()
+        self.window.request_redraw();
     }
 
-    pub fn present_placeholder(&mut self) -> Result<(), pixels::Error> {
+    pub fn present_placeholder(&mut self) {
         let frame = self.placeholder_frame;
-        nes_to_rgba(&frame, self.pixels.frame_mut());
-        self.pixels.render()
+        self.update_texture(&frame);
+        self.window.request_redraw();
+    }
+
+    /// Runs one egui frame: `draw_menu` builds the menu bar and reports
+    /// whether "Load ROM" was clicked; the NES framebuffer texture is drawn
+    /// into the remaining space via a `CentralPanel`. Encodes and presents
+    /// the frame via the `egui_wgpu` painter. Returns `draw_menu`'s result.
+    pub fn redraw(&mut self, draw_menu: impl FnOnce(&mut egui::Ui) -> bool) -> bool {
+        let texture_id = self.texture.id();
+        let texture_size = self.texture.size_vec2();
+        let raw_input = self.egui_state.take_egui_input(&self.window);
+        let mut draw_menu = Some(draw_menu);
+        let mut load_rom_clicked = false;
+        let full_output = self.ctx.run_ui(raw_input, |ui| {
+            if let Some(draw_menu) = draw_menu.take() {
+                load_rom_clicked = draw_menu(ui);
+            }
+            egui::CentralPanel::default().show(ui, |ui| {
+                let sized_texture = egui::load::SizedTexture::new(texture_id, texture_size);
+                ui.image(sized_texture);
+            });
+        });
+        self.egui_state
+            .handle_platform_output(&self.window, full_output.platform_output);
+        let clipped_primitives = self
+            .ctx
+            .tessellate(full_output.shapes, full_output.pixels_per_point);
+        self.painter.paint_and_update_textures(
+            egui::ViewportId::ROOT,
+            full_output.pixels_per_point,
+            [0.0, 0.0, 0.0, 1.0],
+            &clipped_primitives,
+            &full_output.textures_delta,
+            vec![],
+            &self.window,
+        );
+        load_rom_clicked
+    }
+
+    /// Forwards a window event to egui (mouse/hover for the menu bar).
+    pub fn on_window_event(&mut self, event: &WindowEvent) -> egui_winit::EventResponse {
+        self.egui_state.on_window_event(&self.window, event)
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
-        let _ = self.pixels.resize_surface(width, height);
+        let (Some(width), Some(height)) = (NonZeroU32::new(width), NonZeroU32::new(height)) else {
+            return;
+        };
+        self.painter
+            .on_window_resized(egui::ViewportId::ROOT, width, height);
     }
 
     pub fn window_id(&self) -> WindowId {
@@ -281,8 +364,6 @@ mod tests {
         let font = fontdue::Font::from_bytes(font_bytes, fontdue::FontSettings::default())
             .expect("embedded font must parse");
         let frame = render_placeholder_frame(&font);
-        // Background is palette index 0x0F (black); text must paint at least
-        // some pixels to a different (lighter) index somewhere in the buffer.
         assert!(
             frame.iter().any(|&p| p != 0x0F),
             "expected some non-background pixels from rasterized text"
@@ -304,10 +385,6 @@ mod tests {
         let font = fontdue::Font::from_bytes(font_bytes, fontdue::FontSettings::default())
             .expect("embedded font must parse");
         let frame = render_placeholder_frame(&font);
-        // If the text were wider than the canvas, rendering would silently drop
-        // the overflow pixels (see the bounds check in render_placeholder_frame),
-        // which would show up as foreground pixels reaching all the way to the
-        // left/right edge columns. Confirm there's still margin on both sides.
         for row in 0..240 {
             assert_eq!(
                 frame[row * 256],
@@ -324,22 +401,12 @@ mod tests {
 
     #[test]
     fn fps_overlay_text_is_legible_at_16px() {
-        // Regression test for a real bug: 10px was too small for the DejaVu
-        // Sans Mono glyphs to survive draw_text's hard 50%-coverage
-        // threshold — curved letters like 'S' rendered as disconnected
-        // fragments. At 16px every glyph in the widest plausible reading
-        // ("199 FPS") must produce a single connected blob of foreground
-        // pixels per character, not scattered specks.
         let font_bytes = include_bytes!("../assets/fonts/DejaVuSansMono.ttf") as &[u8];
         let font = fontdue::Font::from_bytes(font_bytes, fontdue::FontSettings::default())
             .expect("embedded font must parse");
         let mut frame = [0x0Fu8; 256 * 240];
         draw_text(&mut frame, &font, "199 FPS", 2, 13, 16.0, 0x30);
 
-        // Count 4-connected foreground blobs across the whole buffer via
-        // flood fill. Fragmented rendering produces many tiny blobs (one
-        // per stray pixel); legible glyphs produce one blob per character
-        // (7, ignoring the space) — a handful, not dozens.
         let mut visited = [false; 256 * 240];
         let mut blob_count = 0;
         for start in 0..256 * 240 {
@@ -394,7 +461,6 @@ mod tests {
         let font = fontdue::Font::from_bytes(font_bytes, fontdue::FontSettings::default())
             .expect("embedded font must parse");
         let mut frame = [0x0Fu8; 256 * 240];
-        // Origins far outside the 256x240 buffer on every axis — must clip, not panic.
         draw_text(&mut frame, &font, "X", -1000, -1000, 10.0, 0x30);
         draw_text(&mut frame, &font, "X", 1000, 1000, 10.0, 0x30);
     }

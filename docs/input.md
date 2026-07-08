@@ -10,44 +10,44 @@ afterward will not overwrite your edits (see `build.rs`).
 
 ```toml
 [player1]
-up = "W"
-down = "S"
-left = "A"
-right = "D"
-b = "Z"
-a = "X"
-select = "Q"
-start = "E"
+up = "KeyW"
+down = "KeyS"
+left = "KeyA"
+right = "KeyD"
+b = "KeyZ"
+a = "KeyX"
+select = "KeyQ"
+start = "KeyE"
 
 [player2]
-up = "I"
-down = "K"
-left = "J"
-right = "L"
-b = "N"
-a = "M"
+up = "KeyI"
+down = "KeyK"
+left = "KeyJ"
+right = "KeyL"
+b = "KeyN"
+a = "KeyM"
 select = "Comma"
 start = "Period"
 ```
 
 Both `[player1]` and `[player2]` sections are required, each with all 8
-keys. Key values are winit `VirtualKeyCode` variant names — see
-[winit's `VirtualKeyCode` docs](https://docs.rs/winit/0.28/winit/event/enum.VirtualKeyCode.html)
-for the full list (letters/digits are their own variants, e.g. `"Z"`,
-`"Key1"`; arrow keys are `"Up"`/`"Down"`/`"Left"`/`"Right"`).
+keys. Key values are `winit::keyboard::KeyCode` variant names — see
+[winit's `KeyCode` docs](https://docs.rs/winit/latest/winit/keyboard/enum.KeyCode.html)
+for the full list (letters are `"KeyA"`.."KeyZ"`, digits are `"Digit0"`.."Digit9"`;
+arrow keys are `"ArrowUp"`/`"ArrowDown"`/`"ArrowLeft"`/`"ArrowRight"`).
 
 ## Defaults
 
 | Button | P1 key | P2 key |
 |---|---|---|
-| Up | W | I |
-| Down | S | K |
-| Left | A | J |
-| Right | D | L |
-| B | Z | N |
-| A | X | M |
-| Select | Q | Comma |
-| Start | E | Period |
+| Up | KeyW | KeyI |
+| Down | KeyS | KeyK |
+| Left | KeyA | KeyJ |
+| Right | KeyD | KeyL |
+| B | KeyZ | KeyN |
+| A | KeyX | KeyM |
+| Select | KeyQ | Comma |
+| Start | KeyE | Period |
 
 ## App shortcuts
 
@@ -60,7 +60,7 @@ for the full list (letters/digits are their own variants, e.g. `"Z"`,
 
 ```toml
 [app]
-fps_toggle = "F"
+fps_toggle = "KeyF"
 ```
 
 If `[app]` is missing entirely (e.g. an older `keybindings.toml` written

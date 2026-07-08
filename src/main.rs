@@ -4,6 +4,7 @@ mod bus;
 mod cartridge;
 mod cpu;
 mod input;
+mod menu;
 mod ppu;
 mod renderer;
 mod system;
@@ -20,8 +21,11 @@ use std::{
     time::{Duration, Instant},
 };
 use winit::{
-    event::{ElementState, Event, ModifiersState, VirtualKeyCode, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
+    application::ApplicationHandler,
+    event::{ElementState, WindowEvent},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    keyboard::{KeyCode, ModifiersState},
+    window::WindowId,
 };
 
 const FRAME_DURATION: Duration = Duration::from_nanos(16_666_667);
@@ -49,6 +53,133 @@ fn maybe_configure_wsl2_gpu() {
     }
 }
 
+fn load_rom_via_dialog(app: &mut App) {
+    if let Some(path) = rfd::FileDialog::new()
+        .add_filter("NES ROM", &["nes"])
+        .pick_file()
+        && let Err(e) = app.load_rom(&path)
+    {
+        eprintln!("error: cannot load ROM: {}", e);
+    }
+}
+
+struct WinitApp {
+    app: Option<App>,
+    key_map: KeyMap,
+    button_state: [u8; 2],
+    modifiers: ModifiersState,
+    next_frame: Instant,
+    pending_rom_path: Option<PathBuf>,
+}
+
+impl ApplicationHandler for WinitApp {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.app.is_some() {
+            return;
+        }
+        let renderer = match Renderer::new(event_loop) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("error: could not create window: {}", e);
+                process::exit(1);
+            }
+        };
+        let mut app = App::new(renderer);
+        if let Some(rom_path) = self.pending_rom_path.take()
+            && let Err(e) = app.load_rom(&rom_path)
+        {
+            eprintln!("error: invalid ROM: {}", e);
+            process::exit(1);
+        }
+        self.app = Some(app);
+        self.next_frame = Instant::now();
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+        let Some(app) = self.app.as_mut() else {
+            return;
+        };
+        if window_id != app.renderer.window_id() {
+            return;
+        }
+
+        let response = app.renderer.on_window_event(&event);
+        if response.consumed && !matches!(event, WindowEvent::KeyboardInput { .. }) {
+            return;
+        }
+
+        match event {
+            WindowEvent::CloseRequested => {
+                event_loop.exit();
+            }
+
+            WindowEvent::Resized(size) => {
+                app.renderer.resize(size.width, size.height);
+            }
+
+            WindowEvent::ModifiersChanged(state) => {
+                self.modifiers = state.state();
+            }
+
+            WindowEvent::DroppedFile(path) => {
+                if let Err(e) = app.load_rom(&path) {
+                    eprintln!("error: cannot load dropped ROM: {}", e);
+                }
+            }
+
+            WindowEvent::KeyboardInput {
+                event, is_synthetic, ..
+            } => {
+                if is_synthetic {
+                    return;
+                }
+                let winit::keyboard::PhysicalKey::Code(code) = event.physical_key else {
+                    return;
+                };
+
+                let is_ctrl_o = event.state == ElementState::Pressed
+                    && code == KeyCode::KeyO
+                    && self.modifiers.control_key();
+                if is_ctrl_o {
+                    load_rom_via_dialog(app);
+                }
+
+                let is_fps_toggle = event.state == ElementState::Pressed
+                    && self.modifiers.control_key()
+                    && self.key_map.is_fps_toggle(code);
+                if is_fps_toggle {
+                    app.toggle_fps_overlay();
+                }
+
+                if let Some((port, bit)) = self.key_map.on_key(code) {
+                    match event.state {
+                        ElementState::Pressed => self.button_state[port] |= bit,
+                        ElementState::Released => self.button_state[port] &= !bit,
+                    }
+                    app.set_controller_buttons(port, self.button_state[port]);
+                }
+            }
+
+            WindowEvent::RedrawRequested if app.renderer.redraw(menu::draw) => {
+                load_rom_via_dialog(app);
+            }
+
+            _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(app) = self.app.as_mut() else {
+            return;
+        };
+        if Instant::now() >= self.next_frame {
+            self.next_frame += FRAME_DURATION;
+            app.step_frame();
+        }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
+    }
+}
+
 fn main() {
     maybe_configure_wsl2_gpu();
 
@@ -58,114 +189,23 @@ fn main() {
         process::exit(1);
     }
 
-    let event_loop = EventLoop::new();
-    let renderer = match Renderer::new(&event_loop) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("error: could not create window: {}", e);
-            process::exit(1);
-        }
-    };
-
-    let mut app = App::new(renderer);
-
     let key_map = env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|dir| dir.join("keybindings.toml")))
         .map_or_else(KeyMap::default, |path| KeyMap::load(&path));
-    let mut button_state: [u8; 2] = [0, 0];
 
-    if let Some(rom_path) = args.get(1) {
-        if let Err(e) = app.load_rom(&PathBuf::from(rom_path)) {
-            eprintln!("error: invalid ROM: {}", e);
-            process::exit(1);
-        }
-    }
+    let mut winit_app = WinitApp {
+        app: None,
+        key_map,
+        button_state: [0, 0],
+        modifiers: ModifiersState::default(),
+        next_frame: Instant::now(),
+        pending_rom_path: args.get(1).map(PathBuf::from),
+    };
 
-    let mut next_frame = Instant::now();
-    let mut modifiers = ModifiersState::default();
-
-    event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::WaitUntil(next_frame);
-
-        match event {
-            Event::WindowEvent {
-                window_id,
-                event: WindowEvent::CloseRequested,
-            } if window_id == app.renderer.window_id() => {
-                *control_flow = ControlFlow::Exit;
-            }
-
-            Event::WindowEvent {
-                event: WindowEvent::Resized(size),
-                ..
-            } => {
-                app.renderer.resize(size.width, size.height);
-            }
-
-            Event::WindowEvent {
-                event: WindowEvent::ModifiersChanged(state),
-                ..
-            } => {
-                modifiers = state;
-            }
-
-            Event::WindowEvent {
-                event: WindowEvent::DroppedFile(path),
-                ..
-            } => {
-                if let Err(e) = app.load_rom(&path) {
-                    eprintln!("error: cannot load dropped ROM: {}", e);
-                }
-            }
-
-            Event::WindowEvent {
-                event: WindowEvent::KeyboardInput { input, .. },
-                ..
-            } => {
-                let is_ctrl_o = input.state == ElementState::Pressed
-                    && input.virtual_keycode == Some(VirtualKeyCode::O)
-                    && modifiers.ctrl();
-                if is_ctrl_o {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("NES ROM", &["nes"])
-                        .pick_file()
-                    {
-                        if let Err(e) = app.load_rom(&path) {
-                            eprintln!("error: cannot load ROM: {}", e);
-                        }
-                    }
-                }
-
-                let is_fps_toggle = input.state == ElementState::Pressed
-                    && modifiers.ctrl()
-                    && input
-                        .virtual_keycode
-                        .is_some_and(|k| key_map.is_fps_toggle(k));
-                if is_fps_toggle {
-                    app.toggle_fps_overlay();
-                }
-
-                if let Some(keycode) = input.virtual_keycode {
-                    if let Some((port, bit)) = key_map.on_key(keycode) {
-                        match input.state {
-                            ElementState::Pressed => button_state[port] |= bit,
-                            ElementState::Released => button_state[port] &= !bit,
-                        }
-                        app.set_controller_buttons(port, button_state[port]);
-                    }
-                }
-            }
-
-            Event::MainEventsCleared => {
-                if Instant::now() >= next_frame {
-                    next_frame += FRAME_DURATION;
-                    app.step_frame();
-                    *control_flow = ControlFlow::WaitUntil(next_frame);
-                }
-            }
-
-            _ => {}
-        }
-    });
+    let event_loop = EventLoop::new().expect("failed to create event loop");
+    event_loop.set_control_flow(ControlFlow::Wait);
+    event_loop
+        .run_app(&mut winit_app)
+        .expect("event loop terminated with an error");
 }

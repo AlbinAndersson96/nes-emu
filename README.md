@@ -14,7 +14,7 @@ A NES emulator written in Rust.
 | Cartridge — NROM (mapper 0) | Complete |
 | Cartridge — MMC1 (mapper 1) | Complete |
 | Controllers | Partial (serial shift register wired, no input source) |
-| Display output | Complete (winit + pixels, WSL2-compatible) |
+| Display output | Complete (winit + egui/egui-wgpu, WSL2-compatible) |
 
 All 159 blargg CPU ROM tests pass: all 17 `instr_test-v5` tests, `instr_timing`,
 all 5 `instr_misc` tests, and all of `cpu_interrupts_v2` (tests 1-5 plus the
@@ -39,7 +39,7 @@ src/
   app.rs             — App state machine (ROM loading, per-frame stepping)
   system.rs          — SystemClock: shared per-cycle stepping + interrupt delivery rules
   bus.rs             — system bus: RAM, PPU, APU, controllers, cartridge; OAM/DMC DMA
-  renderer.rs        — winit window + pixels framebuffer; NES palette → RGBA
+  renderer.rs        — winit window + egui/egui-wgpu renderer; NES palette → RGBA
   cartridge.rs       — iNES parser; mapper 0 (NROM) and mapper 1 (MMC1)
   cpu/
     mod.rs           — Cpu struct, micro-op queue, tick(), Bus trait
