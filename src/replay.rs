@@ -58,9 +58,10 @@ fn parse_data_line(line: &str, line_no: usize) -> Result<Fm2Frame, String> {
             "line {line_no}: expected `|cmd|joy0|joy1|`, got {line:?}"
         ));
     }
-    let command: u8 = parts[1].trim().parse().map_err(|e| {
-        format!("line {line_no}: invalid command byte {:?}: {e}", parts[1])
-    })?;
+    let command: u8 = parts[1]
+        .trim()
+        .parse()
+        .map_err(|e| format!("line {line_no}: invalid command byte {:?}: {e}", parts[1]))?;
     let controllers = [
         parse_joypad_field(parts[2], line_no)?,
         parse_joypad_field(parts[3], line_no)?,
@@ -84,8 +85,7 @@ impl Fm2Movie {
                 && value.trim() != "0"
             {
                 return Err(
-                    "fourscore movies are not supported (only 2-controller movies are)"
-                        .to_string(),
+                    "fourscore movies are not supported (only 2-controller movies are)".to_string(),
                 );
             }
         }
@@ -150,7 +150,10 @@ mod tests {
     fn fourscore_movies_are_rejected() {
         let text = "fourscore 1\n|0|........|........|........|........||\n";
         let err = Fm2Movie::parse(text).unwrap_err();
-        assert!(err.contains("fourscore"), "error must mention fourscore: {err}");
+        assert!(
+            err.contains("fourscore"),
+            "error must mention fourscore: {err}"
+        );
     }
 
     #[test]

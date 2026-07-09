@@ -86,7 +86,9 @@ fn apply_replay_frame(
         if let Some(bytes) = rom_bytes {
             let _ = load_rom_into(state, bytes);
         }
-    } else if frame.soft_reset && let AppState::Running { cpu, bus, .. } = state {
+    } else if frame.soft_reset
+        && let AppState::Running { cpu, bus, .. } = state
+    {
         cpu.reset(bus);
     }
     if let AppState::Running { bus, .. } = state {
@@ -147,8 +149,8 @@ impl App {
         if !matches!(self.state, AppState::Running { .. }) {
             return Err("load a ROM before starting a replay".to_string());
         }
-        let text =
-            fs::read_to_string(path).map_err(|e| format!("cannot read '{}': {e}", path.display()))?;
+        let text = fs::read_to_string(path)
+            .map_err(|e| format!("cannot read '{}': {e}", path.display()))?;
         let movie = Fm2Movie::parse(&text)?;
         self.replay = Some(Fm2Player::new(movie));
         Ok(())
@@ -346,7 +348,11 @@ mod tests {
                 bus.write(0x4016, 0);
                 assert_eq!(bus.read(0x4016) & 1, 1, "port0 A must be pressed");
                 assert_eq!(bus.read(0x4017) & 1, 0, "port1 A bit must be clear");
-                assert_eq!(bus.read(0x4017) & 1, 1, "port1 B bit must be set on the 2nd read");
+                assert_eq!(
+                    bus.read(0x4017) & 1,
+                    1,
+                    "port1 B bit must be set on the 2nd read"
+                );
             }
             AppState::NoRom => panic!("expected Running"),
         }
@@ -363,7 +369,10 @@ mod tests {
 
         apply_replay_frame(&mut state, &mut replay, &None);
 
-        assert!(replay.is_none(), "replay must be cleared once frames run out");
+        assert!(
+            replay.is_none(),
+            "replay must be cleared once frames run out"
+        );
     }
 
     #[test]
