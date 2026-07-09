@@ -23,6 +23,18 @@ the remaining PPU test failures.
 
 ## Building and running
 
+### System dependencies (Ubuntu/Debian)
+
+```bash
+sudo apt install pkg-config libgtk-3-dev libxkbcommon-x11-0
+```
+
+- `pkg-config` — required by the build system to locate native libraries
+- `libgtk-3-dev` — required by the native file dialog (`rfd` crate with `gtk3` feature)
+- `libxkbcommon-x11-0` — required at runtime by `winit` for keyboard handling
+
+### Commands
+
 ```bash
 cargo build
 cargo run <rom.nes>
