@@ -7,6 +7,7 @@ mod input;
 mod menu;
 mod ppu;
 mod renderer;
+mod replay;
 mod system;
 #[cfg(test)]
 mod tests;
