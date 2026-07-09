@@ -101,16 +101,20 @@ impl Fm2Movie {
     }
 }
 
+/// Steps through a parsed `Fm2Movie` one frame at a time.
 pub struct Fm2Player {
     movie: Fm2Movie,
     index: usize,
 }
 
 impl Fm2Player {
+    /// Wraps `movie`, starting playback at its first frame.
     pub fn new(movie: Fm2Movie) -> Self {
         Self { movie, index: 0 }
     }
 
+    /// Returns the next frame and advances the cursor, or `None` once the
+    /// movie is exhausted.
     pub fn next_frame(&mut self) -> Option<Fm2Frame> {
         let frame = self.movie.frames.get(self.index).copied()?;
         self.index += 1;

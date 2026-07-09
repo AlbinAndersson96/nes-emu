@@ -78,7 +78,7 @@ fn apply_replay_frame(
         None => return,
     };
     let Some(frame) = frame else {
-        println!("replay finished");
+        eprintln!("replay finished");
         *replay = None;
         return;
     };
