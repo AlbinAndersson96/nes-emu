@@ -1,3 +1,4 @@
+use crate::menu::MenuAction;
 use egui_wgpu::winit::Painter;
 use egui_wgpu::{RendererOptions, WgpuConfiguration};
 use std::num::NonZeroU32;
@@ -261,21 +262,21 @@ impl Renderer {
     }
 
     /// Runs one egui frame: `draw_menu` builds the menu bar and reports
-    /// whether "Load ROM" was clicked; the NES framebuffer texture is drawn
-    /// into the remaining space via a `CentralPanel`. Encodes and presents
-    /// the frame via the `egui_wgpu` painter. Returns `draw_menu`'s result.
-    pub fn redraw(&mut self, draw_menu: impl FnOnce(&mut egui::Ui) -> bool) -> bool {
+    /// which File-menu item (if any) was clicked; the NES framebuffer
+    /// texture is drawn into the remaining space via a `CentralPanel`.
+    /// Encodes and presents the frame via the `egui_wgpu` painter. Returns
+    /// `draw_menu`'s result.
+    pub fn redraw(&mut self, draw_menu: impl FnOnce(&mut egui::Ui) -> MenuAction) -> MenuAction {
         let texture_id = self.texture.id();
-        let texture_size = self.texture.size_vec2();
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let mut draw_menu = Some(draw_menu);
-        let mut load_rom_clicked = false;
+        let mut menu_action = MenuAction::None;
         let full_output = self.ctx.run_ui(raw_input, |ui| {
             if let Some(draw_menu) = draw_menu.take() {
-                load_rom_clicked = draw_menu(ui);
+                menu_action = draw_menu(ui);
             }
             egui::CentralPanel::default().show(ui, |ui| {
-                let sized_texture = egui::load::SizedTexture::new(texture_id, texture_size);
+                let sized_texture = egui::load::SizedTexture::new(texture_id, ui.available_size());
                 ui.image(sized_texture);
             });
         });
@@ -293,7 +294,7 @@ impl Renderer {
             vec![],
             &self.window,
         );
-        load_rom_clicked
+        menu_action
     }
 
     /// Forwards a window event to egui (mouse/hover for the menu bar).

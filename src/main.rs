@@ -64,6 +64,16 @@ fn load_rom_via_dialog(app: &mut App) {
     }
 }
 
+fn load_replay_via_dialog(app: &mut App) {
+    if let Some(path) = rfd::FileDialog::new()
+        .add_filter("FM2 replay", &["fm2"])
+        .pick_file()
+        && let Err(e) = app.load_replay(&path)
+    {
+        eprintln!("error: cannot load replay: {}", e);
+    }
+}
+
 struct WinitApp {
     app: Option<App>,
     key_map: KeyMap,
@@ -102,7 +112,12 @@ impl ApplicationHandler for WinitApp {
         self.next_frame = Instant::now();
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
         let Some(app) = self.app.as_mut() else {
             return;
         };
@@ -135,7 +150,9 @@ impl ApplicationHandler for WinitApp {
             }
 
             WindowEvent::KeyboardInput {
-                event, is_synthetic, ..
+                event,
+                is_synthetic,
+                ..
             } => {
                 if is_synthetic {
                     return;
@@ -167,9 +184,11 @@ impl ApplicationHandler for WinitApp {
                 }
             }
 
-            WindowEvent::RedrawRequested if app.renderer.redraw(menu::draw) => {
-                load_rom_via_dialog(app);
-            }
+            WindowEvent::RedrawRequested => match app.renderer.redraw(menu::draw) {
+                menu::MenuAction::LoadRom => load_rom_via_dialog(app),
+                menu::MenuAction::PlayReplay => load_replay_via_dialog(app),
+                menu::MenuAction::None => {}
+            },
 
             _ => {}
         }
