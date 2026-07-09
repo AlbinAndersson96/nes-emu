@@ -7,6 +7,7 @@ mod input;
 mod menu;
 mod ppu;
 mod renderer;
+mod replay;
 mod system;
 #[cfg(test)]
 mod tests;
@@ -63,6 +64,16 @@ fn load_rom_via_dialog(app: &mut App) {
     }
 }
 
+fn load_replay_via_dialog(app: &mut App) {
+    if let Some(path) = rfd::FileDialog::new()
+        .add_filter("FM2 replay", &["fm2"])
+        .pick_file()
+        && let Err(e) = app.load_replay(&path)
+    {
+        eprintln!("error: cannot load replay: {}", e);
+    }
+}
+
 struct WinitApp {
     app: Option<App>,
     key_map: KeyMap,
@@ -70,6 +81,7 @@ struct WinitApp {
     modifiers: ModifiersState,
     next_frame: Instant,
     pending_rom_path: Option<PathBuf>,
+    pending_replay_path: Option<PathBuf>,
 }
 
 impl ApplicationHandler for WinitApp {
@@ -91,11 +103,21 @@ impl ApplicationHandler for WinitApp {
             eprintln!("error: invalid ROM: {}", e);
             process::exit(1);
         }
+        if let Some(replay_path) = self.pending_replay_path.take()
+            && let Err(e) = app.load_replay(&replay_path)
+        {
+            eprintln!("error: cannot load replay: {}", e);
+        }
         self.app = Some(app);
         self.next_frame = Instant::now();
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
         let Some(app) = self.app.as_mut() else {
             return;
         };
@@ -128,7 +150,9 @@ impl ApplicationHandler for WinitApp {
             }
 
             WindowEvent::KeyboardInput {
-                event, is_synthetic, ..
+                event,
+                is_synthetic,
+                ..
             } => {
                 if is_synthetic {
                     return;
@@ -160,9 +184,11 @@ impl ApplicationHandler for WinitApp {
                 }
             }
 
-            WindowEvent::RedrawRequested if app.renderer.redraw(menu::draw) => {
-                load_rom_via_dialog(app);
-            }
+            WindowEvent::RedrawRequested => match app.renderer.redraw(menu::draw) {
+                menu::MenuAction::LoadRom => load_rom_via_dialog(app),
+                menu::MenuAction::PlayReplay => load_replay_via_dialog(app),
+                menu::MenuAction::None => {}
+            },
 
             _ => {}
         }
@@ -184,8 +210,8 @@ fn main() {
     maybe_configure_wsl2_gpu();
 
     let args: Vec<String> = env::args().collect();
-    if args.len() > 2 {
-        eprintln!("Usage: {} [rom.nes]", args[0]);
+    if args.len() > 3 {
+        eprintln!("Usage: {} [rom.nes] [replay.fm2]", args[0]);
         process::exit(1);
     }
 
@@ -201,6 +227,7 @@ fn main() {
         modifiers: ModifiersState::default(),
         next_frame: Instant::now(),
         pending_rom_path: args.get(1).map(PathBuf::from),
+        pending_replay_path: args.get(2).map(PathBuf::from),
     };
 
     let event_loop = EventLoop::new().expect("failed to create event loop");

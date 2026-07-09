@@ -2,6 +2,7 @@ use crate::bus::Bus;
 use crate::cartridge::Cartridge;
 use crate::cpu::Cpu;
 use crate::renderer::Renderer;
+use crate::replay::{Fm2Movie, Fm2Player};
 use crate::system::SystemClock;
 use std::fs;
 use std::path::Path;
@@ -23,6 +24,8 @@ pub struct App {
     frames_since_update: u32,
     last_fps_update: Instant,
     fps_overlay_enabled: bool,
+    replay: Option<Fm2Player>,
+    current_rom_bytes: Option<Vec<u8>>,
 }
 
 const CYCLES_PER_FRAME: u64 = 29_781;
@@ -52,6 +55,45 @@ fn load_rom_into(state: &mut AppState, data: &[u8]) -> Result<(), String> {
 fn set_controller_buttons_on(state: &mut AppState, port: usize, buttons: u8) {
     if let AppState::Running { bus, .. } = state {
         bus.set_controller_state(port, buttons);
+    }
+}
+
+/// Applies one replay frame's worth of state to `state`: a hard-reset
+/// command rebuilds `state` from `rom_bytes` (mirroring a real power
+/// cycle); a soft-reset command resets the Cpu in place (mirroring the
+/// reset button). Either way, both controller ports are then set from the
+/// frame's recorded input. Once the replay runs out of frames, `replay` is
+/// cleared and control reverts to whatever else is writing the controller
+/// latch (e.g. the keyboard).
+fn apply_replay_frame(
+    state: &mut AppState,
+    replay: &mut Option<Fm2Player>,
+    rom_bytes: &Option<Vec<u8>>,
+) {
+    if !matches!(state, AppState::Running { .. }) {
+        return;
+    }
+    let frame = match replay {
+        Some(player) => player.next_frame(),
+        None => return,
+    };
+    let Some(frame) = frame else {
+        eprintln!("replay finished");
+        *replay = None;
+        return;
+    };
+    if frame.hard_reset {
+        if let Some(bytes) = rom_bytes {
+            let _ = load_rom_into(state, bytes);
+        }
+    } else if frame.soft_reset
+        && let AppState::Running { cpu, bus, .. } = state
+    {
+        cpu.reset(bus);
+    }
+    if let AppState::Running { bus, .. } = state {
+        bus.set_controller_state(0, frame.controllers[0]);
+        bus.set_controller_state(1, frame.controllers[1]);
     }
 }
 
@@ -90,15 +132,32 @@ impl App {
             frames_since_update: 0,
             last_fps_update: Instant::now(),
             fps_overlay_enabled: false,
+            replay: None,
+            current_rom_bytes: None,
         }
     }
 
     pub fn load_rom(&mut self, path: &Path) -> Result<(), String> {
         let data = fs::read(path).map_err(|e| format!("cannot read '{}': {e}", path.display()))?;
-        load_rom_into(&mut self.state, &data)
+        load_rom_into(&mut self.state, &data)?;
+        self.current_rom_bytes = Some(data);
+        self.replay = None;
+        Ok(())
+    }
+
+    pub fn load_replay(&mut self, path: &Path) -> Result<(), String> {
+        if !matches!(self.state, AppState::Running { .. }) {
+            return Err("load a ROM before starting a replay".to_string());
+        }
+        let text = fs::read_to_string(path)
+            .map_err(|e| format!("cannot read '{}': {e}", path.display()))?;
+        let movie = Fm2Movie::parse(&text)?;
+        self.replay = Some(Fm2Player::new(movie));
+        Ok(())
     }
 
     pub fn step_frame(&mut self) {
+        apply_replay_frame(&mut self.state, &mut self.replay, &self.current_rom_bytes);
         match &mut self.state {
             AppState::NoRom => {
                 self.renderer.present_placeholder();
@@ -269,5 +328,100 @@ mod tests {
         assert!(enabled);
         toggle_flag(&mut enabled);
         assert!(!enabled);
+    }
+
+    #[test]
+    fn apply_replay_frame_sets_both_controller_latches() {
+        use crate::cpu::Bus as CpuBus;
+        use crate::replay::{Fm2Movie, Fm2Player};
+
+        let mut state = AppState::NoRom;
+        load_rom_into(&mut state, &test_rom_bytes()).unwrap();
+        let movie = Fm2Movie::parse("fourscore 0\n|0|.......A|......B.||\n").unwrap();
+        let mut replay = Some(Fm2Player::new(movie));
+
+        apply_replay_frame(&mut state, &mut replay, &None);
+
+        match &mut state {
+            AppState::Running { bus, .. } => {
+                bus.write(0x4016, 1);
+                bus.write(0x4016, 0);
+                assert_eq!(bus.read(0x4016) & 1, 1, "port0 A must be pressed");
+                assert_eq!(bus.read(0x4017) & 1, 0, "port1 A bit must be clear");
+                assert_eq!(
+                    bus.read(0x4017) & 1,
+                    1,
+                    "port1 B bit must be set on the 2nd read"
+                );
+            }
+            AppState::NoRom => panic!("expected Running"),
+        }
+    }
+
+    #[test]
+    fn apply_replay_frame_clears_replay_when_frames_exhausted() {
+        use crate::replay::{Fm2Movie, Fm2Player};
+
+        let mut state = AppState::NoRom;
+        load_rom_into(&mut state, &test_rom_bytes()).unwrap();
+        let movie = Fm2Movie::parse("fourscore 0\n").unwrap();
+        let mut replay = Some(Fm2Player::new(movie));
+
+        apply_replay_frame(&mut state, &mut replay, &None);
+
+        assert!(
+            replay.is_none(),
+            "replay must be cleared once frames run out"
+        );
+    }
+
+    #[test]
+    fn apply_replay_frame_soft_reset_resets_cpu_but_keeps_ram() {
+        use crate::cpu::Bus as CpuBus;
+        use crate::replay::{Fm2Movie, Fm2Player};
+
+        let mut state = AppState::NoRom;
+        load_rom_into(&mut state, &test_rom_bytes()).unwrap();
+        if let AppState::Running { cpu, bus, .. } = &mut state {
+            bus.write(0x0010, 0x42);
+            cpu.tick(bus);
+        }
+        let movie = Fm2Movie::parse("fourscore 0\n|1|........|........||\n").unwrap();
+        let mut replay = Some(Fm2Player::new(movie));
+
+        apply_replay_frame(&mut state, &mut replay, &None);
+
+        match &mut state {
+            AppState::Running { cpu, bus, .. } => {
+                assert_eq!(cpu.cycles, 8, "soft reset must reset the Cpu");
+                assert_eq!(bus.read(0x0010), 0x42, "soft reset must not clear RAM");
+            }
+            AppState::NoRom => panic!("expected Running"),
+        }
+    }
+
+    #[test]
+    fn apply_replay_frame_hard_reset_clears_ram() {
+        use crate::cpu::Bus as CpuBus;
+        use crate::replay::{Fm2Movie, Fm2Player};
+
+        let mut state = AppState::NoRom;
+        let rom_bytes = test_rom_bytes();
+        load_rom_into(&mut state, &rom_bytes).unwrap();
+        if let AppState::Running { bus, .. } = &mut state {
+            bus.write(0x0010, 0x42);
+        }
+        let movie = Fm2Movie::parse("fourscore 0\n|2|........|........||\n").unwrap();
+        let mut replay = Some(Fm2Player::new(movie));
+
+        apply_replay_frame(&mut state, &mut replay, &Some(rom_bytes));
+
+        match &mut state {
+            AppState::Running { cpu, bus, .. } => {
+                assert_eq!(cpu.cycles, 8, "hard reset must produce a freshly reset Cpu");
+                assert_eq!(bus.read(0x0010), 0, "hard reset must clear RAM");
+            }
+            AppState::NoRom => panic!("expected Running"),
+        }
     }
 }
