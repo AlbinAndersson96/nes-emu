@@ -71,6 +71,7 @@ struct WinitApp {
     modifiers: ModifiersState,
     next_frame: Instant,
     pending_rom_path: Option<PathBuf>,
+    pending_replay_path: Option<PathBuf>,
 }
 
 impl ApplicationHandler for WinitApp {
@@ -91,6 +92,11 @@ impl ApplicationHandler for WinitApp {
         {
             eprintln!("error: invalid ROM: {}", e);
             process::exit(1);
+        }
+        if let Some(replay_path) = self.pending_replay_path.take()
+            && let Err(e) = app.load_replay(&replay_path)
+        {
+            eprintln!("error: cannot load replay: {}", e);
         }
         self.app = Some(app);
         self.next_frame = Instant::now();
@@ -185,8 +191,8 @@ fn main() {
     maybe_configure_wsl2_gpu();
 
     let args: Vec<String> = env::args().collect();
-    if args.len() > 2 {
-        eprintln!("Usage: {} [rom.nes]", args[0]);
+    if args.len() > 3 {
+        eprintln!("Usage: {} [rom.nes] [replay.fm2]", args[0]);
         process::exit(1);
     }
 
@@ -202,6 +208,7 @@ fn main() {
         modifiers: ModifiersState::default(),
         next_frame: Instant::now(),
         pending_rom_path: args.get(1).map(PathBuf::from),
+        pending_replay_path: args.get(2).map(PathBuf::from),
     };
 
     let event_loop = EventLoop::new().expect("failed to create event loop");
