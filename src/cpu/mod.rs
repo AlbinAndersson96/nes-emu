@@ -187,6 +187,12 @@ impl Cpu {
     /// (advance PPU/APU by 7 cycles and add 7 to `cpu.cycles` / any cycle
     /// budget), the same way callers already do for the initial `reset()` at
     /// boot.
+    ///
+    /// Currently only exercised by the `$81`-status handling in the ROM test
+    /// harness (`src/tests/roms.rs`) and its own unit test; not yet wired
+    /// into the real run loop (no in-app Reset-button UI exists yet), hence
+    /// the explicit `allow` below.
+    #[allow(dead_code)]
     pub fn warm_reset(&mut self, bus: &mut dyn Bus) {
         self.p |= FLAG_I;
         self.sp = self.sp.wrapping_sub(3);
