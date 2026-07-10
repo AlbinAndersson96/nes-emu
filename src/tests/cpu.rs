@@ -1264,14 +1264,14 @@ const KIL_OPCODES: [u8; 12] = [
 
 /// Every KIL/JAM opcode consumes the opcode byte on dispatch (T1, ordinary
 /// fetch semantics shared by all opcodes: `pc` advances past the opcode
-/// itself) and then, on T2, performs its own dummy operand-style fetch which
-/// it immediately undoes. The net effect across the two `tick()` calls that
-/// make up this 2-cycle instruction: `pc` settles at (opcode_address + 1)
-/// and does NOT advance any further on T2 — i.e. the dummy fetch does not
-/// leak an extra advance the way a real addressed operand byte would (that
-/// would leave `pc` at opcode_address + 2). This is the "not just delayed"
-/// behavior: a genuinely delayed/broken implementation would show `pc`
-/// creeping forward by the dummy fetch on T2; this must not happen.
+/// itself, landing at opcode_address + 1 before this arm even runs) and
+/// then, on T2, performs its own dummy operand-style fetch which advances
+/// `pc` a *second* time, to opcode_address + 2. To genuinely freeze at the
+/// opcode's own address (matching real 6502/2A03 hardware, where a JAMmed
+/// CPU never advances PC past the JAM opcode at all), the arm must undo
+/// BOTH advances — wind `pc` back by 2, not 1. This test verifies `pc`
+/// returns exactly to its starting address (not start+1) after the full
+/// 2-tick instruction completes, for all 12 opcode values.
 #[test]
 fn kil_opcodes_freeze_pc_within_instruction() {
     for &op in &KIL_OPCODES {
@@ -1287,10 +1287,10 @@ fn kil_opcodes_freeze_pc_within_instruction() {
             "opcode {op:#04x}: dispatch should advance pc past the opcode byte"
         );
 
-        cpu.tick(&mut bus); // T2: KIL body's dummy fetch + self-undo.
+        cpu.tick(&mut bus); // T2: KIL body's dummy fetch, then wound back by 2.
         assert_eq!(
-            cpu.pc, after_dispatch,
-            "opcode {op:#04x}: KIL dummy fetch leaked an extra pc advance (delayed, not frozen)"
+            cpu.pc, start_pc,
+            "opcode {op:#04x}: pc must return to the opcode's own address, not drift forward"
         );
 
         let (_, _, queue_len) = cpu.debug_nmi_state();
@@ -1301,35 +1301,69 @@ fn kil_opcodes_freeze_pc_within_instruction() {
     }
 }
 
-/// Confirms the freeze holds across several *consecutive* KIL instructions
-/// (not just one): if the byte the CPU lands on after being jammed is also
-/// a KIL opcode (as it would be in a contiguous run of jam bytes), repeated
-/// dispatch keeps re-decoding KIL rather than ever executing a "real"
-/// instruction. Note this is a weaker property than a bit-for-bit-constant
-/// `pc`: each additional 2-tick KIL instruction still advances `pc` by
-/// exactly 1 (consuming its own opcode byte on dispatch, same as any
-/// opcode), so across N consecutive jam instructions `pc` climbs by N bytes
-/// rather than sitting at one fixed address forever. What never happens is
-/// `pc` jumping away to service an unrelated instruction/interrupt — the
-/// CPU stays trapped inside the run of jam bytes for as long as it lasts.
+/// Confirms the freeze is a genuine fixed point, not merely "stays inside a
+/// run of identical jam bytes": running many more ticks keeps re-decoding
+/// the SAME opcode at the SAME address forever. `pc` alternates between
+/// `start_pc` (queue empty, between instructions) and `start_pc + 1`
+/// (mid-instruction, right after dispatch's own fetch and before the KIL
+/// body winds it back) — it never climbs past `start_pc + 1`, and always
+/// returns to exactly `start_pc` at each instruction boundary, for as many
+/// instructions as we care to run.
 #[test]
 fn kil_opcodes_stay_trapped_across_consecutive_instructions() {
     let (mut cpu, mut bus) = make();
-    for addr in 0x0200..0x0206u16 {
-        bus.mem[addr as usize] = 0x02;
-    }
+    bus.mem[0x0200] = 0x02;
     let start_pc = cpu.pc; // 0x0200
 
-    // 3 consecutive KIL instructions = 6 ticks (2 ticks each).
-    for _ in 0..6 {
+    // 10 full KIL "instructions" worth of ticks (20 raw ticks: dispatch,
+    // execute, dispatch, execute, ...). If pc drifted even by 1 per
+    // instruction (the bug this test guards against), it would have moved
+    // 10 bytes forward by now instead of returning to start_pc every time.
+    for i in 0..20u32 {
         cpu.tick(&mut bus);
+        let expected = if i % 2 == 0 {
+            start_pc.wrapping_add(1) // just past dispatch's own fetch
+        } else {
+            start_pc // wound back by the KIL body at the end of each instruction
+        };
+        assert_eq!(cpu.pc, expected, "tick {i}: pc should be {expected:#06x}");
     }
-
-    // Each instruction only ever advances pc by exactly 1 (its own opcode
-    // fetch); after 3 such instructions pc has moved forward by 3 bytes,
-    // still squarely inside the jammed region, never having escaped to
-    // execute anything else.
-    assert_eq!(cpu.pc, start_pc.wrapping_add(3));
+    assert_eq!(cpu.pc, start_pc);
     let (_, _, queue_len) = cpu.debug_nmi_state();
     assert_eq!(queue_len, 0);
+}
+
+/// The scenario the pre-fix bug (`wrapping_sub(1)` instead of `(2)`) allowed
+/// to slip through: a single KIL byte immediately followed by a DIFFERENT,
+/// non-KIL opcode. With the old off-by-one, `pc` settled one byte forward
+/// of the KIL opcode after each "instruction", so it would eventually land
+/// on — and dispatch — that following byte as a real opcode, letting the
+/// CPU fall through and resume normal execution. With the fix, `pc` must
+/// never leave the KIL opcode's own address, so the following byte must
+/// never be reached or executed.
+#[test]
+fn kil_never_falls_through_to_a_following_non_kil_opcode() {
+    let (mut cpu, mut bus) = make();
+    bus.mem[0x0200] = 0x02; // KIL
+    bus.mem[0x0201] = 0xA9; // LDA #$42 — would prove an escape if ever reached.
+    bus.mem[0x0202] = 0x42;
+    let start_pc = cpu.pc; // 0x0200
+
+    for i in 0..20u32 {
+        cpu.tick(&mut bus);
+        assert!(
+            cpu.pc == start_pc || cpu.pc == start_pc.wrapping_add(1),
+            "tick {i}: pc left the KIL opcode's address and reached {:#06x} — fell through to the following byte",
+            cpu.pc
+        );
+    }
+    assert_eq!(
+        cpu.pc, start_pc,
+        "pc must settle back exactly on the KIL opcode, not drift onto the LDA that follows it"
+    );
+    // If LDA #$42 had ever executed, cpu.a would be 0x42 — confirm it never ran.
+    assert_ne!(
+        cpu.a, 0x42,
+        "LDA #$42 must never have executed — the CPU should still be jammed on the KIL opcode"
+    );
 }
