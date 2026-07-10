@@ -12,8 +12,9 @@ fn main() {
         .expect("OUT_DIR must have at least 3 ancestors")
         .to_path_buf();
 
-    let manifest_dir =
-        PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set by cargo"));
+    let manifest_dir = PathBuf::from(
+        env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set by cargo"),
+    );
     let src = manifest_dir.join("assets").join("keybindings.toml");
     let dest = target_dir.join("keybindings.toml");
 

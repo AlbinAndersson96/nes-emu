@@ -145,6 +145,21 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, opcode: u8) -> u8 {
             2 // T1+T2
         }
 
+        // --- KIL/JAM (unofficial) --- permanently halts the CPU (jams) on
+        // real 6502/2A03 hardware. All 12 opcodes: 0x02 0x12 0x22 0x32 0x42
+        // 0x52 0x62 0x72 0x92 0xB2 0xD2 0xF2. PC never advances past this
+        // opcode once hit on real hardware (only a physical reset
+        // recovers) — modeled here by re-fetching the same byte forever
+        // without moving PC: the dispatcher's own opcode fetch already
+        // advanced PC by 1 before this arm runs, and the dummy fetch below
+        // advances it again, so PC must be wound back by 2 (not 1) to land
+        // exactly back on this opcode's own address.
+        0x02 | 0x12 | 0x22 | 0x32 | 0x42 | 0x52 | 0x62 | 0x72 | 0x92 | 0xB2 | 0xD2 | 0xF2 => {
+            let _ = cpu.fetch(bus); // dummy fetch, not consumed
+            cpu.pc = cpu.pc.wrapping_sub(2); // return PC to this opcode's own address: re-decodes forever
+            2
+        }
+
         // --- Flag clears / sets ---
         0x18 => {
             cpu.set_flag(FLAG_C, false);
@@ -1241,15 +1256,6 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, opcode: u8) -> u8 {
             let v = cpu.sp & addr_hi.wrapping_add(1);
             cpu.write(bus, a, v);
             5
-        }
-
-        _ => {
-            debug_assert!(
-                false,
-                "undefined opcode {opcode:#04x} at PC={:#06x}",
-                cpu.pc.wrapping_sub(1)
-            );
-            1
         }
     }
 }

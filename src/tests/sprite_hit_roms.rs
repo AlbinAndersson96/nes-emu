@@ -18,7 +18,7 @@ struct RomOutput {
     screen_text: String,
 }
 
-const ROM_DIR: &str = "tests/roms/ppu/sprite_hit_tests_2005.10.05";
+const ROM_DIR: &str = "tests/roms/sprite_hit_tests_2005.10.05";
 
 /// Nametable tiles are loaded 1:1 with ASCII for the result text (see
 /// runtime/console.a: print_char writes the character byte straight to

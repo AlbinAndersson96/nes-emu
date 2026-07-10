@@ -1221,3 +1221,149 @@ fn cycle_counts_rmw() {
         assert_eq!(cycles, expected, "program {:02X?}", program);
     }
 }
+
+// ---------------------------------------------------------------------------
+// warm_reset
+// ---------------------------------------------------------------------------
+
+#[test]
+fn warm_reset_leaves_axy_untouched_sets_i_decrements_sp_and_loads_vector() {
+    let (mut cpu, mut bus) = make();
+    // Reset vector $FFFC/$FFFD -> $1234.
+    bus.mem[0xFFFC] = 0x34;
+    bus.mem[0xFFFD] = 0x12;
+    // Arbitrary RAM byte, to confirm nothing is pushed to the stack.
+    bus.mem[0x0300] = 0xAB;
+
+    cpu.a = 0x11;
+    cpu.x = 0x22;
+    cpu.y = 0x33;
+    cpu.p = FLAG_U; // FLAG_I deliberately clear beforehand.
+    cpu.sp = 0xF0;
+
+    cpu.warm_reset(&mut bus);
+
+    assert_eq!(cpu.a, 0x11);
+    assert_eq!(cpu.x, 0x22);
+    assert_eq!(cpu.y, 0x33);
+    assert!(cpu.flag(FLAG_I));
+    assert_eq!(cpu.sp, 0xED); // 0xF0 - 3
+    assert_eq!(cpu.pc, 0x1234);
+    assert_eq!(bus.mem[0x0300], 0xAB); // untouched — nothing was pushed
+}
+
+// ---------------------------------------------------------------------------
+// KIL/JAM (unofficial halt opcodes)
+// ---------------------------------------------------------------------------
+
+/// All 12 KIL/JAM opcode values that permanently halt real 6502/2A03
+/// hardware: 0x02 0x12 0x22 0x32 0x42 0x52 0x62 0x72 0x92 0xB2 0xD2 0xF2.
+const KIL_OPCODES: [u8; 12] = [
+    0x02, 0x12, 0x22, 0x32, 0x42, 0x52, 0x62, 0x72, 0x92, 0xB2, 0xD2, 0xF2,
+];
+
+/// Every KIL/JAM opcode consumes the opcode byte on dispatch (T1, ordinary
+/// fetch semantics shared by all opcodes: `pc` advances past the opcode
+/// itself, landing at opcode_address + 1 before this arm even runs) and
+/// then, on T2, performs its own dummy operand-style fetch which advances
+/// `pc` a *second* time, to opcode_address + 2. To genuinely freeze at the
+/// opcode's own address (matching real 6502/2A03 hardware, where a JAMmed
+/// CPU never advances PC past the JAM opcode at all), the arm must undo
+/// BOTH advances — wind `pc` back by 2, not 1. This test verifies `pc`
+/// returns exactly to its starting address (not start+1) after the full
+/// 2-tick instruction completes, for all 12 opcode values.
+#[test]
+fn kil_opcodes_freeze_pc_within_instruction() {
+    for &op in &KIL_OPCODES {
+        let (mut cpu, mut bus) = make();
+        bus.mem[0x0200] = op;
+        let start_pc = cpu.pc; // 0x0200
+
+        cpu.tick(&mut bus); // T1: dispatch fetches the opcode byte.
+        let after_dispatch = cpu.pc;
+        assert_eq!(
+            after_dispatch,
+            start_pc.wrapping_add(1),
+            "opcode {op:#04x}: dispatch should advance pc past the opcode byte"
+        );
+
+        cpu.tick(&mut bus); // T2: KIL body's dummy fetch, then wound back by 2.
+        assert_eq!(
+            cpu.pc, start_pc,
+            "opcode {op:#04x}: pc must return to the opcode's own address, not drift forward"
+        );
+
+        let (_, _, queue_len) = cpu.debug_nmi_state();
+        assert_eq!(
+            queue_len, 0,
+            "opcode {op:#04x}: instruction should be fully retired after 2 ticks"
+        );
+    }
+}
+
+/// Confirms the freeze is a genuine fixed point, not merely "stays inside a
+/// run of identical jam bytes": running many more ticks keeps re-decoding
+/// the SAME opcode at the SAME address forever. `pc` alternates between
+/// `start_pc` (queue empty, between instructions) and `start_pc + 1`
+/// (mid-instruction, right after dispatch's own fetch and before the KIL
+/// body winds it back) — it never climbs past `start_pc + 1`, and always
+/// returns to exactly `start_pc` at each instruction boundary, for as many
+/// instructions as we care to run.
+#[test]
+fn kil_opcodes_stay_trapped_across_consecutive_instructions() {
+    let (mut cpu, mut bus) = make();
+    bus.mem[0x0200] = 0x02;
+    let start_pc = cpu.pc; // 0x0200
+
+    // 10 full KIL "instructions" worth of ticks (20 raw ticks: dispatch,
+    // execute, dispatch, execute, ...). If pc drifted even by 1 per
+    // instruction (the bug this test guards against), it would have moved
+    // 10 bytes forward by now instead of returning to start_pc every time.
+    for i in 0..20u32 {
+        cpu.tick(&mut bus);
+        let expected = if i % 2 == 0 {
+            start_pc.wrapping_add(1) // just past dispatch's own fetch
+        } else {
+            start_pc // wound back by the KIL body at the end of each instruction
+        };
+        assert_eq!(cpu.pc, expected, "tick {i}: pc should be {expected:#06x}");
+    }
+    assert_eq!(cpu.pc, start_pc);
+    let (_, _, queue_len) = cpu.debug_nmi_state();
+    assert_eq!(queue_len, 0);
+}
+
+/// The scenario the pre-fix bug (`wrapping_sub(1)` instead of `(2)`) allowed
+/// to slip through: a single KIL byte immediately followed by a DIFFERENT,
+/// non-KIL opcode. With the old off-by-one, `pc` settled one byte forward
+/// of the KIL opcode after each "instruction", so it would eventually land
+/// on — and dispatch — that following byte as a real opcode, letting the
+/// CPU fall through and resume normal execution. With the fix, `pc` must
+/// never leave the KIL opcode's own address, so the following byte must
+/// never be reached or executed.
+#[test]
+fn kil_never_falls_through_to_a_following_non_kil_opcode() {
+    let (mut cpu, mut bus) = make();
+    bus.mem[0x0200] = 0x02; // KIL
+    bus.mem[0x0201] = 0xA9; // LDA #$42 — would prove an escape if ever reached.
+    bus.mem[0x0202] = 0x42;
+    let start_pc = cpu.pc; // 0x0200
+
+    for i in 0..20u32 {
+        cpu.tick(&mut bus);
+        assert!(
+            cpu.pc == start_pc || cpu.pc == start_pc.wrapping_add(1),
+            "tick {i}: pc left the KIL opcode's address and reached {:#06x} — fell through to the following byte",
+            cpu.pc
+        );
+    }
+    assert_eq!(
+        cpu.pc, start_pc,
+        "pc must settle back exactly on the KIL opcode, not drift onto the LDA that follows it"
+    );
+    // If LDA #$42 had ever executed, cpu.a would be 0x42 — confirm it never ran.
+    assert_ne!(
+        cpu.a, 0x42,
+        "LDA #$42 must never have executed — the CPU should still be jammed on the KIL opcode"
+    );
+}

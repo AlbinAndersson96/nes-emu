@@ -14,7 +14,7 @@ struct RomOutput {
     result_code: u8,
 }
 
-const ROM_DIR: &str = "tests/roms/ppu/blargg_ppu_tests_2005.09.15b";
+const ROM_DIR: &str = "tests/roms/blargg_ppu_tests_2005.09.15b";
 
 fn run_ppu_rom(filename: &str) -> RomOutput {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

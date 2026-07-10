@@ -29,8 +29,12 @@ fn load_rom(name: &str) -> Vec<u8> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/roms")
         .join(name);
-    std::fs::read(&path)
-        .unwrap_or_else(|_| panic!("ROM not found: {} — place it in tests/roms/cpu/ (or the appropriate subsystem subfolder)", path.display()))
+    std::fs::read(&path).unwrap_or_else(|_| {
+        panic!(
+            "ROM not found: {} — place it in tests/roms/<suite-name>/",
+            path.display()
+        )
+    })
 }
 
 fn read_output(bus: &mut Bus) -> String {
@@ -119,83 +123,362 @@ macro_rules! rom_test {
     };
 }
 
+/// Like `run_rom`, but never asserts the ROM's own pass/fail verdict — only a
+/// panic or a MAX_CYCLES timeout fails the test. Used for suites we haven't
+/// verified the emulator against yet; the ROM's status/text is still printed
+/// so `cargo test -- --nocapture` shows real results.
+fn report_rom(filename: &str) {
+    let data = load_rom(filename);
+    let cartridge = Cartridge::from_ines(&data)
+        .unwrap_or_else(|e| panic!("failed to parse {}: {}", filename, e));
+    let mut bus = Bus::new();
+    bus.insert_cartridge(cartridge);
+    let mut cpu = Cpu::new();
+    cpu.reset(&mut bus);
+    let _ = bus.tick_ppu(7);
+    let _ = bus.tick_apu(8);
+
+    let mut total_cycles: u64 = 0;
+    let mut clock = SystemClock::new();
+
+    // Status $81 means "needs the reset button pressed, but delayed by at
+    // least 100 msec from now" (see tests/roms/cpu_reset/readme.txt) — about
+    // 190,000 CPU cycles at 1.789773 MHz, rounded up for safety margin.
+    // Tracks the cycle at which $81 was first observed in the current phase
+    // so a warm reset only fires once that delay has elapsed; the tracker is
+    // cleared whenever status isn't $81 (including right after a reset
+    // fires), so a later $81 phase gets its own fresh wait.
+    const RESET_DELAY_CYCLES: u64 = 190_000;
+    const MAX_RESETS: u32 = 8;
+    let mut reset_request_since: Option<u64> = None;
+    let mut reset_count: u32 = 0;
+
+    loop {
+        let sig_valid =
+            bus.read(0x6001) == SIG[0] && bus.read(0x6002) == SIG[1] && bus.read(0x6003) == SIG[2];
+
+        if sig_valid {
+            let status = bus.read(0x6000);
+            if status == 0x81 {
+                let since = *reset_request_since.get_or_insert(total_cycles);
+                // Only fire the reset at an instruction boundary (empty
+                // micro-op queue) — `clock.step()` below ticks exactly one
+                // micro-op at a time, so this loop can observe $81 mid
+                // instruction; calling `warm_reset` there would change PC
+                // out from under an in-flight micro-op sequence and corrupt
+                // execution. The 100ms+ delay window gives ample slack to
+                // wait the handful of extra cycles until the current
+                // instruction retires.
+                let (_, _, queue_len) = cpu.debug_nmi_state();
+                if total_cycles.saturating_sub(since) >= RESET_DELAY_CYCLES && queue_len == 0 {
+                    reset_count += 1;
+                    if reset_count > MAX_RESETS {
+                        let text = read_output(&mut bus);
+                        print_raw(text.trim());
+                        panic!(
+                            "{filename}: still requesting reset (status=$81) after {} warm resets",
+                            MAX_RESETS
+                        );
+                    }
+                    cpu.warm_reset(&mut bus);
+                    let _ = bus.tick_ppu(7);
+                    let _ = bus.tick_apu(7);
+                    cpu.cycles += 7;
+                    total_cycles += 7;
+                    reset_request_since = None;
+                    continue;
+                }
+            } else {
+                reset_request_since = None;
+                if status < 0x80 {
+                    let text = read_output(&mut bus);
+                    print_raw(&format!(
+                        "[{filename}] status={:#04x} text={}",
+                        status,
+                        text.trim()
+                    ));
+                    return;
+                }
+            }
+        }
+
+        if total_cycles >= MAX_CYCLES {
+            let text = read_output(&mut bus);
+            print_raw(text.trim());
+            panic!("{filename}: timed out after {} cycles", total_cycles);
+        }
+
+        let result = clock.step(&mut cpu, &mut bus);
+        total_cycles += result.cycles;
+    }
+}
+
+macro_rules! report_rom_test {
+    ($name:ident, $file:expr) => {
+        #[test]
+        fn $name() {
+            report_rom($file);
+        }
+    };
+}
+
 // All ROM test files below were written by Shay Green <gblargg@gmail.com>.
 
 // instr_test-v5/rom_singles — one ROM per addressing mode / instruction group
-rom_test!(basics, "cpu/01-basics.nes");
-rom_test!(implied, "cpu/02-implied.nes");
-rom_test!(immediate, "cpu/03-immediate.nes");
-rom_test!(zero_page, "cpu/04-zero_page.nes");
-rom_test!(zp_xy, "cpu/05-zp_xy.nes");
-rom_test!(absolute, "cpu/06-absolute.nes");
-rom_test!(abs_xy, "cpu/07-abs_xy.nes");
-rom_test!(ind_x, "cpu/08-ind_x.nes");
-rom_test!(ind_y, "cpu/09-ind_y.nes");
-rom_test!(branches, "cpu/10-branches.nes");
-rom_test!(stack, "cpu/11-stack.nes");
-rom_test!(jmp_jsr, "cpu/12-jmp_jsr.nes");
-rom_test!(rts, "cpu/13-rts.nes");
-rom_test!(rti, "cpu/14-rti.nes");
-rom_test!(brk, "cpu/15-brk.nes");
-rom_test!(special, "cpu/16-special.nes");
+rom_test!(basics, "instr_test-v5/rom_singles/01-basics.nes");
+rom_test!(implied, "instr_test-v5/rom_singles/02-implied.nes");
+rom_test!(immediate, "instr_test-v5/rom_singles/03-immediate.nes");
+rom_test!(zero_page, "instr_test-v5/rom_singles/04-zero_page.nes");
+rom_test!(zp_xy, "instr_test-v5/rom_singles/05-zp_xy.nes");
+rom_test!(absolute, "instr_test-v5/rom_singles/06-absolute.nes");
+rom_test!(abs_xy, "instr_test-v5/rom_singles/07-abs_xy.nes");
+rom_test!(ind_x, "instr_test-v5/rom_singles/08-ind_x.nes");
+rom_test!(ind_y, "instr_test-v5/rom_singles/09-ind_y.nes");
+rom_test!(branches, "instr_test-v5/rom_singles/10-branches.nes");
+rom_test!(stack, "instr_test-v5/rom_singles/11-stack.nes");
+rom_test!(jmp_jsr, "instr_test-v5/rom_singles/12-jmp_jsr.nes");
+rom_test!(rts, "instr_test-v5/rom_singles/13-rts.nes");
+rom_test!(rti, "instr_test-v5/rom_singles/14-rti.nes");
+rom_test!(brk, "instr_test-v5/rom_singles/15-brk.nes");
+rom_test!(special, "instr_test-v5/rom_singles/16-special.nes");
 
 // instr_test-v5 — full suite (Mapper 1 / MMC1, 256 KB PRG-ROM)
-rom_test!(official_only, "cpu/official_only.nes");
+rom_test!(official_only, "instr_test-v5/official_only.nes");
 
 // cpu_interrupts_v2 — interrupt timing and sequencing
 rom_test!(
     cpu_interrupts_v2_cli_latency,
-    "cpu/cpu_interrupts_v2/rom_singles/1-cli_latency.nes"
+    "cpu_interrupts_v2/rom_singles/1-cli_latency.nes"
 );
 rom_test!(
     cpu_interrupts_v2_nmi_and_brk,
-    "cpu/cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes"
+    "cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes"
 );
 rom_test!(
     cpu_interrupts_v2_nmi_and_irq,
-    "cpu/cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes"
+    "cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes"
 );
 rom_test!(
     cpu_interrupts_v2_irq_and_dma,
-    "cpu/cpu_interrupts_v2/rom_singles/4-irq_and_dma.nes"
+    "cpu_interrupts_v2/rom_singles/4-irq_and_dma.nes"
 );
 rom_test!(
     cpu_interrupts_v2_branch_delays_irq,
-    "cpu/cpu_interrupts_v2/rom_singles/5-branch_delays_irq.nes"
+    "cpu_interrupts_v2/rom_singles/5-branch_delays_irq.nes"
 );
 rom_test!(
     cpu_interrupts_v2_all,
-    "cpu/cpu_interrupts_v2/cpu_interrupts.nes"
+    "cpu_interrupts_v2/cpu_interrupts.nes"
 );
 
 // instr_misc — instruction behaviour edge cases
 rom_test!(
     instr_misc_abs_x_wrap,
-    "cpu/instr_misc/rom_singles/01-abs_x_wrap.nes"
+    "instr_misc/rom_singles/01-abs_x_wrap.nes"
 );
 rom_test!(
     instr_misc_branch_wrap,
-    "cpu/instr_misc/rom_singles/02-branch_wrap.nes"
+    "instr_misc/rom_singles/02-branch_wrap.nes"
 );
 rom_test!(
     instr_misc_dummy_reads,
-    "cpu/instr_misc/rom_singles/03-dummy_reads.nes"
+    "instr_misc/rom_singles/03-dummy_reads.nes"
 );
 rom_test!(
     instr_misc_dummy_reads_apu,
-    "cpu/instr_misc/rom_singles/04-dummy_reads_apu.nes"
+    "instr_misc/rom_singles/04-dummy_reads_apu.nes"
 );
-rom_test!(instr_misc_all, "cpu/instr_misc/instr_misc.nes");
+rom_test!(instr_misc_all, "instr_misc/instr_misc.nes");
 
 // instr_timing — cycle-accurate instruction timing (Mapper 1 / MMC1)
-rom_test!(instr_timing, "cpu/instr_timing/instr_timing.nes");
+rom_test!(instr_timing, "instr_timing/instr_timing.nes");
+
+// --- Newly added suites below: report-only (see report_rom_test!) ---
+
+// instr_test-v3 — older instr_test vintage (Mapper 1 / MMC1 for the combined ROMs)
+report_rom_test!(
+    instr_test_v3_implied,
+    "instr_test-v3/rom_singles/01-implied.nes"
+);
+report_rom_test!(
+    instr_test_v3_immediate,
+    "instr_test-v3/rom_singles/02-immediate.nes"
+);
+report_rom_test!(
+    instr_test_v3_zero_page,
+    "instr_test-v3/rom_singles/03-zero_page.nes"
+);
+report_rom_test!(
+    instr_test_v3_zp_xy,
+    "instr_test-v3/rom_singles/04-zp_xy.nes"
+);
+report_rom_test!(
+    instr_test_v3_absolute,
+    "instr_test-v3/rom_singles/05-absolute.nes"
+);
+report_rom_test!(
+    instr_test_v3_abs_xy,
+    "instr_test-v3/rom_singles/06-abs_xy.nes"
+);
+report_rom_test!(
+    instr_test_v3_ind_x,
+    "instr_test-v3/rom_singles/07-ind_x.nes"
+);
+report_rom_test!(
+    instr_test_v3_ind_y,
+    "instr_test-v3/rom_singles/08-ind_y.nes"
+);
+report_rom_test!(
+    instr_test_v3_branches,
+    "instr_test-v3/rom_singles/09-branches.nes"
+);
+report_rom_test!(
+    instr_test_v3_stack,
+    "instr_test-v3/rom_singles/10-stack.nes"
+);
+report_rom_test!(
+    instr_test_v3_jmp_jsr,
+    "instr_test-v3/rom_singles/11-jmp_jsr.nes"
+);
+report_rom_test!(instr_test_v3_rts, "instr_test-v3/rom_singles/12-rts.nes");
+report_rom_test!(instr_test_v3_rti, "instr_test-v3/rom_singles/13-rti.nes");
+report_rom_test!(instr_test_v3_brk, "instr_test-v3/rom_singles/14-brk.nes");
+report_rom_test!(
+    instr_test_v3_special,
+    "instr_test-v3/rom_singles/15-special.nes"
+);
+report_rom_test!(
+    instr_test_v3_official_only,
+    "instr_test-v3/official_only.nes"
+);
+report_rom_test!(instr_test_v3_all_instrs, "instr_test-v3/all_instrs.nes");
+
+// nes_instr_test — another instr_test vintage, rom_singles only (no combined ROM)
+report_rom_test!(
+    nes_instr_test_implied,
+    "nes_instr_test/rom_singles/01-implied.nes"
+);
+report_rom_test!(
+    nes_instr_test_immediate,
+    "nes_instr_test/rom_singles/02-immediate.nes"
+);
+report_rom_test!(
+    nes_instr_test_zero_page,
+    "nes_instr_test/rom_singles/03-zero_page.nes"
+);
+report_rom_test!(
+    nes_instr_test_zp_xy,
+    "nes_instr_test/rom_singles/04-zp_xy.nes"
+);
+report_rom_test!(
+    nes_instr_test_absolute,
+    "nes_instr_test/rom_singles/05-absolute.nes"
+);
+report_rom_test!(
+    nes_instr_test_abs_xy,
+    "nes_instr_test/rom_singles/06-abs_xy.nes"
+);
+report_rom_test!(
+    nes_instr_test_ind_x,
+    "nes_instr_test/rom_singles/07-ind_x.nes"
+);
+report_rom_test!(
+    nes_instr_test_ind_y,
+    "nes_instr_test/rom_singles/08-ind_y.nes"
+);
+report_rom_test!(
+    nes_instr_test_branches,
+    "nes_instr_test/rom_singles/09-branches.nes"
+);
+report_rom_test!(
+    nes_instr_test_stack,
+    "nes_instr_test/rom_singles/10-stack.nes"
+);
+report_rom_test!(
+    nes_instr_test_special,
+    "nes_instr_test/rom_singles/11-special.nes"
+);
+
+// cpu_dummy_writes — RMW double-write behavior (OAM and PPU-memory variants)
+report_rom_test!(
+    cpu_dummy_writes_oam,
+    "cpu_dummy_writes/cpu_dummy_writes_oam.nes"
+);
+report_rom_test!(
+    cpu_dummy_writes_ppumem,
+    "cpu_dummy_writes/cpu_dummy_writes_ppumem.nes"
+);
+
+// cpu_exec_space — CPU execution from I/O address space
+report_rom_test!(
+    cpu_exec_space_apu,
+    "cpu_exec_space/test_cpu_exec_space_apu.nes"
+);
+report_rom_test!(
+    cpu_exec_space_ppuio,
+    "cpu_exec_space/test_cpu_exec_space_ppuio.nes"
+);
+
+// cpu_reset — register/RAM state across a reset
+report_rom_test!(cpu_reset_ram_after_reset, "cpu_reset/ram_after_reset.nes");
+report_rom_test!(cpu_reset_registers, "cpu_reset/registers.nes");
+
+// oam_read / oam_stress — OAM read/DMA edge cases
+report_rom_test!(oam_read, "oam_read/oam_read.nes");
+report_rom_test!(oam_stress, "oam_stress/oam_stress.nes");
+
+// ppu_open_bus — PPU register open-bus behavior
+report_rom_test!(ppu_open_bus, "ppu_open_bus/ppu_open_bus.nes");
+
+// ppu_vbl_nmi — VBL/NMI timing (Mapper 1 for the combined ROM)
+report_rom_test!(
+    ppu_vbl_nmi_vbl_basics,
+    "ppu_vbl_nmi/rom_singles/01-vbl_basics.nes"
+);
+report_rom_test!(
+    ppu_vbl_nmi_vbl_set_time,
+    "ppu_vbl_nmi/rom_singles/02-vbl_set_time.nes"
+);
+report_rom_test!(
+    ppu_vbl_nmi_vbl_clear_time,
+    "ppu_vbl_nmi/rom_singles/03-vbl_clear_time.nes"
+);
+report_rom_test!(
+    ppu_vbl_nmi_nmi_control,
+    "ppu_vbl_nmi/rom_singles/04-nmi_control.nes"
+);
+report_rom_test!(
+    ppu_vbl_nmi_nmi_timing,
+    "ppu_vbl_nmi/rom_singles/05-nmi_timing.nes"
+);
+report_rom_test!(
+    ppu_vbl_nmi_suppression,
+    "ppu_vbl_nmi/rom_singles/06-suppression.nes"
+);
+report_rom_test!(
+    ppu_vbl_nmi_nmi_on_timing,
+    "ppu_vbl_nmi/rom_singles/07-nmi_on_timing.nes"
+);
+report_rom_test!(
+    ppu_vbl_nmi_nmi_off_timing,
+    "ppu_vbl_nmi/rom_singles/08-nmi_off_timing.nes"
+);
+report_rom_test!(
+    ppu_vbl_nmi_even_odd_frames,
+    "ppu_vbl_nmi/rom_singles/09-even_odd_frames.nes"
+);
+report_rom_test!(
+    ppu_vbl_nmi_even_odd_timing,
+    "ppu_vbl_nmi/rom_singles/10-even_odd_timing.nes"
+);
+report_rom_test!(ppu_vbl_nmi_all, "ppu_vbl_nmi/ppu_vbl_nmi.nes");
 
 // Diagnostic: run test 2 with NMI cycle tracing. Not in CI; run manually with:
 //   cargo test nmi_and_brk_trace -- --nocapture 2>&1 | head -40
 #[test]
 #[ignore]
 fn nmi_and_brk_trace() {
-    run_rom_impl("cpu/cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes", true);
+    run_rom_impl("cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes", true);
 }
 
 // Diagnostic: trace every CRC update call ($E5AE) with the byte being fed.
@@ -203,7 +486,7 @@ fn nmi_and_brk_trace() {
 #[test]
 #[ignore]
 fn nmi_brk_crc_trace() {
-    let data = load_rom("cpu/cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes");
+    let data = load_rom("cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes");
     let cartridge = crate::cartridge::Cartridge::from_ines(&data).unwrap();
     let mut bus = Bus::new();
     bus.insert_cartridge(cartridge);
@@ -277,7 +560,7 @@ fn nmi_brk_crc_trace() {
 #[test]
 #[ignore]
 fn nmi_brk_disasm() {
-    let data = load_rom("cpu/cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes");
+    let data = load_rom("cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes");
     let cartridge = crate::cartridge::Cartridge::from_ines(&data).unwrap();
     let mut bus = Bus::new();
     bus.insert_cartridge(cartridge);
@@ -300,7 +583,7 @@ fn nmi_brk_disasm() {
 #[test]
 #[ignore]
 fn nmi_brk_row_trace() {
-    let data = load_rom("cpu/cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes");
+    let data = load_rom("cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes");
     let cartridge = crate::cartridge::Cartridge::from_ines(&data).unwrap();
     let mut bus = Bus::new();
     bus.insert_cartridge(cartridge);
@@ -437,7 +720,7 @@ fn nmi_brk_row_trace() {
 #[test]
 #[ignore]
 fn nmi_brk_micro_trace() {
-    let data = load_rom("cpu/cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes");
+    let data = load_rom("cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes");
     let cartridge = crate::cartridge::Cartridge::from_ines(&data).unwrap();
     let mut bus = Bus::new();
     bus.insert_cartridge(cartridge);
@@ -569,7 +852,7 @@ fn nmi_brk_micro_trace() {
 #[test]
 #[ignore]
 fn nmi_irq_generic_trace() {
-    let data = load_rom("cpu/cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes");
+    let data = load_rom("cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes");
     let cartridge = crate::cartridge::Cartridge::from_ines(&data).unwrap();
     let mut bus = Bus::new();
     bus.insert_cartridge(cartridge);
@@ -670,7 +953,7 @@ fn nmi_irq_generic_trace() {
 #[test]
 #[ignore]
 fn nmi_irq_row_trace() {
-    let data = load_rom("cpu/cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes");
+    let data = load_rom("cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes");
     let cartridge = crate::cartridge::Cartridge::from_ines(&data).unwrap();
     let mut bus = Bus::new();
     bus.insert_cartridge(cartridge);
@@ -788,7 +1071,7 @@ fn nmi_irq_row_trace() {
 #[test]
 #[ignore]
 fn nmi_irq_stage_trace() {
-    let data = load_rom("cpu/cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes");
+    let data = load_rom("cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes");
     let cartridge = crate::cartridge::Cartridge::from_ines(&data).unwrap();
     let mut bus = Bus::new();
     bus.insert_cartridge(cartridge);
@@ -1196,7 +1479,7 @@ fn sweep_single_2002_read() {
 #[test]
 #[ignore]
 fn verify_sync_vbl_contract() {
-    let data = load_rom("cpu/cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes");
+    let data = load_rom("cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes");
 
     fn run_sync_vbl(data: &[u8], pre_cycles: u64) -> (bool, bool, u64) {
         let cartridge = crate::cartridge::Cartridge::from_ines(data).unwrap();
@@ -1458,7 +1741,7 @@ fn nmi_irq_row0_arbitration_trace() {
         }
     }
 
-    let data = load_rom("cpu/cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes");
+    let data = load_rom("cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes");
     run(&data, false, 0);
     eprintln!();
     run(&data, false, 1);
@@ -1475,7 +1758,7 @@ fn nmi_irq_row0_arbitration_trace() {
 #[test]
 #[ignore]
 fn nmi_irq_all_rows_summary() {
-    let data = load_rom("cpu/cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes");
+    let data = load_rom("cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes");
     let cartridge = crate::cartridge::Cartridge::from_ines(&data).unwrap();
     let mut bus = Bus::new();
     bus.insert_cartridge(cartridge);

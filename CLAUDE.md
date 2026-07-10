@@ -11,7 +11,7 @@ A NES emulator written in Rust. The CPU (full 6502 instruction set including uno
 ```bash
 cargo build          # compile
 cargo run <rom.nes>  # run a ROM
-cargo test           # run all tests (includes blargg ROM tests in tests/roms/cpu/ and tests/roms/ppu/)
+cargo test           # run all tests (includes blargg ROM tests in tests/roms/)
 cargo test <name>    # run a single test by name
 cargo clippy         # lint
 cargo fmt            # format
@@ -22,7 +22,7 @@ cargo fmt            # format
 ## Module structure
 
 - **`src/cpu/mod.rs`** — `Cpu` struct, register file, micro-op queue, `tick()` entry point. The `Bus` trait (`fn read(&mut self, u16) -> u8` / `fn write(&mut self, u16, u8)`) is defined here. `tick()` executes exactly one micro-op from the queue; when the queue empties a new instruction is decoded (via `RunInstruction`) or an interrupt is serviced. IRQ is level-triggered: `irq_pending` is re-asserted each call to `tick_apu` when the APU line is high, so masked IRQs cannot accumulate.
-- **`src/cpu/instructions.rs`** — `execute()` dispatcher; one match arm per opcode including all unofficial opcodes (LAX, SAX, DCP, ISB, SLO, SRE, RLA, RRA, SHA, SHX, SHY, TAS, ANC, ALR, ARR, XAA, LAS).
+- **`src/cpu/instructions.rs`** — `execute()` dispatcher; one match arm per opcode including all unofficial opcodes (LAX, SAX, DCP, ISB, SLO, SRE, RLA, RRA, SHA, SHX, SHY, TAS, ANC, ALR, ARR, XAA, LAS, KIL/JAM).
 - **`src/system.rs`** — `SystemClock`: the shared per-tick stepping loop (CPU tick or DMA stall cycle, then per-cycle PPU/APU ticking) carrying the blargg-verified interrupt-delivery rules: deferred NMI edges (an edge on a tick's last cycle is delivered one tick later), last-cycle IRQ flagging (`Cpu::irq_on_last_cycle`, needed for the taken-branch last-clock ignore), and DMA interrupt deferral (interrupts first asserting during a DMA stall are delivered at DMA end with one dispatch poll suppressed). Used by BOTH the real run loop (`App::step_frame`) and the ROM test harness — change it in one place only.
 - **`src/bus.rs`** — `Bus` struct implements `CpuBus`. Wires RAM, PPU, APU, controllers, and cartridge into the 16-bit address space. Exposes `bus.ppu` and `bus.apu` publicly. `tick_apu(cycles)` advances the APU and returns the current IRQ line level.
 - **`src/apu/mod.rs`** — `Apu` struct: orchestrates all five channels, the NTSC frame counter (4-step / 5-step modes), and the audio mixer. `tick(cpu_cycles)` drives the frame counter and channel timers, then returns `take_irq()` which yields the live IRQ line level (`frame_irq_flag && !irq_inhibit || dmc.irq_flag`) without consuming anything. Reading `$4015` clears `frame_irq_flag`; writing `$4017` with bit 6 set (irq_inhibit) also clears it.
@@ -42,6 +42,8 @@ cargo fmt            # format
 - **`src/tests/cpu.rs`** — CPU unit tests.
 - **`src/tests/roms.rs`** — Blargg CPU ROM test harness. Polls $6000/$6001–$6003 for test completion; steps the machine via the shared `SystemClock` (`src/system.rs`), which carries all the per-cycle interrupt-delivery rules. Note: the `#[ignore]`d diagnostic tracers in this file keep their own private copies of older run loops and can go stale — trust `SystemClock`, not them. Runs the `instr_test-v5` suite (17 tests, all passing), `instr_timing` (passing), all 5 `instr_misc` tests (passing), plus `cpu_interrupts_v2` (all 6 passing).
 - **`src/tests/ppu_roms.rs`** — Blargg PPU ROM test harness. Runs each ROM for 300 frames (~5 s NES time), then reads the result code from the nametable (the ROMs render `$XX` in ASCII tiles at nametable-0 row 5, col 2–4) and looks up its meaning from the per-ROM table in the README. On failure the panic message includes the result code and its description. Also saves a PNG screenshot to `tests/screenshots/ppu/output/` and pixel-compares against a golden in `tests/screenshots/ppu/golden/` if one exists. To bless a new golden: `cp tests/screenshots/ppu/output/<name>.png tests/screenshots/ppu/golden/<name>.png`.
+- **`src/tests/mapper_roms.rs`** — asserts `Cartridge::from_ines` fails cleanly with `UnsupportedMapper` for ROM suites that need mapper 3 (CNROM) or mapper 4 (MMC3), neither of which is implemented yet (`cpu_dummy_reads`, `ppu_read_buffer`, `mmc3_test`, `mmc3_test_2`, `mmc3_irq_tests`).
+- **`src/tests/text_console_roms.rs`** — report-only harness for blargg ROM suites that print `PASSED`/`FAILED #<n>`/`Error <n>` text directly into PPU nametable 0 instead of using the `$6000` protocol (`vbl_nmi_timing`, `sprite_overflow_tests`, `branch_timing_tests`, `cpu_timing_test6`, `blargg_nes_cpu_test5`). Never asserts the ROM's own verdict — only a panic or an unrecognized result marker fails the test.
 - **`docs/bus.md`** — NES address map and bus design notes.
 - **`docs/cpu_instructions.md`** — 6502 instruction reference (official opcodes, addressing modes, cycle counts).
 - **`docs/cpu_interrupts.md`** — NMI/IRQ/BRK dispatch, the micro-op interrupt-service sequence, NMI hijacking BRK or an in-progress IRQ, and the interrupt-polling-granularity (deferred-edge) fix. Start here before touching interrupt timing; links to the full investigation log for anything not yet resolved.
@@ -64,9 +66,17 @@ cargo fmt            # format
 
 ```
 tests/roms/
-  cpu/                      # blargg CPU test ROMs (instr_test-v5, instr_misc, instr_timing, cpu_interrupts_v2)
-  ppu/
-    blargg_ppu_tests_2005.09.15b/   # blargg PPU test ROMs (palette_ram, sprite_ram, vbl_clear_time, vram_access, power_up_palette) + source/ (assembly sources)
+  <suite-name>/              # one directory per blargg test suite, e.g.:
+    instr_test-v5/, instr_test-v3/, nes_instr_test/, instr_misc/, instr_timing/,
+    cpu_interrupts_v2/, cpu_dummy_writes/, cpu_exec_space/, cpu_reset/,
+    oam_read/, oam_stress/, ppu_open_bus/, ppu_vbl_nmi/,
+    blargg_ppu_tests_2005.09.15b/, sprite_hit_tests_2005.10.05/,
+    vbl_nmi_timing/, sprite_overflow_tests/, branch_timing_tests/,
+    cpu_timing_test6/, blargg_nes_cpu_test5/,
+    cpu_dummy_reads/, ppu_read_buffer/, mmc3_test/, mmc3_test_2/, mmc3_irq_tests/
+      # (last 5 need mapper 3/4, unsupported — see mapper_roms.rs)
+    apu_mixer/, apu_mixer_recordings/, apu_reset/, apu_test/, blargg_apu_2005.07.30/
+      # APU suites — not wired into any test harness yet
 tests/screenshots/
   ppu/
     output/                 # generated each test run (gitignored)
@@ -101,6 +111,8 @@ These are confirmed missing features tied to failing blargg ROM tests. The proje
 ### Remaining failures
 
 None on the CPU side. The blargg-verified per-cycle interrupt-delivery behavior lives in `SystemClock` (`src/system.rs`), shared by the real run loop (`App::step_frame`) and the ROM test harness — the previously-noted harness/main.rs divergence is resolved.
+
+- **`blargg_nes_cpu_test5/cpu.nes` (06-abs_xy)** — reports "Error 1" on unofficial opcodes `9C`/`9E` (SHY/SHX). Newly discovered and unconfirmed; SHY/SHX already pass `instr_test-v5/07-abs_xy`, so the discrepancy is in some untested case. Report-only test (doesn't fail `cargo test`); tracked here so it isn't lost.
 
 ### Failing PPU tests
 

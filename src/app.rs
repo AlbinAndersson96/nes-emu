@@ -202,7 +202,7 @@ mod tests {
     fn test_rom_bytes() -> Vec<u8> {
         std::fs::read(
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/roms/cpu/01-basics.nes"),
+                .join("tests/roms/instr_test-v5/rom_singles/01-basics.nes"),
         )
         .expect("fixture ROM must exist")
     }
