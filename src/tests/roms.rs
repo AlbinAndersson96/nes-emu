@@ -123,6 +123,61 @@ macro_rules! rom_test {
     };
 }
 
+/// Like `run_rom`, but never asserts the ROM's own pass/fail verdict — only a
+/// panic or a MAX_CYCLES timeout fails the test. Used for suites we haven't
+/// verified the emulator against yet; the ROM's status/text is still printed
+/// so `cargo test -- --nocapture` shows real results.
+fn report_rom(filename: &str) {
+    let data = load_rom(filename);
+    let cartridge = Cartridge::from_ines(&data)
+        .unwrap_or_else(|e| panic!("failed to parse {}: {}", filename, e));
+    let mut bus = Bus::new();
+    bus.insert_cartridge(cartridge);
+    let mut cpu = Cpu::new();
+    cpu.reset(&mut bus);
+    let _ = bus.tick_ppu(7);
+    let _ = bus.tick_apu(8);
+
+    let mut total_cycles: u64 = 0;
+    let mut clock = SystemClock::new();
+
+    loop {
+        let sig_valid =
+            bus.read(0x6001) == SIG[0] && bus.read(0x6002) == SIG[1] && bus.read(0x6003) == SIG[2];
+
+        if sig_valid {
+            let status = bus.read(0x6000);
+            if status < 0x80 {
+                let text = read_output(&mut bus);
+                print_raw(&format!(
+                    "[{filename}] status={:#04x} text={}",
+                    status,
+                    text.trim()
+                ));
+                return;
+            }
+        }
+
+        if total_cycles >= MAX_CYCLES {
+            let text = read_output(&mut bus);
+            print_raw(text.trim());
+            panic!("{filename}: timed out after {} cycles", total_cycles);
+        }
+
+        let result = clock.step(&mut cpu, &mut bus);
+        total_cycles += result.cycles;
+    }
+}
+
+macro_rules! report_rom_test {
+    ($name:ident, $file:expr) => {
+        #[test]
+        fn $name() {
+            report_rom($file);
+        }
+    };
+}
+
 // All ROM test files below were written by Shay Green <gblargg@gmail.com>.
 
 // instr_test-v5/rom_singles — one ROM per addressing mode / instruction group
@@ -193,6 +248,186 @@ rom_test!(instr_misc_all, "instr_misc/instr_misc.nes");
 
 // instr_timing — cycle-accurate instruction timing (Mapper 1 / MMC1)
 rom_test!(instr_timing, "instr_timing/instr_timing.nes");
+
+// --- Newly added suites below: report-only (see report_rom_test!) ---
+
+// instr_test-v3 — older instr_test vintage (Mapper 1 / MMC1 for the combined ROMs)
+report_rom_test!(
+    instr_test_v3_implied,
+    "instr_test-v3/rom_singles/01-implied.nes"
+);
+report_rom_test!(
+    instr_test_v3_immediate,
+    "instr_test-v3/rom_singles/02-immediate.nes"
+);
+report_rom_test!(
+    instr_test_v3_zero_page,
+    "instr_test-v3/rom_singles/03-zero_page.nes"
+);
+report_rom_test!(
+    instr_test_v3_zp_xy,
+    "instr_test-v3/rom_singles/04-zp_xy.nes"
+);
+report_rom_test!(
+    instr_test_v3_absolute,
+    "instr_test-v3/rom_singles/05-absolute.nes"
+);
+report_rom_test!(
+    instr_test_v3_abs_xy,
+    "instr_test-v3/rom_singles/06-abs_xy.nes"
+);
+report_rom_test!(
+    instr_test_v3_ind_x,
+    "instr_test-v3/rom_singles/07-ind_x.nes"
+);
+report_rom_test!(
+    instr_test_v3_ind_y,
+    "instr_test-v3/rom_singles/08-ind_y.nes"
+);
+report_rom_test!(
+    instr_test_v3_branches,
+    "instr_test-v3/rom_singles/09-branches.nes"
+);
+report_rom_test!(
+    instr_test_v3_stack,
+    "instr_test-v3/rom_singles/10-stack.nes"
+);
+report_rom_test!(
+    instr_test_v3_jmp_jsr,
+    "instr_test-v3/rom_singles/11-jmp_jsr.nes"
+);
+report_rom_test!(instr_test_v3_rts, "instr_test-v3/rom_singles/12-rts.nes");
+report_rom_test!(instr_test_v3_rti, "instr_test-v3/rom_singles/13-rti.nes");
+report_rom_test!(instr_test_v3_brk, "instr_test-v3/rom_singles/14-brk.nes");
+report_rom_test!(
+    instr_test_v3_special,
+    "instr_test-v3/rom_singles/15-special.nes"
+);
+report_rom_test!(
+    instr_test_v3_official_only,
+    "instr_test-v3/official_only.nes"
+);
+report_rom_test!(instr_test_v3_all_instrs, "instr_test-v3/all_instrs.nes");
+
+// nes_instr_test — another instr_test vintage, rom_singles only (no combined ROM)
+report_rom_test!(
+    nes_instr_test_implied,
+    "nes_instr_test/rom_singles/01-implied.nes"
+);
+report_rom_test!(
+    nes_instr_test_immediate,
+    "nes_instr_test/rom_singles/02-immediate.nes"
+);
+report_rom_test!(
+    nes_instr_test_zero_page,
+    "nes_instr_test/rom_singles/03-zero_page.nes"
+);
+report_rom_test!(
+    nes_instr_test_zp_xy,
+    "nes_instr_test/rom_singles/04-zp_xy.nes"
+);
+report_rom_test!(
+    nes_instr_test_absolute,
+    "nes_instr_test/rom_singles/05-absolute.nes"
+);
+report_rom_test!(
+    nes_instr_test_abs_xy,
+    "nes_instr_test/rom_singles/06-abs_xy.nes"
+);
+report_rom_test!(
+    nes_instr_test_ind_x,
+    "nes_instr_test/rom_singles/07-ind_x.nes"
+);
+report_rom_test!(
+    nes_instr_test_ind_y,
+    "nes_instr_test/rom_singles/08-ind_y.nes"
+);
+report_rom_test!(
+    nes_instr_test_branches,
+    "nes_instr_test/rom_singles/09-branches.nes"
+);
+report_rom_test!(
+    nes_instr_test_stack,
+    "nes_instr_test/rom_singles/10-stack.nes"
+);
+report_rom_test!(
+    nes_instr_test_special,
+    "nes_instr_test/rom_singles/11-special.nes"
+);
+
+// cpu_dummy_writes — RMW double-write behavior (OAM and PPU-memory variants)
+report_rom_test!(
+    cpu_dummy_writes_oam,
+    "cpu_dummy_writes/cpu_dummy_writes_oam.nes"
+);
+report_rom_test!(
+    cpu_dummy_writes_ppumem,
+    "cpu_dummy_writes/cpu_dummy_writes_ppumem.nes"
+);
+
+// cpu_exec_space — CPU execution from I/O address space
+report_rom_test!(
+    cpu_exec_space_apu,
+    "cpu_exec_space/test_cpu_exec_space_apu.nes"
+);
+report_rom_test!(
+    cpu_exec_space_ppuio,
+    "cpu_exec_space/test_cpu_exec_space_ppuio.nes"
+);
+
+// cpu_reset — register/RAM state across a reset
+report_rom_test!(cpu_reset_ram_after_reset, "cpu_reset/ram_after_reset.nes");
+report_rom_test!(cpu_reset_registers, "cpu_reset/registers.nes");
+
+// oam_read / oam_stress — OAM read/DMA edge cases
+report_rom_test!(oam_read, "oam_read/oam_read.nes");
+report_rom_test!(oam_stress, "oam_stress/oam_stress.nes");
+
+// ppu_open_bus — PPU register open-bus behavior
+report_rom_test!(ppu_open_bus, "ppu_open_bus/ppu_open_bus.nes");
+
+// ppu_vbl_nmi — VBL/NMI timing (Mapper 1 for the combined ROM)
+report_rom_test!(
+    ppu_vbl_nmi_vbl_basics,
+    "ppu_vbl_nmi/rom_singles/01-vbl_basics.nes"
+);
+report_rom_test!(
+    ppu_vbl_nmi_vbl_set_time,
+    "ppu_vbl_nmi/rom_singles/02-vbl_set_time.nes"
+);
+report_rom_test!(
+    ppu_vbl_nmi_vbl_clear_time,
+    "ppu_vbl_nmi/rom_singles/03-vbl_clear_time.nes"
+);
+report_rom_test!(
+    ppu_vbl_nmi_nmi_control,
+    "ppu_vbl_nmi/rom_singles/04-nmi_control.nes"
+);
+report_rom_test!(
+    ppu_vbl_nmi_nmi_timing,
+    "ppu_vbl_nmi/rom_singles/05-nmi_timing.nes"
+);
+report_rom_test!(
+    ppu_vbl_nmi_suppression,
+    "ppu_vbl_nmi/rom_singles/06-suppression.nes"
+);
+report_rom_test!(
+    ppu_vbl_nmi_nmi_on_timing,
+    "ppu_vbl_nmi/rom_singles/07-nmi_on_timing.nes"
+);
+report_rom_test!(
+    ppu_vbl_nmi_nmi_off_timing,
+    "ppu_vbl_nmi/rom_singles/08-nmi_off_timing.nes"
+);
+report_rom_test!(
+    ppu_vbl_nmi_even_odd_frames,
+    "ppu_vbl_nmi/rom_singles/09-even_odd_frames.nes"
+);
+report_rom_test!(
+    ppu_vbl_nmi_even_odd_timing,
+    "ppu_vbl_nmi/rom_singles/10-even_odd_timing.nes"
+);
+report_rom_test!(ppu_vbl_nmi_all, "ppu_vbl_nmi/ppu_vbl_nmi.nes");
 
 // Diagnostic: run test 2 with NMI cycle tracing. Not in CI; run manually with:
 //   cargo test nmi_and_brk_trace -- --nocapture 2>&1 | head -40
