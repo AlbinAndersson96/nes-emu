@@ -30,7 +30,7 @@ fn load_rom(name: &str) -> Vec<u8> {
         .join("tests/roms")
         .join(name);
     std::fs::read(&path)
-        .unwrap_or_else(|_| panic!("ROM not found: {} — place it in tests/roms/cpu/ (or the appropriate subsystem subfolder)", path.display()))
+        .unwrap_or_else(|_| panic!("ROM not found: {} — place it in tests/roms/<suite-name>/", path.display()))
 }
 
 fn read_output(bus: &mut Bus) -> String {
@@ -122,80 +122,80 @@ macro_rules! rom_test {
 // All ROM test files below were written by Shay Green <gblargg@gmail.com>.
 
 // instr_test-v5/rom_singles — one ROM per addressing mode / instruction group
-rom_test!(basics, "cpu/01-basics.nes");
-rom_test!(implied, "cpu/02-implied.nes");
-rom_test!(immediate, "cpu/03-immediate.nes");
-rom_test!(zero_page, "cpu/04-zero_page.nes");
-rom_test!(zp_xy, "cpu/05-zp_xy.nes");
-rom_test!(absolute, "cpu/06-absolute.nes");
-rom_test!(abs_xy, "cpu/07-abs_xy.nes");
-rom_test!(ind_x, "cpu/08-ind_x.nes");
-rom_test!(ind_y, "cpu/09-ind_y.nes");
-rom_test!(branches, "cpu/10-branches.nes");
-rom_test!(stack, "cpu/11-stack.nes");
-rom_test!(jmp_jsr, "cpu/12-jmp_jsr.nes");
-rom_test!(rts, "cpu/13-rts.nes");
-rom_test!(rti, "cpu/14-rti.nes");
-rom_test!(brk, "cpu/15-brk.nes");
-rom_test!(special, "cpu/16-special.nes");
+rom_test!(basics, "instr_test-v5/rom_singles/01-basics.nes");
+rom_test!(implied, "instr_test-v5/rom_singles/02-implied.nes");
+rom_test!(immediate, "instr_test-v5/rom_singles/03-immediate.nes");
+rom_test!(zero_page, "instr_test-v5/rom_singles/04-zero_page.nes");
+rom_test!(zp_xy, "instr_test-v5/rom_singles/05-zp_xy.nes");
+rom_test!(absolute, "instr_test-v5/rom_singles/06-absolute.nes");
+rom_test!(abs_xy, "instr_test-v5/rom_singles/07-abs_xy.nes");
+rom_test!(ind_x, "instr_test-v5/rom_singles/08-ind_x.nes");
+rom_test!(ind_y, "instr_test-v5/rom_singles/09-ind_y.nes");
+rom_test!(branches, "instr_test-v5/rom_singles/10-branches.nes");
+rom_test!(stack, "instr_test-v5/rom_singles/11-stack.nes");
+rom_test!(jmp_jsr, "instr_test-v5/rom_singles/12-jmp_jsr.nes");
+rom_test!(rts, "instr_test-v5/rom_singles/13-rts.nes");
+rom_test!(rti, "instr_test-v5/rom_singles/14-rti.nes");
+rom_test!(brk, "instr_test-v5/rom_singles/15-brk.nes");
+rom_test!(special, "instr_test-v5/rom_singles/16-special.nes");
 
 // instr_test-v5 — full suite (Mapper 1 / MMC1, 256 KB PRG-ROM)
-rom_test!(official_only, "cpu/official_only.nes");
+rom_test!(official_only, "instr_test-v5/official_only.nes");
 
 // cpu_interrupts_v2 — interrupt timing and sequencing
 rom_test!(
     cpu_interrupts_v2_cli_latency,
-    "cpu/cpu_interrupts_v2/rom_singles/1-cli_latency.nes"
+    "cpu_interrupts_v2/rom_singles/1-cli_latency.nes"
 );
 rom_test!(
     cpu_interrupts_v2_nmi_and_brk,
-    "cpu/cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes"
+    "cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes"
 );
 rom_test!(
     cpu_interrupts_v2_nmi_and_irq,
-    "cpu/cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes"
+    "cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes"
 );
 rom_test!(
     cpu_interrupts_v2_irq_and_dma,
-    "cpu/cpu_interrupts_v2/rom_singles/4-irq_and_dma.nes"
+    "cpu_interrupts_v2/rom_singles/4-irq_and_dma.nes"
 );
 rom_test!(
     cpu_interrupts_v2_branch_delays_irq,
-    "cpu/cpu_interrupts_v2/rom_singles/5-branch_delays_irq.nes"
+    "cpu_interrupts_v2/rom_singles/5-branch_delays_irq.nes"
 );
 rom_test!(
     cpu_interrupts_v2_all,
-    "cpu/cpu_interrupts_v2/cpu_interrupts.nes"
+    "cpu_interrupts_v2/cpu_interrupts.nes"
 );
 
 // instr_misc — instruction behaviour edge cases
 rom_test!(
     instr_misc_abs_x_wrap,
-    "cpu/instr_misc/rom_singles/01-abs_x_wrap.nes"
+    "instr_misc/rom_singles/01-abs_x_wrap.nes"
 );
 rom_test!(
     instr_misc_branch_wrap,
-    "cpu/instr_misc/rom_singles/02-branch_wrap.nes"
+    "instr_misc/rom_singles/02-branch_wrap.nes"
 );
 rom_test!(
     instr_misc_dummy_reads,
-    "cpu/instr_misc/rom_singles/03-dummy_reads.nes"
+    "instr_misc/rom_singles/03-dummy_reads.nes"
 );
 rom_test!(
     instr_misc_dummy_reads_apu,
-    "cpu/instr_misc/rom_singles/04-dummy_reads_apu.nes"
+    "instr_misc/rom_singles/04-dummy_reads_apu.nes"
 );
-rom_test!(instr_misc_all, "cpu/instr_misc/instr_misc.nes");
+rom_test!(instr_misc_all, "instr_misc/instr_misc.nes");
 
 // instr_timing — cycle-accurate instruction timing (Mapper 1 / MMC1)
-rom_test!(instr_timing, "cpu/instr_timing/instr_timing.nes");
+rom_test!(instr_timing, "instr_timing/instr_timing.nes");
 
 // Diagnostic: run test 2 with NMI cycle tracing. Not in CI; run manually with:
 //   cargo test nmi_and_brk_trace -- --nocapture 2>&1 | head -40
 #[test]
 #[ignore]
 fn nmi_and_brk_trace() {
-    run_rom_impl("cpu/cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes", true);
+    run_rom_impl("cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes", true);
 }
 
 // Diagnostic: trace every CRC update call ($E5AE) with the byte being fed.
@@ -203,7 +203,7 @@ fn nmi_and_brk_trace() {
 #[test]
 #[ignore]
 fn nmi_brk_crc_trace() {
-    let data = load_rom("cpu/cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes");
+    let data = load_rom("cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes");
     let cartridge = crate::cartridge::Cartridge::from_ines(&data).unwrap();
     let mut bus = Bus::new();
     bus.insert_cartridge(cartridge);
@@ -277,7 +277,7 @@ fn nmi_brk_crc_trace() {
 #[test]
 #[ignore]
 fn nmi_brk_disasm() {
-    let data = load_rom("cpu/cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes");
+    let data = load_rom("cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes");
     let cartridge = crate::cartridge::Cartridge::from_ines(&data).unwrap();
     let mut bus = Bus::new();
     bus.insert_cartridge(cartridge);
@@ -300,7 +300,7 @@ fn nmi_brk_disasm() {
 #[test]
 #[ignore]
 fn nmi_brk_row_trace() {
-    let data = load_rom("cpu/cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes");
+    let data = load_rom("cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes");
     let cartridge = crate::cartridge::Cartridge::from_ines(&data).unwrap();
     let mut bus = Bus::new();
     bus.insert_cartridge(cartridge);
@@ -437,7 +437,7 @@ fn nmi_brk_row_trace() {
 #[test]
 #[ignore]
 fn nmi_brk_micro_trace() {
-    let data = load_rom("cpu/cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes");
+    let data = load_rom("cpu_interrupts_v2/rom_singles/2-nmi_and_brk.nes");
     let cartridge = crate::cartridge::Cartridge::from_ines(&data).unwrap();
     let mut bus = Bus::new();
     bus.insert_cartridge(cartridge);
@@ -569,7 +569,7 @@ fn nmi_brk_micro_trace() {
 #[test]
 #[ignore]
 fn nmi_irq_generic_trace() {
-    let data = load_rom("cpu/cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes");
+    let data = load_rom("cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes");
     let cartridge = crate::cartridge::Cartridge::from_ines(&data).unwrap();
     let mut bus = Bus::new();
     bus.insert_cartridge(cartridge);
@@ -670,7 +670,7 @@ fn nmi_irq_generic_trace() {
 #[test]
 #[ignore]
 fn nmi_irq_row_trace() {
-    let data = load_rom("cpu/cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes");
+    let data = load_rom("cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes");
     let cartridge = crate::cartridge::Cartridge::from_ines(&data).unwrap();
     let mut bus = Bus::new();
     bus.insert_cartridge(cartridge);
@@ -788,7 +788,7 @@ fn nmi_irq_row_trace() {
 #[test]
 #[ignore]
 fn nmi_irq_stage_trace() {
-    let data = load_rom("cpu/cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes");
+    let data = load_rom("cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes");
     let cartridge = crate::cartridge::Cartridge::from_ines(&data).unwrap();
     let mut bus = Bus::new();
     bus.insert_cartridge(cartridge);
@@ -1196,7 +1196,7 @@ fn sweep_single_2002_read() {
 #[test]
 #[ignore]
 fn verify_sync_vbl_contract() {
-    let data = load_rom("cpu/cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes");
+    let data = load_rom("cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes");
 
     fn run_sync_vbl(data: &[u8], pre_cycles: u64) -> (bool, bool, u64) {
         let cartridge = crate::cartridge::Cartridge::from_ines(data).unwrap();
@@ -1458,7 +1458,7 @@ fn nmi_irq_row0_arbitration_trace() {
         }
     }
 
-    let data = load_rom("cpu/cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes");
+    let data = load_rom("cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes");
     run(&data, false, 0);
     eprintln!();
     run(&data, false, 1);
@@ -1475,7 +1475,7 @@ fn nmi_irq_row0_arbitration_trace() {
 #[test]
 #[ignore]
 fn nmi_irq_all_rows_summary() {
-    let data = load_rom("cpu/cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes");
+    let data = load_rom("cpu_interrupts_v2/rom_singles/3-nmi_and_irq.nes");
     let cartridge = crate::cartridge::Cartridge::from_ines(&data).unwrap();
     let mut bus = Bus::new();
     bus.insert_cartridge(cartridge);
