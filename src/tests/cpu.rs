@@ -1221,3 +1221,33 @@ fn cycle_counts_rmw() {
         assert_eq!(cycles, expected, "program {:02X?}", program);
     }
 }
+
+// ---------------------------------------------------------------------------
+// warm_reset
+// ---------------------------------------------------------------------------
+
+#[test]
+fn warm_reset_leaves_axy_untouched_sets_i_decrements_sp_and_loads_vector() {
+    let (mut cpu, mut bus) = make();
+    // Reset vector $FFFC/$FFFD -> $1234.
+    bus.mem[0xFFFC] = 0x34;
+    bus.mem[0xFFFD] = 0x12;
+    // Arbitrary RAM byte, to confirm nothing is pushed to the stack.
+    bus.mem[0x0300] = 0xAB;
+
+    cpu.a = 0x11;
+    cpu.x = 0x22;
+    cpu.y = 0x33;
+    cpu.p = FLAG_U; // FLAG_I deliberately clear beforehand.
+    cpu.sp = 0xF0;
+
+    cpu.warm_reset(&mut bus);
+
+    assert_eq!(cpu.a, 0x11);
+    assert_eq!(cpu.x, 0x22);
+    assert_eq!(cpu.y, 0x33);
+    assert!(cpu.flag(FLAG_I));
+    assert_eq!(cpu.sp, 0xED); // 0xF0 - 3
+    assert_eq!(cpu.pc, 0x1234);
+    assert_eq!(bus.mem[0x0300], 0xAB); // untouched — nothing was pushed
+}

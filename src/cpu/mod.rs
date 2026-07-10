@@ -179,6 +179,20 @@ impl Cpu {
         self.cycles = 8;
     }
 
+    /// Simulates a real NES warm reset (the reset button) — unlike `reset`
+    /// (cold power-on), A/X/Y are left untouched: only the I flag is forced
+    /// set, SP is decremented by 3 (nothing is written to the stack), and PC
+    /// is refetched from the reset vector. `self.cycles` is left untouched —
+    /// the 7-cycle reset sequence itself must be accounted for by the caller
+    /// (advance PPU/APU by 7 cycles and add 7 to `cpu.cycles` / any cycle
+    /// budget), the same way callers already do for the initial `reset()` at
+    /// boot.
+    pub fn warm_reset(&mut self, bus: &mut dyn Bus) {
+        self.p |= FLAG_I;
+        self.sp = self.sp.wrapping_sub(3);
+        self.pc = self.read_u16(bus, 0xFFFC);
+    }
+
     pub(in crate::cpu) fn enqueue(&mut self, op: MicroOp) {
         debug_assert!(self.queue_len < 8, "micro-op queue overflow");
         self.queue[(self.queue_head as usize + self.queue_len as usize) % 8] = op;

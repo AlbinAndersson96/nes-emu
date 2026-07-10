@@ -141,20 +141,64 @@ fn report_rom(filename: &str) {
     let mut total_cycles: u64 = 0;
     let mut clock = SystemClock::new();
 
+    // Status $81 means "needs the reset button pressed, but delayed by at
+    // least 100 msec from now" (see tests/roms/cpu_reset/readme.txt) — about
+    // 190,000 CPU cycles at 1.789773 MHz, rounded up for safety margin.
+    // Tracks the cycle at which $81 was first observed in the current phase
+    // so a warm reset only fires once that delay has elapsed; the tracker is
+    // cleared whenever status isn't $81 (including right after a reset
+    // fires), so a later $81 phase gets its own fresh wait.
+    const RESET_DELAY_CYCLES: u64 = 190_000;
+    const MAX_RESETS: u32 = 8;
+    let mut reset_request_since: Option<u64> = None;
+    let mut reset_count: u32 = 0;
+
     loop {
         let sig_valid =
             bus.read(0x6001) == SIG[0] && bus.read(0x6002) == SIG[1] && bus.read(0x6003) == SIG[2];
 
         if sig_valid {
             let status = bus.read(0x6000);
-            if status < 0x80 {
-                let text = read_output(&mut bus);
-                print_raw(&format!(
-                    "[{filename}] status={:#04x} text={}",
-                    status,
-                    text.trim()
-                ));
-                return;
+            if status == 0x81 {
+                let since = *reset_request_since.get_or_insert(total_cycles);
+                // Only fire the reset at an instruction boundary (empty
+                // micro-op queue) — `clock.step()` below ticks exactly one
+                // micro-op at a time, so this loop can observe $81 mid
+                // instruction; calling `warm_reset` there would change PC
+                // out from under an in-flight micro-op sequence and corrupt
+                // execution. The 100ms+ delay window gives ample slack to
+                // wait the handful of extra cycles until the current
+                // instruction retires.
+                let (_, _, queue_len) = cpu.debug_nmi_state();
+                if total_cycles.saturating_sub(since) >= RESET_DELAY_CYCLES && queue_len == 0 {
+                    reset_count += 1;
+                    if reset_count > MAX_RESETS {
+                        let text = read_output(&mut bus);
+                        print_raw(text.trim());
+                        panic!(
+                            "{filename}: still requesting reset (status=$81) after {} warm resets",
+                            MAX_RESETS
+                        );
+                    }
+                    cpu.warm_reset(&mut bus);
+                    let _ = bus.tick_ppu(7);
+                    let _ = bus.tick_apu(7);
+                    cpu.cycles += 7;
+                    total_cycles += 7;
+                    reset_request_since = None;
+                    continue;
+                }
+            } else {
+                reset_request_since = None;
+                if status < 0x80 {
+                    let text = read_output(&mut bus);
+                    print_raw(&format!(
+                        "[{filename}] status={:#04x} text={}",
+                        status,
+                        text.trim()
+                    ));
+                    return;
+                }
             }
         }
 
