@@ -112,6 +112,8 @@ These are confirmed missing features tied to failing blargg ROM tests. The proje
 
 None on the CPU side. The blargg-verified per-cycle interrupt-delivery behavior lives in `SystemClock` (`src/system.rs`), shared by the real run loop (`App::step_frame`) and the ROM test harness — the previously-noted harness/main.rs divergence is resolved.
 
+- **`blargg_nes_cpu_test5/cpu.nes` (06-abs_xy)** — reports "Error 1" on unofficial opcodes `9C`/`9E` (SHY/SHX). Newly discovered and unconfirmed; SHY/SHX already pass `instr_test-v5/07-abs_xy`, so the discrepancy is in some untested case. Report-only test (doesn't fail `cargo test`); tracked here so it isn't lost.
+
 ### Failing PPU tests
 
 - **`ppu/power_up_palette`** — result code 2: *Palette differs from table*. Power-up palette contents don't match the specific values on the test author's NES (this test is hardware-specific and may not be fixable in a general emulator).
