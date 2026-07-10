@@ -5,6 +5,7 @@ mod ppu;
 mod ppu_roms;
 mod roms;
 mod sprite_hit_roms;
+mod text_console_roms;
 
 use crate::cpu::Bus as CpuBus;
 
