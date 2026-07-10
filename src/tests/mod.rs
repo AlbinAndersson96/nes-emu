@@ -1,5 +1,6 @@
 mod bus;
 mod cpu;
+mod mapper_roms;
 mod ppu;
 mod ppu_roms;
 mod roms;
