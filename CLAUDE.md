@@ -11,7 +11,7 @@ A NES emulator written in Rust. The CPU (full 6502 instruction set including uno
 ```bash
 cargo build          # compile
 cargo run <rom.nes>  # run a ROM
-cargo test           # run all tests (includes blargg ROM tests in tests/roms/cpu/ and tests/roms/ppu/)
+cargo test           # run all tests (includes blargg ROM tests in tests/roms/)
 cargo test <name>    # run a single test by name
 cargo clippy         # lint
 cargo fmt            # format
@@ -42,6 +42,8 @@ cargo fmt            # format
 - **`src/tests/cpu.rs`** — CPU unit tests.
 - **`src/tests/roms.rs`** — Blargg CPU ROM test harness. Polls $6000/$6001–$6003 for test completion; steps the machine via the shared `SystemClock` (`src/system.rs`), which carries all the per-cycle interrupt-delivery rules. Note: the `#[ignore]`d diagnostic tracers in this file keep their own private copies of older run loops and can go stale — trust `SystemClock`, not them. Runs the `instr_test-v5` suite (17 tests, all passing), `instr_timing` (passing), all 5 `instr_misc` tests (passing), plus `cpu_interrupts_v2` (all 6 passing).
 - **`src/tests/ppu_roms.rs`** — Blargg PPU ROM test harness. Runs each ROM for 300 frames (~5 s NES time), then reads the result code from the nametable (the ROMs render `$XX` in ASCII tiles at nametable-0 row 5, col 2–4) and looks up its meaning from the per-ROM table in the README. On failure the panic message includes the result code and its description. Also saves a PNG screenshot to `tests/screenshots/ppu/output/` and pixel-compares against a golden in `tests/screenshots/ppu/golden/` if one exists. To bless a new golden: `cp tests/screenshots/ppu/output/<name>.png tests/screenshots/ppu/golden/<name>.png`.
+- **`src/tests/mapper_roms.rs`** — asserts `Cartridge::from_ines` fails cleanly with `UnsupportedMapper` for ROM suites that need mapper 3 (CNROM) or mapper 4 (MMC3), neither of which is implemented yet (`cpu_dummy_reads`, `ppu_read_buffer`, `mmc3_test`, `mmc3_test_2`, `mmc3_irq_tests`).
+- **`src/tests/text_console_roms.rs`** — report-only harness for blargg ROM suites that print `PASSED`/`FAILED #<n>`/`Error <n>` text directly into PPU nametable 0 instead of using the `$6000` protocol (`vbl_nmi_timing`, `sprite_overflow_tests`, `branch_timing_tests`, `cpu_timing_test6`, `blargg_nes_cpu_test5`). Never asserts the ROM's own verdict — only a panic or an unrecognized result marker fails the test.
 - **`docs/bus.md`** — NES address map and bus design notes.
 - **`docs/cpu_instructions.md`** — 6502 instruction reference (official opcodes, addressing modes, cycle counts).
 - **`docs/cpu_interrupts.md`** — NMI/IRQ/BRK dispatch, the micro-op interrupt-service sequence, NMI hijacking BRK or an in-progress IRQ, and the interrupt-polling-granularity (deferred-edge) fix. Start here before touching interrupt timing; links to the full investigation log for anything not yet resolved.
@@ -64,9 +66,17 @@ cargo fmt            # format
 
 ```
 tests/roms/
-  cpu/                      # blargg CPU test ROMs (instr_test-v5, instr_misc, instr_timing, cpu_interrupts_v2)
-  ppu/
-    blargg_ppu_tests_2005.09.15b/   # blargg PPU test ROMs (palette_ram, sprite_ram, vbl_clear_time, vram_access, power_up_palette) + source/ (assembly sources)
+  <suite-name>/              # one directory per blargg test suite, e.g.:
+    instr_test-v5/, instr_test-v3/, nes_instr_test/, instr_misc/, instr_timing/,
+    cpu_interrupts_v2/, cpu_dummy_writes/, cpu_exec_space/, cpu_reset/,
+    oam_read/, oam_stress/, ppu_open_bus/, ppu_vbl_nmi/,
+    blargg_ppu_tests_2005.09.15b/, sprite_hit_tests_2005.10.05/,
+    vbl_nmi_timing/, sprite_overflow_tests/, branch_timing_tests/,
+    cpu_timing_test6/, blargg_nes_cpu_test5/,
+    cpu_dummy_reads/, ppu_read_buffer/, mmc3_test/, mmc3_test_2/, mmc3_irq_tests/
+      # (last 5 need mapper 3/4, unsupported — see mapper_roms.rs)
+    apu_mixer/, apu_mixer_recordings/, apu_reset/, apu_test/, blargg_apu_2005.07.30/
+      # APU suites — not wired into any test harness yet
 tests/screenshots/
   ppu/
     output/                 # generated each test run (gitignored)
