@@ -145,14 +145,17 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, opcode: u8) -> u8 {
             2 // T1+T2
         }
 
-        // --- KIL (0x02) --- unofficial, halt (jam) instruction
-        // Halts the CPU by not advancing and consuming cycles. Some blargg
-        // tests exercise this opcode. Implementation: fetch padding byte
-        // but don't advance PC, causing an infinite loop.
-        0x02 => {
+        // --- KIL/JAM (unofficial) --- permanently halts the CPU (jams) on
+        // real 6502/2A03 hardware. All 12 opcodes: 0x02 0x12 0x22 0x32 0x42
+        // 0x52 0x62 0x72 0x92 0xB2 0xD2 0xF2. PC never advances past this
+        // opcode once hit on real hardware (only a physical reset
+        // recovers) — modeled here by re-fetching the same byte forever
+        // without moving PC, so cpu.pc stays frozen at this address for
+        // the remainder of the run.
+        0x02 | 0x12 | 0x22 | 0x32 | 0x42 | 0x52 | 0x62 | 0x72 | 0x92 | 0xB2 | 0xD2 | 0xF2 => {
             let _ = cpu.fetch(bus); // dummy fetch, not consumed
-            cpu.pc = cpu.pc.wrapping_sub(1); // don't advance PC; stay at this instruction
-            2 // return a cycle count to avoid infinite loop in higher-level stepping
+            cpu.pc = cpu.pc.wrapping_sub(1); // don't advance PC; stay jammed here
+            2
         }
 
         // --- Flag clears / sets ---

@@ -1251,3 +1251,85 @@ fn warm_reset_leaves_axy_untouched_sets_i_decrements_sp_and_loads_vector() {
     assert_eq!(cpu.pc, 0x1234);
     assert_eq!(bus.mem[0x0300], 0xAB); // untouched — nothing was pushed
 }
+
+// ---------------------------------------------------------------------------
+// KIL/JAM (unofficial halt opcodes)
+// ---------------------------------------------------------------------------
+
+/// All 12 KIL/JAM opcode values that permanently halt real 6502/2A03
+/// hardware: 0x02 0x12 0x22 0x32 0x42 0x52 0x62 0x72 0x92 0xB2 0xD2 0xF2.
+const KIL_OPCODES: [u8; 12] = [
+    0x02, 0x12, 0x22, 0x32, 0x42, 0x52, 0x62, 0x72, 0x92, 0xB2, 0xD2, 0xF2,
+];
+
+/// Every KIL/JAM opcode consumes the opcode byte on dispatch (T1, ordinary
+/// fetch semantics shared by all opcodes: `pc` advances past the opcode
+/// itself) and then, on T2, performs its own dummy operand-style fetch which
+/// it immediately undoes. The net effect across the two `tick()` calls that
+/// make up this 2-cycle instruction: `pc` settles at (opcode_address + 1)
+/// and does NOT advance any further on T2 — i.e. the dummy fetch does not
+/// leak an extra advance the way a real addressed operand byte would (that
+/// would leave `pc` at opcode_address + 2). This is the "not just delayed"
+/// behavior: a genuinely delayed/broken implementation would show `pc`
+/// creeping forward by the dummy fetch on T2; this must not happen.
+#[test]
+fn kil_opcodes_freeze_pc_within_instruction() {
+    for &op in &KIL_OPCODES {
+        let (mut cpu, mut bus) = make();
+        bus.mem[0x0200] = op;
+        let start_pc = cpu.pc; // 0x0200
+
+        cpu.tick(&mut bus); // T1: dispatch fetches the opcode byte.
+        let after_dispatch = cpu.pc;
+        assert_eq!(
+            after_dispatch,
+            start_pc.wrapping_add(1),
+            "opcode {op:#04x}: dispatch should advance pc past the opcode byte"
+        );
+
+        cpu.tick(&mut bus); // T2: KIL body's dummy fetch + self-undo.
+        assert_eq!(
+            cpu.pc, after_dispatch,
+            "opcode {op:#04x}: KIL dummy fetch leaked an extra pc advance (delayed, not frozen)"
+        );
+
+        let (_, _, queue_len) = cpu.debug_nmi_state();
+        assert_eq!(
+            queue_len, 0,
+            "opcode {op:#04x}: instruction should be fully retired after 2 ticks"
+        );
+    }
+}
+
+/// Confirms the freeze holds across several *consecutive* KIL instructions
+/// (not just one): if the byte the CPU lands on after being jammed is also
+/// a KIL opcode (as it would be in a contiguous run of jam bytes), repeated
+/// dispatch keeps re-decoding KIL rather than ever executing a "real"
+/// instruction. Note this is a weaker property than a bit-for-bit-constant
+/// `pc`: each additional 2-tick KIL instruction still advances `pc` by
+/// exactly 1 (consuming its own opcode byte on dispatch, same as any
+/// opcode), so across N consecutive jam instructions `pc` climbs by N bytes
+/// rather than sitting at one fixed address forever. What never happens is
+/// `pc` jumping away to service an unrelated instruction/interrupt — the
+/// CPU stays trapped inside the run of jam bytes for as long as it lasts.
+#[test]
+fn kil_opcodes_stay_trapped_across_consecutive_instructions() {
+    let (mut cpu, mut bus) = make();
+    for addr in 0x0200..0x0206u16 {
+        bus.mem[addr as usize] = 0x02;
+    }
+    let start_pc = cpu.pc; // 0x0200
+
+    // 3 consecutive KIL instructions = 6 ticks (2 ticks each).
+    for _ in 0..6 {
+        cpu.tick(&mut bus);
+    }
+
+    // Each instruction only ever advances pc by exactly 1 (its own opcode
+    // fetch); after 3 such instructions pc has moved forward by 3 bytes,
+    // still squarely inside the jammed region, never having escaped to
+    // execute anything else.
+    assert_eq!(cpu.pc, start_pc.wrapping_add(3));
+    let (_, _, queue_len) = cpu.debug_nmi_state();
+    assert_eq!(queue_len, 0);
+}
