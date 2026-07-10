@@ -1255,15 +1255,6 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, opcode: u8) -> u8 {
             cpu.write(bus, a, v);
             5
         }
-
-        _ => {
-            debug_assert!(
-                false,
-                "undefined opcode {opcode:#04x} at PC={:#06x}",
-                cpu.pc.wrapping_sub(1)
-            );
-            1
-        }
     }
 }
 
