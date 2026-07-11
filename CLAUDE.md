@@ -40,7 +40,7 @@ cargo fmt            # format
 - **`src/tests/mod.rs`** — `TestBus`: flat 64 KB address space used by unit tests (no mirroring, no side effects).
 - **`src/tests/bus.rs`** — bus unit tests.
 - **`src/tests/cpu.rs`** — CPU unit tests.
-- **`src/tests/roms.rs`** — Blargg CPU ROM test harness. Polls $6000/$6001–$6003 for test completion; steps the machine via the shared `SystemClock` (`src/system.rs`), which carries all the per-cycle interrupt-delivery rules. Note: the `#[ignore]`d diagnostic tracers in this file keep their own private copies of older run loops and can go stale — trust `SystemClock`, not them. Runs the `instr_test-v5` suite (17 tests, all passing), `instr_timing` (passing), all 5 `instr_misc` tests (passing), plus `cpu_interrupts_v2` (all 6 passing).
+- **`src/tests/roms.rs`** — harness for every blargg suite using the $6000 result protocol. Polls $6000/$6001–$6003 for test completion; steps the machine via the shared `SystemClock` (`src/system.rs`), which carries all the per-cycle interrupt-delivery rules; handles status $81 (ROM requests a delayed warm reset, used by `cpu_reset`); asserts status 0 on completion — a nonzero status fails the test with the ROM's code and text. Note: the `#[ignore]`d diagnostic tracers in this file keep their own private copies of older run loops and can go stale — trust `SystemClock`, not them. Covers `instr_test-v5`, `instr_timing`, `instr_misc`, `cpu_interrupts_v2`, `instr_test-v3`, `nes_instr_test`, `cpu_dummy_writes`, `cpu_exec_space`, `cpu_reset`, `oam_read`, `oam_stress`, `ppu_open_bus`, and `ppu_vbl_nmi`; see Known gaps for the failing ones.
 - **`src/tests/ppu_roms.rs`** — Blargg PPU ROM test harness. Runs each ROM for 300 frames (~5 s NES time), then reads the result code from the nametable (the ROMs render `$XX` in ASCII tiles at nametable-0 row 5, col 2–4) and looks up its meaning from the per-ROM table in the README. On failure the panic message includes the result code and its description. Also saves a PNG screenshot to `tests/screenshots/ppu/output/` and pixel-compares against a golden in `tests/screenshots/ppu/golden/` if one exists. To bless a new golden: `cp tests/screenshots/ppu/output/<name>.png tests/screenshots/ppu/golden/<name>.png`.
 - **`src/tests/mapper_roms.rs`** — asserts `Cartridge::from_ines` fails cleanly with `UnsupportedMapper` for ROM suites that need mapper 3 (CNROM) or mapper 4 (MMC3), neither of which is implemented yet (`cpu_dummy_reads`, `ppu_read_buffer`, `mmc3_test`, `mmc3_test_2`, `mmc3_irq_tests`).
 - **`src/tests/text_console_roms.rs`** — harness for blargg ROM suites that print `PASSED`/`FAILED #<n>`/`Error <n>` text directly into PPU nametable 0 instead of using the `$6000` protocol (`vbl_nmi_timing`, `sprite_overflow_tests`, `branch_timing_tests`, `cpu_timing_test6`, `blargg_nes_cpu_test5`). Asserts the ROM's on-screen verdict — any failure marker fails the test, so the ROMs failing because of known emulator gaps show up as real `cargo test` failures; see the "Failing text-console tests" list under Known gaps.
@@ -120,6 +120,18 @@ None on the CPU side. The blargg-verified per-cycle interrupt-delivery behavior 
 
 `ppu/vbl_clear_time` now passes (fixed as a side effect of the deferred NMI-edge-delivery fix —
 see `docs/cpu_interrupts.md`).
+
+### Failing $6000-protocol tests
+
+The `roms.rs` harness (previously report-only for these suites) now asserts every ROM's $6000 status, so these fail `cargo test` until the underlying gap is fixed:
+
+- **`cpu_dummy_writes/cpu_dummy_writes_ppumem`** — code 9: dummy-write behavior against PPU memory-mapped registers.
+- **`cpu_exec_space/test_cpu_exec_space_apu`** — code 2: executing code out of APU register space ($4000–$4017 open bus).
+- **`cpu_exec_space/test_cpu_exec_space_ppuio`** — code 3: executing code out of PPU I/O space ($2000–$3FFF).
+- **`oam_stress/oam_stress`** — code 1: OAM read/write stress (needs dot-accurate OAM access behavior during rendering).
+- **`ppu_open_bus/ppu_open_bus`** — code 2: *Write to any PPU register should set decay value* — PPU open-bus/decay register is not modeled.
+- **`ppu_vbl_nmi/rom_singles/10-even_odd_timing`** — code 3 ("08 07"): odd-frame skipped-dot timing detail.
+- **`ppu_vbl_nmi/ppu_vbl_nmi`** (combined) — code 1: fails because sub-test 10 above fails; the other 9 sub-tests pass individually.
 
 ### Failing text-console tests
 
