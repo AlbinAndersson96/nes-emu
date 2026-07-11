@@ -83,14 +83,17 @@ impl Cartridge {
         })
     }
 
-    pub fn read(&self, addr: u16) -> u8 {
+    /// Read from CPU-visible cartridge space. Returns `None` where the
+    /// cartridge drives nothing (the $4020-$5FFF expansion area on the
+    /// mappers implemented here) — the bus then supplies its open-bus value.
+    pub fn read(&self, addr: u16) -> Option<u8> {
         match addr {
-            0x6000..=0x7FFF => self.prg_ram[(addr - 0x6000) as usize],
+            0x6000..=0x7FFF => Some(self.prg_ram[(addr - 0x6000) as usize]),
             0x8000..=0xFFFF => {
                 let offset = self.mapper.prg_offset(self.prg_rom.len(), addr);
-                self.prg_rom.get(offset).copied().unwrap_or(0)
+                Some(self.prg_rom.get(offset).copied().unwrap_or(0))
             }
-            _ => 0,
+            _ => None,
         }
     }
 

@@ -47,6 +47,14 @@ pub struct Bus {
     /// instruction's first cycle). Repaid internally by tick_apu, so run
     /// loops need no changes and total APU time is conserved.
     apu_preadvance_cycles: u32,
+    /// CPU open-bus latch: the 6502 data bus retains the last byte
+    /// transferred (every read result and every written value updates it —
+    /// including opcode/operand fetches, which is why `LDA $4016` sees $40
+    /// in the top bits: the operand high byte was the last bus transfer).
+    /// Reads of undriven addresses return it: $4000-$4014 and $4018-$401F
+    /// entirely, $4015 bit 5, $4016/$4017 bits 5-7. Unlike the PPU's decay
+    /// register there is no decay — the value persists until overwritten.
+    cpu_open_bus: u8,
 }
 
 impl Bus {
@@ -67,6 +75,28 @@ impl Bus {
             ppu_preadvance_cycles: 0,
             ppu_preadvance_nmi: false,
             apu_preadvance_cycles: 0,
+            cpu_open_bus: 0,
+        }
+    }
+
+    /// Side-effect-free memory inspection for test harnesses and debuggers:
+    /// reads RAM and cartridge space WITHOUT touching the CPU open-bus latch
+    /// or any register side effects. Harness polling (e.g. the $6000 result
+    /// protocol) must use this instead of `read` — emulator-external reads
+    /// through `read` corrupt the open-bus latch between the emulated
+    /// program's own bus transfers (caught by cpu_exec_space_apu, which
+    /// executes from open bus and needs the latch to hold the last byte the
+    /// PROGRAM transferred). I/O regions return 0 rather than open bus so
+    /// the result is stable and side-effect-free.
+    pub fn peek(&self, addr: u16) -> u8 {
+        match addr {
+            0x0000..=0x1FFF => self.ram[(addr & 0x07FF) as usize],
+            0x4020..=0xFFFF => self
+                .cartridge
+                .as_ref()
+                .and_then(|c| c.read(addr))
+                .unwrap_or(0),
+            _ => 0,
         }
     }
 
@@ -172,8 +202,10 @@ impl Bus {
     }
 }
 
-impl CpuBus for Bus {
-    fn read(&mut self, addr: u16) -> u8 {
+impl Bus {
+    /// The address-decoded read; `CpuBus::read` wraps it to keep the CPU
+    /// open-bus latch updated with every transferred byte.
+    fn read_decoded(&mut self, addr: u16) -> u8 {
         match addr {
             // Internal RAM + mirrors
             0x0000..=0x1FFF => self.ram[(addr & 0x07FF) as usize],
@@ -228,29 +260,49 @@ impl CpuBus for Bus {
                 // sampling-window walk over the flag's set moment).
                 self.apu.tick(APU_READ_PREADVANCE);
                 self.apu_preadvance_cycles += APU_READ_PREADVANCE;
-                self.apu.read(addr)
+                // The APU drives every $4015 bit except bit 5, which stays
+                // at the CPU open-bus value.
+                (self.apu.read(addr) & 0xDF) | (self.cpu_open_bus & 0x20)
             }
-            0x4000..=0x4014 => self.apu.read(addr),
+            // Write-only APU/OAM-DMA registers: nothing drives the bus, the
+            // read returns the CPU open-bus latch.
+            0x4000..=0x4014 => self.cpu_open_bus,
+            // Controllers drive the low bits; bits 5-7 stay at open bus
+            // (classically $40 — the operand high byte of the LDA $4016).
             0x4016 => {
                 let bit = self.controller_shift[0] & 0x01;
                 self.controller_shift[0] = (self.controller_shift[0] >> 1) | 0x80;
-                bit
+                (self.cpu_open_bus & 0xE0) | bit
             }
             0x4017 => {
                 let bit = self.controller_shift[1] & 0x01;
                 self.controller_shift[1] = (self.controller_shift[1] >> 1) | 0x80;
-                bit
+                (self.cpu_open_bus & 0xE0) | bit
             }
 
-            // Disabled region
-            0x4018..=0x401F => 0,
+            // Disabled region: open bus
+            0x4018..=0x401F => self.cpu_open_bus,
 
-            // Cartridge
-            0x4020..=0xFFFF => self.cartridge.as_ref().map_or(0, |c| c.read(addr)),
+            // Cartridge; regions the cartridge doesn't drive (its $4020-$5FFF
+            // expansion area on the supported mappers) read as open bus.
+            0x4020..=0xFFFF => self
+                .cartridge
+                .as_ref()
+                .and_then(|c| c.read(addr))
+                .unwrap_or(self.cpu_open_bus),
         }
+    }
+}
+
+impl CpuBus for Bus {
+    fn read(&mut self, addr: u16) -> u8 {
+        let value = self.read_decoded(addr);
+        self.cpu_open_bus = value;
+        value
     }
 
     fn write(&mut self, addr: u16, data: u8) {
+        self.cpu_open_bus = data;
         match addr {
             // Internal RAM + mirrors
             0x0000..=0x1FFF => self.ram[(addr & 0x07FF) as usize] = data,

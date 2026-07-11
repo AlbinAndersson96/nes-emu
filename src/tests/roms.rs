@@ -41,7 +41,7 @@ fn read_output(bus: &mut Bus) -> String {
     let mut out = String::new();
     let mut addr = 0x6004u16;
     loop {
-        let b = bus.read(addr);
+        let b = bus.peek(addr);
         if b == 0 {
             break;
         }
@@ -75,10 +75,10 @@ fn run_until_complete_trace(filename: &str, bus: &mut Bus, cpu: &mut Cpu, trace_
 
     loop {
         let sig_valid =
-            bus.read(0x6001) == SIG[0] && bus.read(0x6002) == SIG[1] && bus.read(0x6003) == SIG[2];
+            bus.peek(0x6001) == SIG[0] && bus.peek(0x6002) == SIG[1] && bus.peek(0x6003) == SIG[2];
 
         if sig_valid {
-            let status = bus.read(0x6000);
+            let status = bus.peek(0x6000);
             if status == 0x81 {
                 let since = *reset_request_since.get_or_insert(total_cycles);
                 // Only fire the reset at an instruction boundary (empty
@@ -458,9 +458,9 @@ fn nmi_brk_crc_trace() {
 
     loop {
         let sig_valid =
-            bus.read(0x6001) == SIG[0] && bus.read(0x6002) == SIG[1] && bus.read(0x6003) == SIG[2];
+            bus.peek(0x6001) == SIG[0] && bus.peek(0x6002) == SIG[1] && bus.peek(0x6003) == SIG[2];
         if sig_valid {
-            let status = bus.read(0x6000);
+            let status = bus.peek(0x6000);
             if status < 0x80 {
                 return; // pass — just collecting trace
             }
@@ -571,9 +571,9 @@ fn nmi_brk_row_trace() {
 
     loop {
         let sig_valid =
-            bus.read(0x6001) == SIG[0] && bus.read(0x6002) == SIG[1] && bus.read(0x6003) == SIG[2];
+            bus.peek(0x6001) == SIG[0] && bus.peek(0x6002) == SIG[1] && bus.peek(0x6003) == SIG[2];
         if sig_valid {
-            let status = bus.read(0x6000);
+            let status = bus.peek(0x6000);
             if status < 0x80 {
                 let text = read_output(&mut bus);
                 print_raw(text.trim());
@@ -696,9 +696,9 @@ fn nmi_brk_micro_trace() {
 
     loop {
         let sig_valid =
-            bus.read(0x6001) == SIG[0] && bus.read(0x6002) == SIG[1] && bus.read(0x6003) == SIG[2];
+            bus.peek(0x6001) == SIG[0] && bus.peek(0x6002) == SIG[1] && bus.peek(0x6003) == SIG[2];
         if sig_valid {
-            let status = bus.read(0x6000);
+            let status = bus.peek(0x6000);
             if status < 0x80 {
                 return; // just collecting trace
             }
@@ -826,9 +826,9 @@ fn nmi_irq_generic_trace() {
 
     loop {
         let sig_valid =
-            bus.read(0x6001) == SIG[0] && bus.read(0x6002) == SIG[1] && bus.read(0x6003) == SIG[2];
+            bus.peek(0x6001) == SIG[0] && bus.peek(0x6002) == SIG[1] && bus.peek(0x6003) == SIG[2];
         if sig_valid {
-            let status = bus.read(0x6000);
+            let status = bus.peek(0x6000);
             if status < 0x80 {
                 return; // just collecting trace
             }
@@ -934,9 +934,9 @@ fn nmi_irq_row_trace() {
 
     loop {
         let sig_valid =
-            bus.read(0x6001) == SIG[0] && bus.read(0x6002) == SIG[1] && bus.read(0x6003) == SIG[2];
+            bus.peek(0x6001) == SIG[0] && bus.peek(0x6002) == SIG[1] && bus.peek(0x6003) == SIG[2];
         if sig_valid {
-            let status = bus.read(0x6000);
+            let status = bus.peek(0x6000);
             if status < 0x80 {
                 return;
             }
@@ -1063,9 +1063,9 @@ fn nmi_irq_stage_trace() {
 
     loop {
         let sig_valid =
-            bus.read(0x6001) == SIG[0] && bus.read(0x6002) == SIG[1] && bus.read(0x6003) == SIG[2];
+            bus.peek(0x6001) == SIG[0] && bus.peek(0x6002) == SIG[1] && bus.peek(0x6003) == SIG[2];
         if sig_valid {
-            let status = bus.read(0x6000);
+            let status = bus.peek(0x6000);
             if status < 0x80 {
                 return;
             }
@@ -1575,11 +1575,11 @@ fn nmi_irq_row0_arbitration_trace() {
         eprintln!("=== defer_irq={} trace_row={} ===", defer_irq, trace_row);
 
         loop {
-            let sig_valid = bus.read(0x6001) == SIG[0]
-                && bus.read(0x6002) == SIG[1]
-                && bus.read(0x6003) == SIG[2];
+            let sig_valid = bus.peek(0x6001) == SIG[0]
+                && bus.peek(0x6002) == SIG[1]
+                && bus.peek(0x6003) == SIG[2];
             if sig_valid {
-                let status = bus.read(0x6000);
+                let status = bus.peek(0x6000);
                 if status < 0x80 {
                     return;
                 }
@@ -1732,9 +1732,9 @@ fn nmi_irq_all_rows_summary() {
 
     loop {
         let sig_valid =
-            bus.read(0x6001) == SIG[0] && bus.read(0x6002) == SIG[1] && bus.read(0x6003) == SIG[2];
+            bus.peek(0x6001) == SIG[0] && bus.peek(0x6002) == SIG[1] && bus.peek(0x6003) == SIG[2];
         if sig_valid {
-            let status = bus.read(0x6000);
+            let status = bus.peek(0x6000);
             if status < 0x80 {
                 return;
             }
