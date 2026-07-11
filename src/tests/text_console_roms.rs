@@ -1,9 +1,8 @@
 //! Harness for blargg ROM suites that print their verdict as text into PPU
 //! nametable 0 instead of using the `$6000` result protocol. Each test
-//! asserts the ROM's on-screen verdict; ROMs that fail due to known emulator
-//! gaps are `#[ignore]`d with the recorded failure code, so `cargo test`
-//! reports them as ignored rather than falsely passing. When a gap is fixed,
-//! remove the corresponding `#[ignore]`.
+//! asserts the ROM's on-screen verdict, so ROMs that fail because of known
+//! emulator gaps fail `cargo test` — see the "Failing text-console tests"
+//! list under Known gaps in CLAUDE.md for the currently expected failures.
 
 use std::path::PathBuf;
 
@@ -185,7 +184,6 @@ fn vbl_nmi_timing_frame_basics() {
     );
 }
 
-#[ignore = "known emulator gap: FAILED #2 — Flag should read as clear 3 PPU clocks before VBL"]
 #[test]
 fn vbl_nmi_timing_vbl_timing() {
     report(
@@ -205,7 +203,6 @@ fn vbl_nmi_timing_vbl_timing() {
     );
 }
 
-#[ignore = "known emulator gap: FAILED #2 — Pattern ----- should not skip any clocks"]
 #[test]
 fn vbl_nmi_timing_even_odd_frames() {
     report(
@@ -223,7 +220,6 @@ fn vbl_nmi_timing_even_odd_frames() {
     );
 }
 
-#[ignore = "known emulator gap: FAILED #2 — Cleared 3 or more PPU clocks too early"]
 #[test]
 fn vbl_nmi_timing_vbl_clear_timing() {
     report(
@@ -242,7 +238,6 @@ fn vbl_nmi_timing_vbl_clear_timing() {
     );
 }
 
-#[ignore = "known emulator gap: FAILED #3 — Reading flag when it's set should suppress NMI"]
 #[test]
 fn vbl_nmi_timing_nmi_suppression() {
     report(
@@ -264,7 +259,6 @@ fn vbl_nmi_timing_nmi_suppression() {
     );
 }
 
-#[ignore = "known emulator gap: FAILED #2 — NMI shouldn't occur when disabled 0 PPU clocks after VBL"]
 #[test]
 fn vbl_nmi_timing_nmi_disable() {
     report(
@@ -283,7 +277,6 @@ fn vbl_nmi_timing_nmi_disable() {
     );
 }
 
-#[ignore = "known emulator gap: FAILED #2 — NMI occurred 3 or more PPU clocks too early"]
 #[test]
 fn vbl_nmi_timing_nmi_timing() {
     report(
@@ -326,7 +319,6 @@ fn sprite_overflow_basics() {
     );
 }
 
-#[ignore = "known emulator gap: FAILED #9 — Shouldn't be set when all scanlines have 7 or fewer sprites"]
 #[test]
 fn sprite_overflow_details() {
     report(
@@ -348,7 +340,6 @@ fn sprite_overflow_details() {
     );
 }
 
-#[ignore = "known emulator gap: FAILED #3 — Cleared too early at end of VBL"]
 #[test]
 fn sprite_overflow_timing() {
     report(
@@ -374,7 +365,6 @@ fn sprite_overflow_timing() {
     );
 }
 
-#[ignore = "known emulator gap: FAILED #7 — Checks that search stops at the last sprite without overflow"]
 #[test]
 fn sprite_overflow_obscure() {
     report(
