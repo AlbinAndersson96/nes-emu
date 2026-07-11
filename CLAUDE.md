@@ -125,11 +125,9 @@ see `docs/cpu_interrupts.md`).
 
 The `roms.rs` harness (previously report-only for these suites) now asserts every ROM's $6000 status, so these fail `cargo test` until the underlying gap is fixed:
 
-- **`cpu_dummy_writes/cpu_dummy_writes_ppumem`** — code 9: dummy-write behavior against PPU memory-mapped registers.
-- **`cpu_exec_space/test_cpu_exec_space_apu`** — code 2: executing code out of APU register space ($4000–$4017 open bus).
-- **`cpu_exec_space/test_cpu_exec_space_ppuio`** — code 3: executing code out of PPU I/O space ($2000–$3FFF).
-- **`oam_stress/oam_stress`** — code 1: OAM read/write stress (needs dot-accurate OAM access behavior during rendering).
-- **`ppu_open_bus/ppu_open_bus`** — code 2: *Write to any PPU register should set decay value* — PPU open-bus/decay register is not modeled.
+- **`cpu_exec_space/test_cpu_exec_space_apu`** — code 2: executing code out of APU register space needs the CPU's own open-bus latch ($4000–$401F reads returning the last value on the CPU data bus), which is not modeled. (The PPU decay register does not help here — it only covers $2000–$3FFF.)
+
+`ppu_open_bus`, `cpu_dummy_writes_ppumem`, `oam_stress`, and `cpu_exec_space_ppuio` now pass, fixed by the PPU open-bus decay register (`Ppu::io_bus` + `open_bus()`/`refresh_open_bus()`, `src/ppu/mod.rs`): writes to any PPU register refresh all 8 bits, reads return decay-register bits for everything the PPU doesn't drive ($2002 drives bits 7-5, $2004 all, $2007 all / bits 5-0 for palette reads, write-only registers nothing), and each bit decays to 0 after ~600 ms (`OPEN_BUS_DECAY_DOTS`) without a 1-refresh. Two adjacent fixes rode along: $2004 reads mask attribute bytes' nonexistent bits 2-4 to 0, and every one-byte opcode now performs its hardware T2 dummy fetch of the following byte (`src/cpu/instructions.rs::execute`) — observable when executing out of PPU I/O space, where an RTS at $2001 must dummy-read $2002 and clear the PPU address latch.
 
 `ppu_vbl_nmi/rom_singles/10-even_odd_timing` (and with it the combined `ppu_vbl_nmi.nes`) now passes. Two fixes: $2001 writes get the same 8-dots/apply/1-dot pre-advance as $2000 (previously they applied ~12 dots early, at the start of the writing instruction), and the odd-frame skipped-dot decision samples `rendering_enabled` at the start of pre-render dot 338 — one dot earlier than the wrap check (`Ppu::render_prev_dot`); all four of the ROM's sub-tests pin that single sample point.
 

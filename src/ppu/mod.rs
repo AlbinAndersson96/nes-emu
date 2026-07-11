@@ -25,6 +25,12 @@ const PRERENDER_SCANLINE: u16 = 261;
 /// original investigation.)
 const SPRITE0_HIT_LATCH_DOTS: u8 = 1;
 
+/// PPU open-bus decay time: a decay-register bit that hasn't been refreshed
+/// with a 1 decays to 0 after about 600 ms (blargg's `ppu_open_bus` readme;
+/// the exact time varies with the console and temperature). 600 ms at the
+/// NTSC PPU clock (5,369,318 Hz) is ~3.22 M dots.
+const OPEN_BUS_DECAY_DOTS: u64 = 3_221_591;
+
 pub struct Ppu {
     // Programmer-visible write-only registers
     ctrl: u8,     // $2000 PPUCTRL
@@ -88,6 +94,20 @@ pub struct Ppu {
     /// direction (all four of its sub-tests are consistent with a single
     /// sample at the start of dot 338).
     render_prev_dot: bool,
+
+    // ── Open-bus decay register ──────────────────────────────────────────────
+    // The PPU's CPU-facing data bus keeps the last value driven onto it (the
+    // "decay register"). Writing any PPU register refreshes all 8 bits with
+    // the written value; reads refresh only the bits the PPU itself drives
+    // ($2002 bits 7-5, $2004 all, $2007 all / bits 5-0 for palette) and
+    // return the decay register for the rest. Each bit decays to 0 once it
+    // has gone OPEN_BUS_DECAY_DOTS without being refreshed with a 1
+    // (blargg's `ppu_open_bus`). `io_bus_stamp` holds the `dots` timestamp
+    // of each bit's last refresh; decay is applied lazily on read.
+    io_bus: u8,
+    io_bus_stamp: [u64; 8],
+    /// Free-running processed-dot counter (timebase for open-bus decay).
+    dots: u64,
 
     // Dot/scanline counters (PPU runs at 3× CPU clock)
     dot: u16,
@@ -164,6 +184,9 @@ impl Ppu {
             dot_phase: 0,
             suppress_vbl: false,
             render_prev_dot: false,
+            io_bus: 0,
+            io_bus_stamp: [0; 8],
+            dots: 0,
             dot: 0,
             scanline: 0,
             odd_frame: false,
@@ -369,6 +392,8 @@ impl Ppu {
                 self.odd_frame = !self.odd_frame;
             }
         }
+
+        self.dots += 1;
 
         // ── CPU-side NMI edge sample (once per CPU cycle = every 3rd dot) ────
         self.dot_phase += 1;
@@ -793,14 +818,47 @@ impl Ppu {
         }
     }
 
+    /// Current value of the open-bus decay register, with expired bits
+    /// (not refreshed with a 1 within OPEN_BUS_DECAY_DOTS) decayed to 0.
+    fn open_bus(&mut self) -> u8 {
+        for bit in 0..8 {
+            if self.io_bus & (1 << bit) != 0
+                && self.dots.saturating_sub(self.io_bus_stamp[bit]) > OPEN_BUS_DECAY_DOTS
+            {
+                self.io_bus &= !(1 << bit);
+            }
+        }
+        self.io_bus
+    }
+
+    /// Refresh the decay-register bits selected by `mask` with `value`,
+    /// restarting their decay timers. Unmasked bits keep their value and
+    /// their old timers.
+    fn refresh_open_bus(&mut self, value: u8, mask: u8) {
+        self.io_bus = (self.io_bus & !mask) | (value & mask);
+        for bit in 0..8 {
+            if mask & (1 << bit) != 0 {
+                self.io_bus_stamp[bit] = self.dots;
+            }
+        }
+    }
+
     /// Read a PPU register. `reg` is the 3-bit register select (addr & 7).
+    /// Open-bus behavior follows blargg's `ppu_open_bus` readme: write-only
+    /// registers return the decay register unrefreshed; $2002/$2004/$2007
+    /// return PPU-driven bits (which refresh their decay-register bits)
+    /// combined with decay-register bits for the rest.
     pub fn read_register(&mut self, reg: u8, cart: Option<&Cartridge>) -> u8 {
         match reg {
-            // $2002 PPUSTATUS — reading clears VBlank flag and write toggle
+            // $2002 PPUSTATUS — reading clears VBlank flag and write toggle.
+            // Bits 7-5 are PPU-driven (and refresh those decay bits); bits
+            // 4-0 read from the decay register.
             2 => {
                 let status = ((self.vblank as u8) << 7)
                     | ((self.sprite0_hit as u8) << 6)
-                    | ((self.sprite_overflow as u8) << 5);
+                    | ((self.sprite_overflow as u8) << 5)
+                    | (self.open_bus() & 0x1F);
+                self.refresh_open_bus(status, 0xE0);
                 self.vblank = false;
                 // Reading exactly 1 dot before VBL onset ((241,1) is the next
                 // dot to process) wins the race: the flag never sets this
@@ -816,28 +874,47 @@ impl Ppu {
                 self.w = false;
                 status
             }
-            // $2004 OAMDATA
-            4 => self.oam[self.oam_addr as usize],
-            // $2007 PPUDATA — non-palette reads are buffered one cycle
+            // $2004 OAMDATA — fully PPU-driven; refreshes all decay bits.
+            // Attribute bytes (every 4th, offset 2) have no storage for bits
+            // 2-4, so they always read back clear.
+            4 => {
+                let mut value = self.oam[self.oam_addr as usize];
+                if self.oam_addr & 3 == 2 {
+                    value &= 0xE3;
+                }
+                self.refresh_open_bus(value, 0xFF);
+                value
+            }
+            // $2007 PPUDATA — non-palette reads are buffered one cycle and
+            // refresh all decay bits; palette reads drive only bits 5-0,
+            // with bits 7-6 coming from the decay register unrefreshed.
             7 => {
                 let addr = self.v;
                 self.v = self.v.wrapping_add(self.vram_increment());
                 if addr & 0x3FFF >= 0x3F00 {
                     // Palette: return immediately; refresh buffer from nametable behind palette
                     self.read_buf = self.ppu_read(addr & 0x2FFF, cart);
-                    self.ppu_read(addr, cart)
+                    let value = (self.open_bus() & 0xC0) | (self.ppu_read(addr, cart) & 0x3F);
+                    self.refresh_open_bus(value, 0x3F);
+                    value
                 } else {
                     let buffered = self.read_buf;
                     self.read_buf = self.ppu_read(addr, cart);
+                    self.refresh_open_bus(buffered, 0xFF);
                     buffered
                 }
             }
-            _ => 0,
+            // Write-only registers ($2000/$2001/$2003/$2005/$2006): reading
+            // returns the decay register and refreshes nothing.
+            _ => self.open_bus(),
         }
     }
 
     /// Write a PPU register. `reg` is the 3-bit register select (addr & 7).
+    /// Every write drives all 8 bits of the CPU-PPU bus, refreshing the
+    /// whole open-bus decay register with the written value.
     pub fn write_register(&mut self, reg: u8, data: u8, cart: Option<&mut Cartridge>) {
+        self.refresh_open_bus(data, 0xFF);
         match reg {
             // $2000 PPUCTRL
             0 => {
@@ -893,7 +970,9 @@ impl Ppu {
 
     /// Write a single byte to OAM at offset `offset` (used by OAM DMA via $4014).
     /// DMA starts at the current OAMADDR ($2003) and wraps mod 256.
+    /// Hardware performs these as $2004 writes, so they refresh the open bus.
     pub fn oam_dma_write(&mut self, offset: u8, data: u8) {
+        self.refresh_open_bus(data, 0xFF);
         self.oam[self.oam_addr.wrapping_add(offset) as usize] = data;
     }
 }

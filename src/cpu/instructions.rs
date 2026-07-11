@@ -2,6 +2,27 @@ use super::{Bus, Cpu, FLAG_B, FLAG_C, FLAG_I, FLAG_N, FLAG_U, FLAG_V, FLAG_Z};
 
 /// Executes one instruction. Returns the number of cycles consumed.
 pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, opcode: u8) -> u8 {
+    // Every 6502 instruction reads the byte after its opcode on T2.
+    // Multi-byte instructions consume it as their operand (each handler
+    // fetches it), but one-byte instructions read and DISCARD it — the read
+    // still happens on the bus, and its side effects are observable when
+    // executing out of I/O space: blargg's cpu_exec_space_ppuio runs an RTS
+    // at $2001 and requires its dummy fetch of $2002 to clear the PPU
+    // address latch. PC is not advanced.
+    match opcode {
+        0x0A | 0x2A | 0x4A | 0x6A               // ASL/ROL/LSR/ROR A
+        | 0x08 | 0x28 | 0x48 | 0x68             // PHP/PLP/PHA/PLA
+        | 0x18 | 0x38 | 0x58 | 0x78             // CLC/SEC/CLI/SEI
+        | 0xB8 | 0xD8 | 0xF8                    // CLV/CLD/SED
+        | 0xAA | 0x8A | 0xA8 | 0x98 | 0xBA | 0x9A // TAX/TXA/TAY/TYA/TSX/TXS
+        | 0xCA | 0x88 | 0xE8 | 0xC8             // DEX/DEY/INX/INY
+        | 0xEA | 0x1A | 0x3A | 0x5A | 0x7A | 0xDA | 0xFA // NOP + 1-byte unofficial NOPs
+        | 0x40 | 0x60 => {                      // RTI/RTS
+            let _ = bus.read(cpu.pc);
+        }
+        _ => {}
+    }
+
     match opcode {
         // --- ADC ---
         0x69 => {
