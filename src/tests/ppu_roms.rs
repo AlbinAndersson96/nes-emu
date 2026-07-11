@@ -4,6 +4,7 @@ use crate::bus::Bus;
 use crate::cartridge::Cartridge;
 use crate::cpu::Cpu;
 use crate::renderer::nes_to_rgba;
+use crate::system::SystemClock;
 
 // Run each ROM for 5 seconds of NES time (~300 frames at 60 fps).
 const FRAMES: u32 = 300;
@@ -27,28 +28,16 @@ fn run_ppu_rom(filename: &str) -> RomOutput {
     bus.insert_cartridge(cartridge);
     let mut cpu = Cpu::new();
     cpu.reset(&mut bus);
+    // Match hardware's reset alignment (see roms.rs::run_rom_impl).
+    let _ = bus.tick_ppu(7);
+    let _ = bus.tick_apu(8);
 
+    // Step via the shared SystemClock so $2002-read PPU pre-advances are
+    // consumed instead of drifting the PPU ahead 3 CPU cycles per read.
+    let mut clock = SystemClock::new();
     let mut frames_done = 0u32;
     loop {
-        let cycles_before = cpu.cycles;
-        if bus.dma_active() {
-            bus.tick_dma();
-            if bus.tick_ppu(1) {
-                cpu.nmi();
-            }
-            if bus.tick_apu(1) {
-                cpu.irq();
-            }
-        } else {
-            cpu.tick(&mut bus);
-            let delta = cpu.cycles - cycles_before;
-            if bus.tick_ppu(delta) {
-                cpu.nmi();
-            }
-            if bus.tick_apu(delta) {
-                cpu.irq();
-            }
-        }
+        clock.step(&mut cpu, &mut bus);
 
         if bus.ppu.frame_ready {
             bus.ppu.frame_ready = false;

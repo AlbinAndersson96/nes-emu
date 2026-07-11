@@ -14,12 +14,16 @@ const PRERENDER_SCANLINE: u16 = 261;
 
 /// Dots between a sprite0_hit-affecting event (a colliding pixel, or the
 /// pre-render scanline's reset) and the flag becoming visible via $2002.
-/// Real hardware doesn't latch the flag the instant the event happens — an
-/// internal pipeline delays it. Calibrated by bisection against
-/// blargg's `sprite_hit_tests_2005.10.05` timing ROMs (valid window measured
-/// at 18-23 dots for the set side; 21 also satisfies the pre-render clear).
-/// See docs/investigations/sprite_hit_timing_debug_log.md.
-const SPRITE0_HIT_LATCH_DOTS: u8 = 21;
+/// Calibrated by bisection against blargg's `sprite_hit_tests_2005.10.05`
+/// timing ROMs, run through the shared `SystemClock`: the valid window is
+/// 0-2 dots, so 1 (the midpoint) — i.e. the flag is visible almost
+/// immediately, there is no long internal pipeline. (An earlier calibration
+/// arrived at 18-23 dots, but that measurement was taken with a stale test
+/// harness that double-advanced the PPU 9 dots on every $2002 read — the
+/// large "pipeline delay" was compensating for harness drift, not modeling
+/// hardware. See docs/investigations/sprite_hit_timing_debug_log.md for the
+/// original investigation.)
+const SPRITE0_HIT_LATCH_DOTS: u8 = 1;
 
 pub struct Ppu {
     // Programmer-visible write-only registers
@@ -74,6 +78,16 @@ pub struct Ppu {
     /// scanline-241-dot-1 race): the flag is never set that frame, so no NMI
     /// fires either. One-shot, consumed at the set point.
     suppress_vbl: bool,
+    /// `rendering_enabled()` as sampled at the start of the previous dot's
+    /// processing. The odd-frame skipped-dot decision (scanline-length
+    /// selection in clock_dot, evaluated while processing pre-render dot 339)
+    /// uses THIS instead of the current sample: blargg's
+    /// ppu_vbl_nmi/10-even_odd_timing pins the decision to the rendering
+    /// state one dot earlier — a $2001 write taking effect right before dot
+    /// 339 is already too late to change whether the skip happens, in either
+    /// direction (all four of its sub-tests are consistent with a single
+    /// sample at the start of dot 338).
+    render_prev_dot: bool,
 
     // Dot/scanline counters (PPU runs at 3× CPU clock)
     dot: u16,
@@ -149,6 +163,7 @@ impl Ppu {
             prev_nmi_line: false,
             dot_phase: 0,
             suppress_vbl: false,
+            render_prev_dot: false,
             dot: 0,
             scanline: 0,
             odd_frame: false,
@@ -339,7 +354,9 @@ impl Ppu {
 
         // ── Advance dot counter ──────────────────────────────────────────────
         self.dot += 1;
-        let scanline_len = if self.scanline == PRERENDER_SCANLINE && self.odd_frame && render {
+        let skip_render = self.render_prev_dot;
+        self.render_prev_dot = render;
+        let scanline_len = if self.scanline == PRERENDER_SCANLINE && self.odd_frame && skip_render {
             340
         } else {
             DOTS_PER_SCANLINE

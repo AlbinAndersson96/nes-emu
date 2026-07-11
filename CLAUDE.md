@@ -130,8 +130,8 @@ The `roms.rs` harness (previously report-only for these suites) now asserts ever
 - **`cpu_exec_space/test_cpu_exec_space_ppuio`** — code 3: executing code out of PPU I/O space ($2000–$3FFF).
 - **`oam_stress/oam_stress`** — code 1: OAM read/write stress (needs dot-accurate OAM access behavior during rendering).
 - **`ppu_open_bus/ppu_open_bus`** — code 2: *Write to any PPU register should set decay value* — PPU open-bus/decay register is not modeled.
-- **`ppu_vbl_nmi/rom_singles/10-even_odd_timing`** — code 3 ("08 07"): odd-frame skipped-dot timing detail.
-- **`ppu_vbl_nmi/ppu_vbl_nmi`** (combined) — code 1: fails because sub-test 10 above fails; the other 9 sub-tests pass individually.
+
+`ppu_vbl_nmi/rom_singles/10-even_odd_timing` (and with it the combined `ppu_vbl_nmi.nes`) now passes. Two fixes: $2001 writes get the same 8-dots/apply/1-dot pre-advance as $2000 (previously they applied ~12 dots early, at the start of the writing instruction), and the odd-frame skipped-dot decision samples `rendering_enabled` at the start of pre-render dot 338 — one dot earlier than the wrap check (`Ppu::render_prev_dot`); all four of the ROM's sub-tests pin that single sample point.
 
 ### Failing text-console tests
 
@@ -144,6 +144,10 @@ These blargg ROMs report an on-screen failure, and their tests in `src/tests/tex
 All 7 `vbl_nmi_timing` tests now pass. Three fixes: (a) the harness was switched to the shared `SystemClock` (its old hand-rolled loop never consumed the $2002-read PPU pre-advance, drifting the PPU 3 CPU cycles per read — this alone fixed `4.vbl_clear_timing` and `7.nmi_timing`); (b) the PPU's NMI is now modeled as hardware does it — a level (`vblank && nmi-enable`) edge-sampled once per CPU cycle — which yields the 2-dot NMI-suppression windows for $2002 reads and $2000 NMI-disables around VBL onset, plus the flag-never-sets race for a $2002 read 1 dot before VBL (see `src/ppu/mod.rs`, `Bus::read`/`Bus::write`); (c) the $4017 frame-counter reset delay is parity-dependent (see below).
 
 The rest of the text-console suite passes and asserts: all 7 `vbl_nmi_timing`, `sprite_overflow_tests/1.Basics` and `5.Emulator`, all 3 `branch_timing_tests`, `cpu_timing_test6`, and `blargg_nes_cpu_test5/official.nes`.
+
+### Sprite-0 hit latch delay is ~1 dot (the old 21 was harness drift)
+
+`SPRITE0_HIT_LATCH_DOTS` (`src/ppu/mod.rs`) is 1: the flag is visible via $2002 almost immediately after the colliding pixel (valid calibration window 0-2 dots against the `sprite_hit_tests_2005.10.05` timing ROMs). The previous value of 21 was calibrated while `sprite_hit_roms.rs` used a stale run loop that never consumed the $2002-read PPU pre-advance, double-advancing the PPU 9 dots per read — the "internal pipeline delay" was compensating for that drift. `sprite_hit_roms.rs` and `ppu_roms.rs` now step via the shared `SystemClock` like every other harness; if a sprite-hit timing test ever fails after a timing change, recalibrate the constant by sweeping it rather than trusting the old 18-23 window.
 
 ### $4017 write-to-reset delay is parity-dependent
 

@@ -4,6 +4,7 @@ use crate::bus::Bus;
 use crate::cartridge::Cartridge;
 use crate::cpu::Cpu;
 use crate::renderer::nes_to_rgba;
+use crate::system::SystemClock;
 
 // Run each ROM for 5 seconds of NES time (~300 frames at 60 fps). The ROM
 // prints its result as text on screen (not a single digit like the other PPU
@@ -58,27 +59,14 @@ fn run_sprite_hit_rom(filename: &str) -> RomOutput {
     let _ = bus.tick_ppu(7);
     let _ = bus.tick_apu(8);
 
+    // Step via the shared SystemClock: these ROMs poll $2002 in cycle-tuned
+    // sync loops, and a run loop that doesn't consume the $2002-read PPU
+    // pre-advance (bus.take_ppu_preadvance) drifts the PPU 3 CPU cycles per
+    // read, silently breaking blargg's sync-routine phase guarantees.
+    let mut clock = SystemClock::new();
     let mut frames_done = 0u32;
     loop {
-        let cycles_before = cpu.cycles;
-        if bus.dma_active() {
-            bus.tick_dma();
-            if bus.tick_ppu(1) {
-                cpu.nmi();
-            }
-            if bus.tick_apu(1) {
-                cpu.irq();
-            }
-        } else {
-            cpu.tick(&mut bus);
-            let delta = cpu.cycles - cycles_before;
-            if bus.tick_ppu(delta) {
-                cpu.nmi();
-            }
-            if bus.tick_apu(delta) {
-                cpu.irq();
-            }
-        }
+        clock.step(&mut cpu, &mut bus);
 
         if bus.ppu.frame_ready {
             bus.ppu.frame_ready = false;

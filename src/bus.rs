@@ -258,14 +258,16 @@ impl CpuBus for Bus {
             // PPU registers + mirrors
             0x2000..=0x3FFF => {
                 let reg = (addr & 0x0007) as u8;
-                if reg == 0 {
-                    // $2000 is written on the store's 4th/last cycle on real
-                    // hardware, but this write is applied while the PPU still
-                    // sits at the start of the instruction. Pre-advance the
-                    // PPU with the same 8-dots/apply/1-dot structure as the
-                    // $2002 read, so the write lands at the same sub-cycle
+                if reg == 0 || reg == 1 {
+                    // $2000/$2001 are written on the store's 4th/last cycle on
+                    // real hardware, but this write is applied while the PPU
+                    // still sits at the start of the instruction. Pre-advance
+                    // the PPU with the same 8-dots/apply/1-dot structure as
+                    // the $2002 read, so the write lands at the same sub-cycle
                     // position: one dot before a CPU-cycle NMI-line edge
-                    // sample. That placement is what gives NMI-disable its
+                    // sample.
+                    //
+                    // For $2000, that placement is what gives NMI-disable its
                     // 2-dot suppression window (a disable 0-1 dots after VBL
                     // onset drops the line before the sample sees it), and
                     // what makes the mid-VBlank enable "instant NMI" edge
@@ -274,6 +276,11 @@ impl CpuBus for Bus {
                     // flows into the run loop's per-cycle ticks, where the
                     // deferred-edge rule keeps it from affecting the very
                     // next dispatch (blargg-verified).
+                    //
+                    // For $2001, the placement puts rendering enable/disable
+                    // at the write cycle instead of ~12 dots early, which the
+                    // odd-frame skipped-dot decision depends on
+                    // (ppu_vbl_nmi/10-even_odd_timing).
                     if let Some(ref cart) = self.cartridge {
                         self.ppu.set_mirroring(cart.mirroring());
                     }
