@@ -183,7 +183,17 @@ impl Ppu {
             read_buf: 0,
             oam: Box::new([0u8; 256]),
             vram: Box::new([0u8; 2048]),
-            palette: [0u8; 32],
+            // 2C02 power-up palette (nesdev "PPU power up state"; the same
+            // table blargg's ppu/power_up_palette ROM was recorded from).
+            // The four mirrored backdrop entries (indices $10/$14/$18/$1C,
+            // unreachable through palette_idx) hold the same values as
+            // their $00/$04/$08/$0C targets, so a direct 32-byte init is
+            // self-consistent.
+            palette: [
+                0x09, 0x01, 0x00, 0x01, 0x00, 0x02, 0x02, 0x0D, 0x08, 0x10, 0x08, 0x24, 0x00, 0x00,
+                0x04, 0x2C, 0x09, 0x01, 0x34, 0x03, 0x00, 0x04, 0x00, 0x14, 0x08, 0x3A, 0x00, 0x02,
+                0x00, 0x20, 0x2C, 0x08,
+            ],
             vblank: false,
             sprite0_hit: false,
             sprite0_hit_pending: None,

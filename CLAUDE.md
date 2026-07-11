@@ -85,7 +85,7 @@ tests/screenshots/
 
 ## Known gaps
 
-These are confirmed missing features tied to failing blargg ROM tests. The project currently passes **all 159** blargg CPU tests and **4 of 5** blargg PPU tests.
+**`cargo test` is fully green**: every wired-up blargg suite passes and asserts its ROM's own verdict (291 tests; the 16 `#[ignore]`d ones are manual diagnostic tracers plus the JAM-opcode ROM that can never finish). This section records what was fixed and where the remaining unwired/unsupported territory is (mappers 3/4, the APU suites).
 
 ### Fixed (previously listed here)
 
@@ -114,11 +114,11 @@ None on the CPU side. The blargg-verified per-cycle interrupt-delivery behavior 
 
 - **`blargg_nes_cpu_test5/cpu.nes` (06-abs_xy)** — reports "Error 1" on unofficial opcodes `9C`/`9E` (SHY/SHX). Newly discovered and unconfirmed; SHY/SHX already pass `instr_test-v5/07-abs_xy`, so the discrepancy is in some untested case. The test is `#[ignore]`d for a different reason (the ROM's opcode sweep hits a JAM/KIL opcode and hangs, on real hardware too); tracked here so it isn't lost.
 
-### Failing PPU tests
+### PPU tests: all passing
 
-- **`ppu/power_up_palette`** — result code 2: *Palette differs from table*. Power-up palette contents don't match the specific values on the test author's NES (this test is hardware-specific and may not be fixable in a general emulator).
+`ppu/power_up_palette` now passes: `Ppu::new` initializes palette RAM to the nesdev-documented 2C02 power-up palette — the same table the ROM was recorded from (its source says "these values are probably unique to my NES", but nesdev adopted them as the canonical power-up state and other accuracy-focused emulators ship them too). The golden screenshot was re-blessed for the passing "$01" screen.
 
-`ppu/vbl_clear_time` now passes (fixed as a side effect of the deferred NMI-edge-delivery fix —
+`ppu/vbl_clear_time` passes (fixed as a side effect of the deferred NMI-edge-delivery fix —
 see `docs/cpu_interrupts.md`).
 
 ### $6000-protocol tests: all passing
