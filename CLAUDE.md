@@ -132,13 +132,9 @@ The `roms.rs` harness (previously report-only for many suites) asserts every ROM
 
 `ppu_vbl_nmi/rom_singles/10-even_odd_timing` (and with it the combined `ppu_vbl_nmi.nes`) now passes. Two fixes: $2001 writes get the same 8-dots/apply/1-dot pre-advance as $2000 (previously they applied ~12 dots early, at the start of the writing instruction), and the odd-frame skipped-dot decision samples `rendering_enabled` at the start of pre-render dot 338 — one dot earlier than the wrap check (`Ppu::render_prev_dot`); all four of the ROM's sub-tests pin that single sample point.
 
-### Failing text-console tests
+### Text-console tests: all passing
 
-These blargg ROMs report an on-screen failure, and their tests in `src/tests/text_console_roms.rs` assert that verdict, so they fail `cargo test` (like `ppu/power_up_palette` above) until the underlying gap is fixed. All are PPU sprite-overflow gaps:
-
-- **`sprite_overflow_tests/2.Details`** — FAILED #9: shouldn't be set when all scanlines have 7 or fewer sprites.
-- **`sprite_overflow_tests/3.Timing`** — FAILED #5: set too late for first scanline.
-- **`sprite_overflow_tests/4.Obscure`** — FAILED #7: checks that search stops at the last sprite without overflow.
+All 5 `sprite_overflow_tests` now pass. Sprite evaluation was rewritten as a per-dot state machine (`Ppu::evaluate_sprites`, driven on odd dots 65-255 of visible scanlines): an out-of-range sprite costs 2 dots, an in-range sprite 8 dots (4-byte copy), so the overflow flag sets at the hardware-exact dot (3.Timing). Once 8 sprites are found, the scan continues with the hardware bug — both `n` and `m` increment on out-of-range checks, misinterpreting successive bytes of successive sprites as Y coordinates (4.Obscure's diagonal scan) — and stops without wrapping when `n` walks past sprite 63. The flag only sets when a 9th in-range (possibly misread) Y is found, never merely because 8 exist (2.Details #9). The pre-render scanline no longer evaluates sprites (hardware doesn't): it just clears the evaluation state, so scanline 0 always renders with an empty sprite set, as on real hardware.
 
 All 7 `vbl_nmi_timing` tests now pass. Three fixes: (a) the harness was switched to the shared `SystemClock` (its old hand-rolled loop never consumed the $2002-read PPU pre-advance, drifting the PPU 3 CPU cycles per read — this alone fixed `4.vbl_clear_timing` and `7.nmi_timing`); (b) the PPU's NMI is now modeled as hardware does it — a level (`vblank && nmi-enable`) edge-sampled once per CPU cycle — which yields the 2-dot NMI-suppression windows for $2002 reads and $2000 NMI-disables around VBL onset, plus the flag-never-sets race for a $2002 read 1 dot before VBL (see `src/ppu/mod.rs`, `Bus::read`/`Bus::write`); (c) the $4017 frame-counter reset delay is parity-dependent (see below).
 

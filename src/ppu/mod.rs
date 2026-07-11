@@ -144,6 +144,15 @@ pub struct Ppu {
     // (dot 257) — see fetch_sprites().
     sprite_eval_count: usize,
     sprite0_eval: bool,
+    // Per-dot evaluation state machine (see evaluate_sprites): one OAM check
+    // every 2 dots, so the overflow flag sets at the hardware-exact dot
+    // (blargg sprite_overflow_tests/3.Timing) and the buggy diagonal
+    // overflow scan (4.Obscure) falls out of eval_n/eval_m.
+    eval_n: usize,           // primary OAM sprite index (0-63)
+    eval_m: usize,           // byte-within-sprite offset used by the overflow scan
+    eval_copy_left: u8,      // bytes 1-3 still to copy for an in-range sprite
+    eval_overflow_reads: u8, // the 3 dummy reads after the overflow flag sets
+    eval_done: bool,         // n wrapped past 63 — evaluation idles until next line
 
     // ── Framebuffer ──────────────────────────────────────────────────────────
     // 256 × 240 pixels, each an index into the NES master palette (0x00–0x3F).
@@ -208,6 +217,11 @@ impl Ppu {
             sprite0_in_secondary: false,
             sprite_eval_count: 0,
             sprite0_eval: false,
+            eval_n: 0,
+            eval_m: 0,
+            eval_copy_left: 0,
+            eval_overflow_reads: 0,
+            eval_done: false,
             frame: Box::new([0u8; 256 * 240]),
             frame_ready: false,
         }
@@ -539,61 +553,102 @@ impl Ppu {
 
     // ── Sprite evaluation ─────────────────────────────────────────────────────
 
-    /// Evaluate sprites for the NEXT scanline; runs during dots 65–256 of visible scanlines.
+    /// Evaluate sprites for the NEXT scanline: a per-dot state machine over
+    /// dots 65–256 of VISIBLE scanlines, one OAM check per 2 dots (hardware
+    /// reads OAM on odd dots and writes secondary OAM on even dots):
+    ///
+    /// - An out-of-range sprite costs one step (2 dots): check Y, advance n.
+    /// - An in-range sprite costs four steps (8 dots): copy its 4 bytes.
+    /// - Once 8 sprites are found, the OVERFLOW SCAN begins, carrying the
+    ///   hardware bug: on each out-of-range check BOTH n and m increment, so
+    ///   successive sprites have successive bytes misinterpreted as their Y
+    ///   (the diagonal scan blargg's 4.Obscure documents). An in-range hit
+    ///   sets the overflow flag at that step's dot (3.Timing pins this) and
+    ///   is followed by 3 dummy reads. The scan stops when n walks past
+    ///   sprite 63 — without wrapping around (4.Obscure #7).
+    ///
+    /// The pre-render scanline does NOT evaluate (hardware): it only clears
+    /// the state, so scanline 0 always starts with an empty sprite set — on
+    /// real hardware sprites can never appear on scanline 0.
     fn evaluate_sprites(&mut self) {
-        // Clear secondary OAM at dot 65 (after clearing cycle 1–64). Note this
-        // must NOT touch sprite_count/sprite0_in_secondary — output_pixel()
-        // is still reading those every dot through 256 to render sprites
-        // found during the PREVIOUS scanline's evaluation.
+        // Clear/init at dot 65 (after the secondary-OAM clearing cycles
+        // 1-64). Note this must NOT touch sprite_count/sprite0_in_secondary —
+        // output_pixel() is still reading those every dot through 256 to
+        // render sprites found during the PREVIOUS scanline's evaluation.
         if self.dot == 65 {
             self.secondary_oam = [0xFF; 32];
             self.sprite_eval_count = 0;
             self.sprite0_eval = false;
+            self.eval_n = 0;
+            self.eval_m = 0;
+            self.eval_copy_left = 0;
+            self.eval_overflow_reads = 0;
+            self.eval_done = false;
         }
-        if self.dot < 65 || self.dot > 256 {
+        if self.scanline == PRERENDER_SCANLINE {
             return;
         }
-        if self.sprite_eval_count >= 8 {
-            // Already found 8 sprites; check overflow (simplified — no hardware bug)
+        // One step per odd dot in 65..=255.
+        if self.dot < 65 || self.dot > 255 || self.dot % 2 == 0 || self.eval_done {
             return;
         }
-        // Each OAM entry is 4 bytes; sprite index = (dot-65)/4 maps badly here,
-        // so we only do the full scan once at dot 256 to keep it simple.
-        if self.dot != 256 {
-            return;
-        }
-        // Pre-render's "next scanline" wraps around to scanline 0 of the new
-        // frame, not 262 (which doesn't exist).
-        let next_scanline = if self.scanline == PRERENDER_SCANLINE {
-            0
-        } else {
-            self.scanline + 1
-        };
+
+        // OAM Y is the sprite's top row minus 1 (hardware delays sprite
+        // rendering by one scanline) — matches fetch_sprites()'s row calc,
+        // which subtracts this same 1. Plain (non-wrapping) distance: a
+        // sprite with Y near 255 (a common "hide it" convention) must never
+        // wrap around to become visible at the top of the screen.
+        let next_scanline = self.scanline + 1;
         let height = self.sprite_height() as i32;
-        let mut n = 0usize;
-        while n < 64 && self.sprite_eval_count < 8 {
-            let y = self.oam[n * 4];
-            // OAM Y is the sprite's top row minus 1 (hardware delays sprite
-            // rendering by one scanline) — matches fetch_sprites()'s row calc,
-            // which already subtracts this same 1. Plain (non-wrapping)
-            // distance: a sprite with Y near 255 (a common "hide it"
-            // convention, since y+1 already exceeds every valid scanline)
-            // must never wrap around to become visible at the top of the
-            // screen — wrapping_sub would do that for small next_scanline.
-            let row = next_scanline as i32 - y as i32 - 1;
-            let in_range = (0..height).contains(&row);
-            if in_range {
-                let dst = self.sprite_eval_count * 4;
-                self.secondary_oam[dst..dst + 4].copy_from_slice(&self.oam[n * 4..n * 4 + 4]);
-                if n == 0 {
-                    self.sprite0_eval = true;
+        let in_range = |y: u8| (0..height).contains(&(next_scanline as i32 - y as i32 - 1));
+
+        if self.sprite_eval_count < 8 {
+            if self.eval_copy_left > 0 {
+                // Copying bytes 1-3 of an in-range sprite, one per step.
+                let byte = 4 - self.eval_copy_left as usize;
+                self.secondary_oam[self.sprite_eval_count * 4 + byte] =
+                    self.oam[self.eval_n * 4 + byte];
+                self.eval_copy_left -= 1;
+                if self.eval_copy_left == 0 {
+                    self.sprite_eval_count += 1;
+                    self.eval_n += 1;
+                    self.eval_done = self.eval_n == 64;
                 }
-                self.sprite_eval_count += 1;
+            } else {
+                let y = self.oam[self.eval_n * 4];
+                if in_range(y) {
+                    self.secondary_oam[self.sprite_eval_count * 4] = y;
+                    if self.eval_n == 0 {
+                        self.sprite0_eval = true;
+                    }
+                    self.eval_copy_left = 3;
+                } else {
+                    self.eval_n += 1;
+                    self.eval_done = self.eval_n == 64;
+                }
             }
-            n += 1;
-        }
-        if n < 64 && self.sprite_eval_count == 8 {
-            self.sprite_overflow = true;
+        } else if self.eval_overflow_reads > 0 {
+            // Dummy reads after the flag set; m increments with carry into n.
+            self.eval_overflow_reads -= 1;
+            self.eval_m += 1;
+            if self.eval_m == 4 {
+                self.eval_m = 0;
+                self.eval_n += 1;
+            }
+            if self.eval_overflow_reads == 0 || self.eval_n >= 64 {
+                self.eval_done = true;
+            }
+        } else {
+            // Buggy overflow scan: OAM[n][m] is treated as a Y coordinate.
+            let y = self.oam[self.eval_n * 4 + self.eval_m];
+            if in_range(y) {
+                self.sprite_overflow = true;
+                self.eval_overflow_reads = 3;
+            } else {
+                self.eval_n += 1;
+                self.eval_m = (self.eval_m + 1) & 3;
+                self.eval_done = self.eval_n == 64;
+            }
         }
     }
 
