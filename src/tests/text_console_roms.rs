@@ -1,3 +1,9 @@
+//! Harness for blargg ROM suites that print their verdict as text into PPU
+//! nametable 0 instead of using the `$6000` result protocol. Each test
+//! asserts the ROM's on-screen verdict, so ROMs that fail because of known
+//! emulator gaps fail `cargo test` — see the "Failing text-console tests"
+//! list under Known gaps in CLAUDE.md for the currently expected failures.
+
 use std::path::PathBuf;
 
 use crate::bus::Bus;
@@ -109,13 +115,14 @@ fn extract_error_code(text: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// Runs `filename` from `tests/roms/<dir>/` for `frames` PPU frames, then
-/// reports whatever result text it printed via `print_raw` (visible with
-/// `cargo test -- --nocapture`). Report-only: never asserts pass/fail: only
-/// panics if no recognized marker appears at all, which usually means
-/// `frames` is too low for that ROM. `meanings` maps failure codes 2.. to
-/// descriptions (index 0 = code 2, index 1 = code 3, ...) taken from the
-/// suite's readme.txt; pass `&[]` when the suite has no such table.
+/// Runs `filename` from `tests/roms/<dir>/` for `frames` PPU frames, reports
+/// the result text it printed via `print_raw` (visible without
+/// `--nocapture`), and asserts the ROM's own verdict: any failure marker
+/// (`FAILED #<n>`, `Error <n>`, `Failed`, `INTERNAL ERROR`) panics, as does
+/// an unrecognized result marker (which usually means `frames` is too low
+/// for that ROM). `meanings` maps failure codes 2.. to descriptions
+/// (index 0 = code 2, index 1 = code 3, ...) taken from the suite's
+/// readme.txt; pass `&[]` when the suite has no such table.
 fn report(name: &str, dir: &str, filename: &str, frames: u32, meanings: &[&str]) {
     let text = run_text_console_rom(dir, filename, frames);
 
@@ -149,6 +156,12 @@ fn report(name: &str, dir: &str, filename: &str, frames: u32, meanings: &[&str])
     print_raw(&format!(
         "[{name}] {summary}\n--- screen text ---\n{text}--- end screen text ---"
     ));
+
+    if !summary.starts_with("PASSED") {
+        panic!(
+            "{name}: ROM reported failure — {summary}\n--- screen text ---\n{text}--- end screen text ---"
+        );
+    }
 }
 
 // --- vbl_nmi_timing (7 ROMs) ---
