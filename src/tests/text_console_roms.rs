@@ -1,3 +1,10 @@
+//! Harness for blargg ROM suites that print their verdict as text into PPU
+//! nametable 0 instead of using the `$6000` result protocol. Each test
+//! asserts the ROM's on-screen verdict; ROMs that fail due to known emulator
+//! gaps are `#[ignore]`d with the recorded failure code, so `cargo test`
+//! reports them as ignored rather than falsely passing. When a gap is fixed,
+//! remove the corresponding `#[ignore]`.
+
 use std::path::PathBuf;
 
 use crate::bus::Bus;
@@ -109,13 +116,14 @@ fn extract_error_code(text: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// Runs `filename` from `tests/roms/<dir>/` for `frames` PPU frames, then
-/// reports whatever result text it printed via `print_raw` (visible with
-/// `cargo test -- --nocapture`). Report-only: never asserts pass/fail: only
-/// panics if no recognized marker appears at all, which usually means
-/// `frames` is too low for that ROM. `meanings` maps failure codes 2.. to
-/// descriptions (index 0 = code 2, index 1 = code 3, ...) taken from the
-/// suite's readme.txt; pass `&[]` when the suite has no such table.
+/// Runs `filename` from `tests/roms/<dir>/` for `frames` PPU frames, reports
+/// the result text it printed via `print_raw` (visible without
+/// `--nocapture`), and asserts the ROM's own verdict: any failure marker
+/// (`FAILED #<n>`, `Error <n>`, `Failed`, `INTERNAL ERROR`) panics, as does
+/// an unrecognized result marker (which usually means `frames` is too low
+/// for that ROM). `meanings` maps failure codes 2.. to descriptions
+/// (index 0 = code 2, index 1 = code 3, ...) taken from the suite's
+/// readme.txt; pass `&[]` when the suite has no such table.
 fn report(name: &str, dir: &str, filename: &str, frames: u32, meanings: &[&str]) {
     let text = run_text_console_rom(dir, filename, frames);
 
@@ -149,6 +157,12 @@ fn report(name: &str, dir: &str, filename: &str, frames: u32, meanings: &[&str])
     print_raw(&format!(
         "[{name}] {summary}\n--- screen text ---\n{text}--- end screen text ---"
     ));
+
+    if !summary.starts_with("PASSED") {
+        panic!(
+            "{name}: ROM reported failure — {summary}\n--- screen text ---\n{text}--- end screen text ---"
+        );
+    }
 }
 
 // --- vbl_nmi_timing (7 ROMs) ---
@@ -171,6 +185,7 @@ fn vbl_nmi_timing_frame_basics() {
     );
 }
 
+#[ignore = "known emulator gap: FAILED #2 — Flag should read as clear 3 PPU clocks before VBL"]
 #[test]
 fn vbl_nmi_timing_vbl_timing() {
     report(
@@ -190,6 +205,7 @@ fn vbl_nmi_timing_vbl_timing() {
     );
 }
 
+#[ignore = "known emulator gap: FAILED #2 — Pattern ----- should not skip any clocks"]
 #[test]
 fn vbl_nmi_timing_even_odd_frames() {
     report(
@@ -207,6 +223,7 @@ fn vbl_nmi_timing_even_odd_frames() {
     );
 }
 
+#[ignore = "known emulator gap: FAILED #2 — Cleared 3 or more PPU clocks too early"]
 #[test]
 fn vbl_nmi_timing_vbl_clear_timing() {
     report(
@@ -225,6 +242,7 @@ fn vbl_nmi_timing_vbl_clear_timing() {
     );
 }
 
+#[ignore = "known emulator gap: FAILED #3 — Reading flag when it's set should suppress NMI"]
 #[test]
 fn vbl_nmi_timing_nmi_suppression() {
     report(
@@ -246,6 +264,7 @@ fn vbl_nmi_timing_nmi_suppression() {
     );
 }
 
+#[ignore = "known emulator gap: FAILED #2 — NMI shouldn't occur when disabled 0 PPU clocks after VBL"]
 #[test]
 fn vbl_nmi_timing_nmi_disable() {
     report(
@@ -264,6 +283,7 @@ fn vbl_nmi_timing_nmi_disable() {
     );
 }
 
+#[ignore = "known emulator gap: FAILED #2 — NMI occurred 3 or more PPU clocks too early"]
 #[test]
 fn vbl_nmi_timing_nmi_timing() {
     report(
@@ -306,6 +326,7 @@ fn sprite_overflow_basics() {
     );
 }
 
+#[ignore = "known emulator gap: FAILED #9 — Shouldn't be set when all scanlines have 7 or fewer sprites"]
 #[test]
 fn sprite_overflow_details() {
     report(
@@ -327,6 +348,7 @@ fn sprite_overflow_details() {
     );
 }
 
+#[ignore = "known emulator gap: FAILED #3 — Cleared too early at end of VBL"]
 #[test]
 fn sprite_overflow_timing() {
     report(
@@ -352,6 +374,7 @@ fn sprite_overflow_timing() {
     );
 }
 
+#[ignore = "known emulator gap: FAILED #7 — Checks that search stops at the last sprite without overflow"]
 #[test]
 fn sprite_overflow_obscure() {
     report(

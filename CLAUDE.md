@@ -43,7 +43,7 @@ cargo fmt            # format
 - **`src/tests/roms.rs`** — Blargg CPU ROM test harness. Polls $6000/$6001–$6003 for test completion; steps the machine via the shared `SystemClock` (`src/system.rs`), which carries all the per-cycle interrupt-delivery rules. Note: the `#[ignore]`d diagnostic tracers in this file keep their own private copies of older run loops and can go stale — trust `SystemClock`, not them. Runs the `instr_test-v5` suite (17 tests, all passing), `instr_timing` (passing), all 5 `instr_misc` tests (passing), plus `cpu_interrupts_v2` (all 6 passing).
 - **`src/tests/ppu_roms.rs`** — Blargg PPU ROM test harness. Runs each ROM for 300 frames (~5 s NES time), then reads the result code from the nametable (the ROMs render `$XX` in ASCII tiles at nametable-0 row 5, col 2–4) and looks up its meaning from the per-ROM table in the README. On failure the panic message includes the result code and its description. Also saves a PNG screenshot to `tests/screenshots/ppu/output/` and pixel-compares against a golden in `tests/screenshots/ppu/golden/` if one exists. To bless a new golden: `cp tests/screenshots/ppu/output/<name>.png tests/screenshots/ppu/golden/<name>.png`.
 - **`src/tests/mapper_roms.rs`** — asserts `Cartridge::from_ines` fails cleanly with `UnsupportedMapper` for ROM suites that need mapper 3 (CNROM) or mapper 4 (MMC3), neither of which is implemented yet (`cpu_dummy_reads`, `ppu_read_buffer`, `mmc3_test`, `mmc3_test_2`, `mmc3_irq_tests`).
-- **`src/tests/text_console_roms.rs`** — report-only harness for blargg ROM suites that print `PASSED`/`FAILED #<n>`/`Error <n>` text directly into PPU nametable 0 instead of using the `$6000` protocol (`vbl_nmi_timing`, `sprite_overflow_tests`, `branch_timing_tests`, `cpu_timing_test6`, `blargg_nes_cpu_test5`). Never asserts the ROM's own verdict — only a panic or an unrecognized result marker fails the test.
+- **`src/tests/text_console_roms.rs`** — harness for blargg ROM suites that print `PASSED`/`FAILED #<n>`/`Error <n>` text directly into PPU nametable 0 instead of using the `$6000` protocol (`vbl_nmi_timing`, `sprite_overflow_tests`, `branch_timing_tests`, `cpu_timing_test6`, `blargg_nes_cpu_test5`). Asserts the ROM's on-screen verdict — any failure marker fails the test. ROMs that fail because of known emulator gaps are `#[ignore]`d with the recorded failure code (so `cargo test` reports them as ignored, never as falsely passing); see the "Failing text-console tests" list under Known gaps. Remove the `#[ignore]` when the corresponding gap is fixed.
 - **`docs/bus.md`** — NES address map and bus design notes.
 - **`docs/cpu_instructions.md`** — 6502 instruction reference (official opcodes, addressing modes, cycle counts).
 - **`docs/cpu_interrupts.md`** — NMI/IRQ/BRK dispatch, the micro-op interrupt-service sequence, NMI hijacking BRK or an in-progress IRQ, and the interrupt-polling-granularity (deferred-edge) fix. Start here before touching interrupt timing; links to the full investigation log for anything not yet resolved.
@@ -112,7 +112,7 @@ These are confirmed missing features tied to failing blargg ROM tests. The proje
 
 None on the CPU side. The blargg-verified per-cycle interrupt-delivery behavior lives in `SystemClock` (`src/system.rs`), shared by the real run loop (`App::step_frame`) and the ROM test harness — the previously-noted harness/main.rs divergence is resolved.
 
-- **`blargg_nes_cpu_test5/cpu.nes` (06-abs_xy)** — reports "Error 1" on unofficial opcodes `9C`/`9E` (SHY/SHX). Newly discovered and unconfirmed; SHY/SHX already pass `instr_test-v5/07-abs_xy`, so the discrepancy is in some untested case. Report-only test (doesn't fail `cargo test`); tracked here so it isn't lost.
+- **`blargg_nes_cpu_test5/cpu.nes` (06-abs_xy)** — reports "Error 1" on unofficial opcodes `9C`/`9E` (SHY/SHX). Newly discovered and unconfirmed; SHY/SHX already pass `instr_test-v5/07-abs_xy`, so the discrepancy is in some untested case. The test is `#[ignore]`d for a different reason (the ROM's opcode sweep hits a JAM/KIL opcode and hangs, on real hardware too); tracked here so it isn't lost.
 
 ### Failing PPU tests
 
@@ -120,3 +120,19 @@ None on the CPU side. The blargg-verified per-cycle interrupt-delivery behavior 
 
 `ppu/vbl_clear_time` now passes (fixed as a side effect of the deferred NMI-edge-delivery fix —
 see `docs/cpu_interrupts.md`).
+
+### Failing text-console tests
+
+These blargg ROMs report an on-screen failure. Their tests in `src/tests/text_console_roms.rs` are `#[ignore]`d with the failure code recorded in the ignore reason, so `cargo test` shows them as ignored instead of falsely passing. All are PPU timing/behavior gaps:
+
+- **`vbl_nmi_timing/2.vbl_timing`** — FAILED #2: flag should read as clear 3 PPU clocks before VBL.
+- **`vbl_nmi_timing/3.even_odd_frames`** — FAILED #2: pattern ----- should not skip any clocks.
+- **`vbl_nmi_timing/4.vbl_clear_timing`** — FAILED #2: cleared 3 or more PPU clocks too early.
+- **`vbl_nmi_timing/5.nmi_suppression`** — FAILED #3: reading flag when it's set should suppress NMI.
+- **`vbl_nmi_timing/6.nmi_disable`** — FAILED #2: NMI shouldn't occur when disabled 0 PPU clocks after VBL.
+- **`vbl_nmi_timing/7.nmi_timing`** — FAILED #2: NMI occurred 3 or more PPU clocks too early.
+- **`sprite_overflow_tests/2.Details`** — FAILED #9: shouldn't be set when all scanlines have 7 or fewer sprites.
+- **`sprite_overflow_tests/3.Timing`** — FAILED #3: cleared too early at end of VBL.
+- **`sprite_overflow_tests/4.Obscure`** — FAILED #7: checks that search stops at the last sprite without overflow.
+
+The rest of the text-console suite passes and now asserts: `vbl_nmi_timing/1.frame_basics`, `sprite_overflow_tests/1.Basics` and `5.Emulator`, all 3 `branch_timing_tests`, `cpu_timing_test6`, and `blargg_nes_cpu_test5/official.nes`.
