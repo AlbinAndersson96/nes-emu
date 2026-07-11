@@ -32,9 +32,11 @@ fn vblank_set_at_scanline_241_dot_1() {
     // After n CPU cycles the PPU state is (3n/341, 3n%341).
     // State (241, 1) is reached after 3n = 241*341+1 = 82182 clocks → n = 27394.
     // clock_dot is called WITH that state, setting vblank, then advances to (241, 2).
-    // So at n = 27394 the state is (241, 1) and vblank is NOT yet set.
-    // At n = 27395 the state is (241, 4) and vblank IS set.
-    tick(&mut ppu, 27394);
+    // So at n = 27394 the state is (241, 1) and vblank is NOT yet set — but a
+    // $2002 read AT that state would hit the 1-dot-before-VBL race and
+    // suppress the flag for the whole frame (tested separately below), so the
+    // "before" probe reads one cycle earlier, at (240, 339).
+    tick(&mut ppu, 27393);
     let status_before = ppu.read_register(2, None);
     assert_eq!(
         status_before & 0x80,
@@ -42,7 +44,7 @@ fn vblank_set_at_scanline_241_dot_1() {
         "VBlank should not be set before dot 1 is processed"
     );
 
-    tick(&mut ppu, 1); // 27395 total cycles: processes (241,1)(241,2)(241,3), sets VBlank
+    tick(&mut ppu, 2); // 27395 total cycles: processes through (241,3), sets VBlank
     let status_after = ppu.read_register(2, None);
     assert_eq!(
         status_after & 0x80,
@@ -108,11 +110,14 @@ fn enabling_nmi_mid_vblank_fires_immediately() {
     tick_to(&mut ppu, 241, 3);
     tick(&mut ppu, 1);
     assert!(!ppu.take_nmi(), "NMI must be clear before we enable it");
-    // Now enable NMI while still in VBlank
+    // Now enable NMI while still in VBlank. The NMI line (vblank && enable)
+    // rises immediately, and the CPU-side edge detector latches it at the
+    // next per-cycle sample — so tick one CPU cycle before checking.
     ppu.write_register(0, 0x80, None);
+    tick(&mut ppu, 1);
     assert!(
         ppu.take_nmi(),
-        "Enabling NMI mid-VBlank should fire NMI immediately"
+        "Enabling NMI mid-VBlank should fire NMI at the next cycle sample"
     );
 }
 
@@ -154,14 +159,45 @@ fn read_status_clears_write_toggle() {
 }
 
 #[test]
-fn read_status_suppresses_pending_nmi() {
+fn read_status_cannot_unlatch_pending_nmi() {
     let mut ppu = Ppu::new();
     ppu.write_register(0, 0x80, None);
     tick_to(&mut ppu, 241, 1);
     tick(&mut ppu, 1);
-    // Read $2002 before take_nmi() — this should suppress the NMI
+    // The NMI edge was sampled a full CPU cycle ago — like on hardware, a
+    // later $2002 read (which clears the flag and drops the line) cannot
+    // un-latch the CPU's edge detector. Suppression only happens when the
+    // read lands within the same CPU cycle as VBL onset, BEFORE the edge
+    // sample — that path needs mid-instruction read placement and is covered
+    // by the blargg ROM tests (ppu_vbl_nmi/06-suppression,
+    // vbl_nmi_timing/5.nmi_suppression).
     ppu.read_register(2, None);
-    assert!(!ppu.take_nmi(), "$2002 read should suppress pending NMI");
+    assert!(
+        ppu.take_nmi(),
+        "$2002 read must not clear an already-latched NMI edge"
+    );
+}
+
+#[test]
+fn read_status_one_dot_before_vbl_suppresses_flag_and_nmi() {
+    let mut ppu = Ppu::new();
+    ppu.write_register(0, 0x80, None);
+    // Position exactly at (241, 1): the NEXT dot to process is the one that
+    // sets the VBlank flag (see vblank_set_at_scanline_241_dot_1 for the
+    // arithmetic). A $2002 read here is the hardware race: it returns the
+    // flag as clear AND prevents it from being set that frame, so no NMI
+    // fires either.
+    tick(&mut ppu, 27394);
+    let status = ppu.read_register(2, None);
+    assert_eq!(status & 0x80, 0, "race read returns the flag as clear");
+    tick(&mut ppu, 3);
+    assert!(!ppu.take_nmi(), "suppressed VBL must not generate an NMI");
+    let status = ppu.read_register(2, None);
+    assert_eq!(
+        status & 0x80,
+        0,
+        "VBlank flag must never be set in a frame whose onset was raced by a $2002 read"
+    );
 }
 
 // ── PPUADDR / PPUDATA ────────────────────────────────────────────────────────

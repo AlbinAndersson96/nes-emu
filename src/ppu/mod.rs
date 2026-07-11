@@ -53,8 +53,27 @@ pub struct Ppu {
     // docs/investigations/sprite_hit_timing_debug_log.md.
     sprite0_hit_pending: Option<(bool, u8)>,
 
-    // NMI edge detector
+    // ── NMI line + CPU-side edge detector ────────────────────────────────────
+    // The NMI line is a LEVEL: `vblank && (ctrl & 0x80)`. The CPU's edge
+    // detector samples it once per CPU cycle (every 3rd dot, at the cycle
+    // boundary); a rising edge between samples latches nmi_pending, which
+    // stays latched until consumed by take_nmi() — a later $2002 read cannot
+    // un-latch it, matching hardware. Because register read/write side
+    // effects are applied mid-cycle (8 dots in, 1 dot before the boundary —
+    // see Bus::read/write), a $2002 read or $2000 NMI-disable landing 0-1
+    // PPU clocks after VBL onset drops the line before the sample ever sees
+    // it high: blargg's 2-dot NMI-suppression window falls out naturally.
     nmi_pending: bool,
+    /// NMI line level at the previous per-CPU-cycle sample.
+    prev_nmi_line: bool,
+    /// Counts processed dots mod 3; the line is sampled when it wraps. All
+    /// bus paths keep whole-instruction dot totals a multiple of 3, so the
+    /// wrap points stay aligned with CPU cycle boundaries.
+    dot_phase: u8,
+    /// Set by a $2002 read landing exactly 1 dot before VBL onset (the
+    /// scanline-241-dot-1 race): the flag is never set that frame, so no NMI
+    /// fires either. One-shot, consumed at the set point.
+    suppress_vbl: bool,
 
     // Dot/scanline counters (PPU runs at 3× CPU clock)
     dot: u16,
@@ -127,6 +146,9 @@ impl Ppu {
             sprite0_hit_pending: None,
             sprite_overflow: false,
             nmi_pending: false,
+            prev_nmi_line: false,
+            dot_phase: 0,
+            suppress_vbl: false,
             dot: 0,
             scanline: 0,
             odd_frame: false,
@@ -188,10 +210,14 @@ impl Ppu {
         // ── VBlank / pre-render flag events ─────────────────────────────────
         match self.scanline {
             VBLANK_SCANLINE if self.dot == 1 => {
-                self.vblank = true;
-                if self.ctrl & 0x80 != 0 {
-                    self.nmi_pending = true;
+                // A $2002 read 1 dot earlier wins the race: flag never sets.
+                if self.suppress_vbl {
+                    self.suppress_vbl = false;
+                } else {
+                    self.vblank = true;
                 }
+                // NMI is not fired here: the line (vblank && nmi-enable) is
+                // edge-sampled at the next CPU cycle boundary below.
             }
             PRERENDER_SCANLINE if self.dot == 1 => {
                 self.vblank = false;
@@ -326,6 +352,22 @@ impl Ppu {
                 self.odd_frame = !self.odd_frame;
             }
         }
+
+        // ── CPU-side NMI edge sample (once per CPU cycle = every 3rd dot) ────
+        self.dot_phase += 1;
+        if self.dot_phase == 3 {
+            self.dot_phase = 0;
+            let line = self.nmi_line();
+            if line && !self.prev_nmi_line {
+                self.nmi_pending = true;
+            }
+            self.prev_nmi_line = line;
+        }
+    }
+
+    /// Level of the PPU's /NMI output (active state as a bool).
+    fn nmi_line(&self) -> bool {
+        self.vblank && (self.ctrl & 0x80 != 0)
     }
 
     fn rendering_enabled(&self) -> bool {
@@ -743,7 +785,17 @@ impl Ppu {
                     | ((self.sprite0_hit as u8) << 6)
                     | ((self.sprite_overflow as u8) << 5);
                 self.vblank = false;
-                self.nmi_pending = false; // suppress NMI that hasn't fired yet
+                // Reading exactly 1 dot before VBL onset ((241,1) is the next
+                // dot to process) wins the race: the flag never sets this
+                // frame, and consequently no NMI fires. Reads at the set dot
+                // or 1 after suppress the NMI via the ordinary line-level
+                // mechanism (the clear above drops the line before the next
+                // per-cycle edge sample). An edge already latched into
+                // nmi_pending is NOT cleared — the CPU's edge detector cannot
+                // be un-latched by a $2002 read.
+                if self.scanline == VBLANK_SCANLINE && self.dot == 1 {
+                    self.suppress_vbl = true;
+                }
                 self.w = false;
                 status
             }
@@ -772,13 +824,12 @@ impl Ppu {
         match reg {
             // $2000 PPUCTRL
             0 => {
-                let nmi_was_on = self.ctrl & 0x80 != 0;
+                // NMI enable/disable needs no special handling here: the line
+                // level (vblank && enable) changes immediately, and the next
+                // per-cycle edge sample picks it up — enabling mid-VBlank
+                // fires the "instant NMI" quirk, disabling within a CPU cycle
+                // of VBL onset suppresses the NMI, both as on hardware.
                 self.ctrl = data;
-                let nmi_now_on = self.ctrl & 0x80 != 0;
-                // Turning NMI enable on mid-VBlank fires an immediate NMI
-                if !nmi_was_on && nmi_now_on && self.vblank {
-                    self.nmi_pending = true;
-                }
                 // Nametable select → t bits 10–11
                 self.t = (self.t & 0xF3FF) | ((data as u16 & 0x03) << 10);
             }

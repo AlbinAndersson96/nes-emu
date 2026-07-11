@@ -123,16 +123,16 @@ see `docs/cpu_interrupts.md`).
 
 ### Failing text-console tests
 
-These blargg ROMs report an on-screen failure, and their tests in `src/tests/text_console_roms.rs` assert that verdict, so they fail `cargo test` (like `ppu/power_up_palette` above) until the underlying gap is fixed. All are PPU timing/behavior gaps:
+These blargg ROMs report an on-screen failure, and their tests in `src/tests/text_console_roms.rs` assert that verdict, so they fail `cargo test` (like `ppu/power_up_palette` above) until the underlying gap is fixed. All are PPU sprite-overflow gaps:
 
-- **`vbl_nmi_timing/2.vbl_timing`** — FAILED #2: flag should read as clear 3 PPU clocks before VBL.
-- **`vbl_nmi_timing/3.even_odd_frames`** — FAILED #2: pattern ----- should not skip any clocks.
-- **`vbl_nmi_timing/4.vbl_clear_timing`** — FAILED #2: cleared 3 or more PPU clocks too early.
-- **`vbl_nmi_timing/5.nmi_suppression`** — FAILED #3: reading flag when it's set should suppress NMI.
-- **`vbl_nmi_timing/6.nmi_disable`** — FAILED #2: NMI shouldn't occur when disabled 0 PPU clocks after VBL.
-- **`vbl_nmi_timing/7.nmi_timing`** — FAILED #2: NMI occurred 3 or more PPU clocks too early.
 - **`sprite_overflow_tests/2.Details`** — FAILED #9: shouldn't be set when all scanlines have 7 or fewer sprites.
-- **`sprite_overflow_tests/3.Timing`** — FAILED #3: cleared too early at end of VBL.
+- **`sprite_overflow_tests/3.Timing`** — FAILED #5: set too late for first scanline.
 - **`sprite_overflow_tests/4.Obscure`** — FAILED #7: checks that search stops at the last sprite without overflow.
 
-The rest of the text-console suite passes and now asserts: `vbl_nmi_timing/1.frame_basics`, `sprite_overflow_tests/1.Basics` and `5.Emulator`, all 3 `branch_timing_tests`, `cpu_timing_test6`, and `blargg_nes_cpu_test5/official.nes`.
+All 7 `vbl_nmi_timing` tests now pass. Three fixes: (a) the harness was switched to the shared `SystemClock` (its old hand-rolled loop never consumed the $2002-read PPU pre-advance, drifting the PPU 3 CPU cycles per read — this alone fixed `4.vbl_clear_timing` and `7.nmi_timing`); (b) the PPU's NMI is now modeled as hardware does it — a level (`vblank && nmi-enable`) edge-sampled once per CPU cycle — which yields the 2-dot NMI-suppression windows for $2002 reads and $2000 NMI-disables around VBL onset, plus the flag-never-sets race for a $2002 read 1 dot before VBL (see `src/ppu/mod.rs`, `Bus::read`/`Bus::write`); (c) the $4017 frame-counter reset delay is parity-dependent (see below).
+
+The rest of the text-console suite passes and asserts: all 7 `vbl_nmi_timing`, `sprite_overflow_tests/1.Basics` and `5.Emulator`, all 3 `branch_timing_tests`, `cpu_timing_test6`, and `blargg_nes_cpu_test5/official.nes`.
+
+### $4017 write-to-reset delay is parity-dependent
+
+The APU frame-counter reset takes effect 3 CPU cycles after the $4017 write cycle when that cycle lands on an even APU get/put cycle, 4 when odd (`Apu::write`, `frame_reset_delay = 7 or 8`). A constant delay silently defeats blargg's `sync_apu` parity equalizer (`bit SNDCHN` / `bne`), leaving the CPU-APU parity dependent on everything executed before the sync — it only ever worked because the pre-sync frame count happened to be constant. This surfaced as `cpu_interrupts_v2/4-irq_and_dma`'s +526 row flipping (513- vs 514-cycle OAM DMA) when the VBL-read suppression race changed how many frames the shell's $2002 poll loops consumed.

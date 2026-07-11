@@ -261,21 +261,30 @@ impl CpuBus for Bus {
                 if reg == 0 {
                     // $2000 is written on the store's 4th/last cycle on real
                     // hardware, but this write is applied while the PPU still
-                    // sits at the start of the instruction. Pre-advance the PPU
-                    // 3 cycles (same mechanism as the $2002 read) so the write
-                    // — in particular the NMI-enable mid-VBlank instant-fire
-                    // quirk — takes effect at the correct dot. The instant-fire
-                    // NMI edge then lands on the instruction's last cycle, where
-                    // the run loop's deferred-edge rule correctly keeps it from
-                    // affecting the very next dispatch.
+                    // sits at the start of the instruction. Pre-advance the
+                    // PPU with the same 8-dots/apply/1-dot structure as the
+                    // $2002 read, so the write lands at the same sub-cycle
+                    // position: one dot before a CPU-cycle NMI-line edge
+                    // sample. That placement is what gives NMI-disable its
+                    // 2-dot suppression window (a disable 0-1 dots after VBL
+                    // onset drops the line before the sample sees it), and
+                    // what makes the mid-VBlank enable "instant NMI" edge
+                    // latch on the very next sample — inside the trailing
+                    // dot, whose edge is deliberately NOT consumed here: it
+                    // flows into the run loop's per-cycle ticks, where the
+                    // deferred-edge rule keeps it from affecting the very
+                    // next dispatch (blargg-verified).
                     if let Some(ref cart) = self.cartridge {
                         self.ppu.set_mirroring(cart.mirroring());
                     }
-                    self.ppu.tick(3, self.cartridge.as_mut());
+                    self.ppu.tick_dots(8, self.cartridge.as_mut());
                     if self.ppu.take_nmi() {
                         self.ppu_preadvance_nmi = true;
                     }
                     self.ppu_preadvance_cycles = self.ppu_preadvance_cycles.saturating_add(3);
+                    self.ppu.write_register(reg, data, self.cartridge.as_mut());
+                    self.ppu.tick_dots(1, self.cartridge.as_mut());
+                    return;
                 }
                 self.ppu.write_register(reg, data, self.cartridge.as_mut())
             }
