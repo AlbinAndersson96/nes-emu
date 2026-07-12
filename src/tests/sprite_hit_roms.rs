@@ -55,7 +55,7 @@ fn run_sprite_hit_rom(filename: &str) -> RomOutput {
     // instruction fetch; the PPU (3x the CPU clock) has already run 21 dots
     // by then. These ROMs use cycle-tuned delays for hit-timing precision
     // tests, so the CPU/PPU phase must start matched to real hardware (see
-    // roms.rs's run_rom_impl, which does the same for cpu_interrupts_v2).
+    // roms.rs's run_rom, which does the same for cpu_interrupts_v2).
     let _ = bus.tick_ppu(7);
     let _ = bus.tick_apu(8);
 

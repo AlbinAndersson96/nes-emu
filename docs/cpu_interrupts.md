@@ -163,11 +163,13 @@ knowing if debugging these tests further:
 
 - **`delay_a_25_clocks`** (`common/delay.s`, mapped to `$E442` in these ROMs) —
   delays exactly `A + 25` CPU cycles (including its own `JSR`/`RTS` overhead), for
-  any `A` from 0 to 255. Verified two independent ways this session: an isolated
-  `TestBus`-only measurement (`isolate_delay_routines` test,
-  `src/tests/roms.rs`) and an independent hand-trace of the actual 6502
-  instruction sequence — both agree exactly for every value tested, including
-  large loop-heavy ones (`A=215` → 234 cycles). Not a source of any known bug.
+  any `A` from 0 to 255. Verified two independent ways during the
+  investigation: an isolated `TestBus`-only measurement (the
+  `isolate_delay_routines` diagnostic, since removed from
+  `src/tests/roms.rs` with the other one-off tracers) and an independent
+  hand-trace of the actual 6502 instruction sequence — both agree exactly
+  for every value tested, including large loop-heavy ones (`A=215` → 234
+  cycles). Not a source of any known bug.
 - **`delay_256a_11_clocks_`** (mapped to `$E458`) — a coarser delay built by
   looping `delay_a_25_clocks` calls; costs `256·A + 5` cycles. Also verified exact.
 - **`sync_vbl`** (`common/sync_vbl.s`, mapped to `$E200`) — a sophisticated
@@ -176,7 +178,8 @@ knowing if debugging these tests further:
   29768+ clocks after `sync_vbl` returns will see the VBlank flag set; reading it
   immediately will see it clear.* Verified this contract holds across 10 different
   starting PPU phases, including several straddling VBlank onset exactly
-  (`verify_sync_vbl_contract` test, `src/tests/roms.rs`) — not a source of any
+  (the `verify_sync_vbl_contract` diagnostic, since removed from
+  `src/tests/roms.rs` with the other one-off tracers) — not a source of any
   known bug either.
 - The APU's frame-IRQ fires `frame_reset_delay` (7, as applied at instruction
   start — 4 unticked instruction cycles + hardware's 3-cycle post-write-cycle

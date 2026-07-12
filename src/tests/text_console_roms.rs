@@ -1,8 +1,7 @@
 //! Harness for blargg ROM suites that print their verdict as text into PPU
 //! nametable 0 instead of using the `$6000` result protocol. Each test
-//! asserts the ROM's on-screen verdict, so ROMs that fail because of known
-//! emulator gaps fail `cargo test` — see the "Failing text-console tests"
-//! list under Known gaps in CLAUDE.md for the currently expected failures.
+//! asserts the ROM's on-screen verdict, so any emulator regression shows up
+//! as a real `cargo test` failure.
 
 use std::path::PathBuf;
 
@@ -127,6 +126,10 @@ fn report(name: &str, dir: &str, filename: &str, frames: u32, meanings: &[&str])
         format!("Error {n}")
     } else if text.contains("Failed") {
         "Failed".to_string()
+    } else if text.contains("Passed") {
+        // The cpu_dummy_reads-era console library prints "Passed" (mixed
+        // case) instead of "PASSED".
+        "PASSED (Passed)".to_string()
     } else if text.contains("All tests complete") {
         // blargg_nes_cpu_test5's shell.a convention: completion text with no
         // explicit result code indicates success.
@@ -495,5 +498,121 @@ fn blargg_nes_cpu_test5_official() {
         "official.nes",
         1200,
         &[],
+    );
+}
+
+// --- cpu_dummy_reads (mapper 3 / CNROM; prints "Passed" on success —
+// unlike the newer suites, this framework has no $6000 result protocol) ---
+
+#[test]
+fn cpu_dummy_reads() {
+    report(
+        "cpu_dummy_reads",
+        "cpu_dummy_reads",
+        "cpu_dummy_reads.nes",
+        300,
+        &[
+            "$2002 must be mirrored every 8 bytes to $3FFA",
+            "LDA abs,x",
+            "STA abs,x",
+            "LDA (z),y",
+            "STA (z),y",
+            "LDA (z,x)",
+            "STA (z,x)",
+        ],
+    );
+}
+
+// --- mmc3_irq_tests (mapper 4 / MMC3, 2006-era console framework). ---
+// 5.MMC3_rev_A.nes is NOT wired: it tests the rev-A IRQ behavior (IRQ on
+// forced reloads only), which is mutually exclusive with the rev-B behavior
+// 6.MMC3_rev_B.nes verifies — at most one of the two can ever pass on a
+// given implementation (see the suite's readme), and rev B is the behavior
+// implemented (matching mmc3_test's 5-MMC3).
+
+#[test]
+fn mmc3_irq_tests_clocking() {
+    report(
+        "mmc3_irq_tests_clocking",
+        "mmc3_irq_tests",
+        "1.Clocking.nes",
+        300,
+        &[
+            "Counter/IRQ/A12 clocking isn't working at all",
+            "Should decrement when A12 is toggled via $2006",
+            "Writing to $C000 shouldn't cause reload",
+            "Writing to $C001 shouldn't cause immediate reload",
+            "Should reload (no decrement) on first clock after clear",
+            "IRQ should be set when counter is decremented to 0",
+            "IRQ should never be set when disabled",
+            "Should reload when clocked when counter is 0",
+        ],
+    );
+}
+
+#[test]
+fn mmc3_irq_tests_details() {
+    report(
+        "mmc3_irq_tests_details",
+        "mmc3_irq_tests",
+        "2.Details.nes",
+        300,
+        &[
+            "Counter isn't working when reloaded with 255",
+            "Counter should run even when IRQ is disabled",
+            "Counter should run even after IRQ flag has been set",
+            "IRQ should not be set when counter reloads with non-zero",
+            "IRQ should not be set when counter is cleared via $C001",
+            "Counter should be clocked 241 times in PPU frame",
+        ],
+    );
+}
+
+#[test]
+fn mmc3_irq_tests_a12_clocking() {
+    report(
+        "mmc3_irq_tests_a12_clocking",
+        "mmc3_irq_tests",
+        "3.A12_clocking.nes",
+        300,
+        &[
+            "Shouldn't be clocked when A12 doesn't change",
+            "Shouldn't be clocked when A12 changes to 0",
+            "Should be clocked when A12 changes to 1 via $2006 write",
+            "Should be clocked when A12 changes to 1 via $2007 read",
+            "Should be clocked when A12 changes to 1 via $2007 write",
+        ],
+    );
+}
+
+#[test]
+fn mmc3_irq_tests_scanline_timing() {
+    report(
+        "mmc3_irq_tests_scanline_timing",
+        "mmc3_irq_tests",
+        "4.Scanline_timing.nes",
+        300,
+        &[
+            "Scanline 0 time is too soon",
+            "Scanline 0 time is too late",
+            "Scanline 1 time is too soon",
+            "Scanline 1 time is too late",
+            "Scanline 239 time is too soon",
+            "Scanline 239 time is too late",
+        ],
+    );
+}
+
+#[test]
+fn mmc3_irq_tests_rev_b() {
+    report(
+        "mmc3_irq_tests_rev_b",
+        "mmc3_irq_tests",
+        "6.MMC3_rev_B.nes",
+        300,
+        &[
+            "Should reload and set IRQ every clock when reload is 0",
+            "IRQ should be set when counter is 0 after reloading",
+        ],
     );
 }

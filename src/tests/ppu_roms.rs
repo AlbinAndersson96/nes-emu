@@ -28,7 +28,7 @@ fn run_ppu_rom(filename: &str) -> RomOutput {
     bus.insert_cartridge(cartridge);
     let mut cpu = Cpu::new();
     cpu.reset(&mut bus);
-    // Match hardware's reset alignment (see roms.rs::run_rom_impl).
+    // Match hardware's reset alignment (see roms.rs::run_rom).
     let _ = bus.tick_ppu(7);
     let _ = bus.tick_apu(8);
 

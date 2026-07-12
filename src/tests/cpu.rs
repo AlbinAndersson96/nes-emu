@@ -1293,9 +1293,8 @@ fn kil_opcodes_freeze_pc_within_instruction() {
             "opcode {op:#04x}: pc must return to the opcode's own address, not drift forward"
         );
 
-        let (_, _, queue_len) = cpu.debug_nmi_state();
-        assert_eq!(
-            queue_len, 0,
+        assert!(
+            cpu.instruction_boundary(),
             "opcode {op:#04x}: instruction should be fully retired after 2 ticks"
         );
     }
@@ -1329,8 +1328,7 @@ fn kil_opcodes_stay_trapped_across_consecutive_instructions() {
         assert_eq!(cpu.pc, expected, "tick {i}: pc should be {expected:#06x}");
     }
     assert_eq!(cpu.pc, start_pc);
-    let (_, _, queue_len) = cpu.debug_nmi_state();
-    assert_eq!(queue_len, 0);
+    assert!(cpu.instruction_boundary());
 }
 
 /// The scenario the pre-fix bug (`wrapping_sub(1)` instead of `(2)`) allowed

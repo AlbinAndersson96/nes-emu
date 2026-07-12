@@ -160,7 +160,10 @@ impl Bus {
         self.ppu.take_nmi()
     }
 
-    /// Advance the APU by `cpu_cycles`. Returns true if an IRQ should be raised.
+    /// Advance the APU by `cpu_cycles`. Returns true if an IRQ should be
+    /// raised — the OR of the APU's IRQ line and the cartridge mapper's
+    /// (e.g. the MMC3 scanline counter, clocked by the PPU ticking that runs
+    /// before this within the same cycle). Both lines are level-triggered.
     /// If the DMC reader needs a byte, arms a 4-cycle DMA stall; tick_dma() will
     /// fetch and supply the byte on the final cycle of the stall.
     pub fn tick_apu(&mut self, cpu_cycles: u64) -> bool {
@@ -171,7 +174,7 @@ impl Bus {
         if self.apu.dmc_needs_dma() && self.dmc_dma_cycles_left == 0 {
             self.dmc_dma_cycles_left = 4;
         }
-        irq
+        irq || self.cartridge.as_ref().is_some_and(|c| c.irq_pending())
     }
 
     /// Strobe the controller shift registers. Writing 1 to bit 0 of $4016
@@ -237,14 +240,14 @@ impl Bus {
                         self.ppu_preadvance_nmi = true;
                     }
                     self.ppu_preadvance_cycles = self.ppu_preadvance_cycles.saturating_add(3);
-                    let value = self.ppu.read_register(reg, self.cartridge.as_ref());
+                    let value = self.ppu.read_register(reg, self.cartridge.as_mut());
                     self.ppu.tick_dots(1, self.cartridge.as_mut());
                     if self.ppu.take_nmi() {
                         self.ppu_preadvance_nmi = true;
                     }
                     return value;
                 }
-                self.ppu.read_register(reg, self.cartridge.as_ref())
+                self.ppu.read_register(reg, self.cartridge.as_mut())
             }
 
             // APU / I/O
