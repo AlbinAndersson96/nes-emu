@@ -14,12 +14,22 @@ const PRERENDER_SCANLINE: u16 = 261;
 
 /// Dots between a sprite0_hit-affecting event (a colliding pixel, or the
 /// pre-render scanline's reset) and the flag becoming visible via $2002.
-/// Real hardware doesn't latch the flag the instant the event happens — an
-/// internal pipeline delays it. Calibrated by bisection against
-/// blargg's `sprite_hit_tests_2005.10.05` timing ROMs (valid window measured
-/// at 18-23 dots for the set side; 21 also satisfies the pre-render clear).
-/// See docs/investigations/sprite_hit_timing_debug_log.md.
-const SPRITE0_HIT_LATCH_DOTS: u8 = 21;
+/// Calibrated by bisection against blargg's `sprite_hit_tests_2005.10.05`
+/// timing ROMs, run through the shared `SystemClock`: the valid window is
+/// 0-2 dots, so 1 (the midpoint) — i.e. the flag is visible almost
+/// immediately, there is no long internal pipeline. (An earlier calibration
+/// arrived at 18-23 dots, but that measurement was taken with a stale test
+/// harness that double-advanced the PPU 9 dots on every $2002 read — the
+/// large "pipeline delay" was compensating for harness drift, not modeling
+/// hardware. See docs/investigations/sprite_hit_timing_debug_log.md for the
+/// original investigation.)
+const SPRITE0_HIT_LATCH_DOTS: u8 = 1;
+
+/// PPU open-bus decay time: a decay-register bit that hasn't been refreshed
+/// with a 1 decays to 0 after about 600 ms (blargg's `ppu_open_bus` readme;
+/// the exact time varies with the console and temperature). 600 ms at the
+/// NTSC PPU clock (5,369,318 Hz) is ~3.22 M dots.
+const OPEN_BUS_DECAY_DOTS: u64 = 3_221_591;
 
 pub struct Ppu {
     // Programmer-visible write-only registers
@@ -53,8 +63,51 @@ pub struct Ppu {
     // docs/investigations/sprite_hit_timing_debug_log.md.
     sprite0_hit_pending: Option<(bool, u8)>,
 
-    // NMI edge detector
+    // ── NMI line + CPU-side edge detector ────────────────────────────────────
+    // The NMI line is a LEVEL: `vblank && (ctrl & 0x80)`. The CPU's edge
+    // detector samples it once per CPU cycle (every 3rd dot, at the cycle
+    // boundary); a rising edge between samples latches nmi_pending, which
+    // stays latched until consumed by take_nmi() — a later $2002 read cannot
+    // un-latch it, matching hardware. Because register read/write side
+    // effects are applied mid-cycle (8 dots in, 1 dot before the boundary —
+    // see Bus::read/write), a $2002 read or $2000 NMI-disable landing 0-1
+    // PPU clocks after VBL onset drops the line before the sample ever sees
+    // it high: blargg's 2-dot NMI-suppression window falls out naturally.
     nmi_pending: bool,
+    /// NMI line level at the previous per-CPU-cycle sample.
+    prev_nmi_line: bool,
+    /// Counts processed dots mod 3; the line is sampled when it wraps. All
+    /// bus paths keep whole-instruction dot totals a multiple of 3, so the
+    /// wrap points stay aligned with CPU cycle boundaries.
+    dot_phase: u8,
+    /// Set by a $2002 read landing exactly 1 dot before VBL onset (the
+    /// scanline-241-dot-1 race): the flag is never set that frame, so no NMI
+    /// fires either. One-shot, consumed at the set point.
+    suppress_vbl: bool,
+    /// `rendering_enabled()` as sampled at the start of the previous dot's
+    /// processing. The odd-frame skipped-dot decision (scanline-length
+    /// selection in clock_dot, evaluated while processing pre-render dot 339)
+    /// uses THIS instead of the current sample: blargg's
+    /// ppu_vbl_nmi/10-even_odd_timing pins the decision to the rendering
+    /// state one dot earlier — a $2001 write taking effect right before dot
+    /// 339 is already too late to change whether the skip happens, in either
+    /// direction (all four of its sub-tests are consistent with a single
+    /// sample at the start of dot 338).
+    render_prev_dot: bool,
+
+    // ── Open-bus decay register ──────────────────────────────────────────────
+    // The PPU's CPU-facing data bus keeps the last value driven onto it (the
+    // "decay register"). Writing any PPU register refreshes all 8 bits with
+    // the written value; reads refresh only the bits the PPU itself drives
+    // ($2002 bits 7-5, $2004 all, $2007 all / bits 5-0 for palette) and
+    // return the decay register for the rest. Each bit decays to 0 once it
+    // has gone OPEN_BUS_DECAY_DOTS without being refreshed with a 1
+    // (blargg's `ppu_open_bus`). `io_bus_stamp` holds the `dots` timestamp
+    // of each bit's last refresh; decay is applied lazily on read.
+    io_bus: u8,
+    io_bus_stamp: [u64; 8],
+    /// Free-running processed-dot counter (timebase for open-bus decay).
+    dots: u64,
 
     // Dot/scanline counters (PPU runs at 3× CPU clock)
     dot: u16,
@@ -91,6 +144,15 @@ pub struct Ppu {
     // (dot 257) — see fetch_sprites().
     sprite_eval_count: usize,
     sprite0_eval: bool,
+    // Per-dot evaluation state machine (see evaluate_sprites): one OAM check
+    // every 2 dots, so the overflow flag sets at the hardware-exact dot
+    // (blargg sprite_overflow_tests/3.Timing) and the buggy diagonal
+    // overflow scan (4.Obscure) falls out of eval_n/eval_m.
+    eval_n: usize,           // primary OAM sprite index (0-63)
+    eval_m: usize,           // byte-within-sprite offset used by the overflow scan
+    eval_copy_left: u8,      // bytes 1-3 still to copy for an in-range sprite
+    eval_overflow_reads: u8, // the 3 dummy reads after the overflow flag sets
+    eval_done: bool,         // n wrapped past 63 — evaluation idles until next line
 
     // ── Framebuffer ──────────────────────────────────────────────────────────
     // 256 × 240 pixels, each an index into the NES master palette (0x00–0x3F).
@@ -121,12 +183,29 @@ impl Ppu {
             read_buf: 0,
             oam: Box::new([0u8; 256]),
             vram: Box::new([0u8; 2048]),
-            palette: [0u8; 32],
+            // 2C02 power-up palette (nesdev "PPU power up state"; the same
+            // table blargg's ppu/power_up_palette ROM was recorded from).
+            // The four mirrored backdrop entries (indices $10/$14/$18/$1C,
+            // unreachable through palette_idx) hold the same values as
+            // their $00/$04/$08/$0C targets, so a direct 32-byte init is
+            // self-consistent.
+            palette: [
+                0x09, 0x01, 0x00, 0x01, 0x00, 0x02, 0x02, 0x0D, 0x08, 0x10, 0x08, 0x24, 0x00, 0x00,
+                0x04, 0x2C, 0x09, 0x01, 0x34, 0x03, 0x00, 0x04, 0x00, 0x14, 0x08, 0x3A, 0x00, 0x02,
+                0x00, 0x20, 0x2C, 0x08,
+            ],
             vblank: false,
             sprite0_hit: false,
             sprite0_hit_pending: None,
             sprite_overflow: false,
             nmi_pending: false,
+            prev_nmi_line: false,
+            dot_phase: 0,
+            suppress_vbl: false,
+            render_prev_dot: false,
+            io_bus: 0,
+            io_bus_stamp: [0; 8],
+            dots: 0,
             dot: 0,
             scanline: 0,
             odd_frame: false,
@@ -148,6 +227,11 @@ impl Ppu {
             sprite0_in_secondary: false,
             sprite_eval_count: 0,
             sprite0_eval: false,
+            eval_n: 0,
+            eval_m: 0,
+            eval_copy_left: 0,
+            eval_overflow_reads: 0,
+            eval_done: false,
             frame: Box::new([0u8; 256 * 240]),
             frame_ready: false,
         }
@@ -188,10 +272,14 @@ impl Ppu {
         // ── VBlank / pre-render flag events ─────────────────────────────────
         match self.scanline {
             VBLANK_SCANLINE if self.dot == 1 => {
-                self.vblank = true;
-                if self.ctrl & 0x80 != 0 {
-                    self.nmi_pending = true;
+                // A $2002 read 1 dot earlier wins the race: flag never sets.
+                if self.suppress_vbl {
+                    self.suppress_vbl = false;
+                } else {
+                    self.vblank = true;
                 }
+                // NMI is not fired here: the line (vblank && nmi-enable) is
+                // edge-sampled at the next CPU cycle boundary below.
             }
             PRERENDER_SCANLINE if self.dot == 1 => {
                 self.vblank = false;
@@ -313,7 +401,9 @@ impl Ppu {
 
         // ── Advance dot counter ──────────────────────────────────────────────
         self.dot += 1;
-        let scanline_len = if self.scanline == PRERENDER_SCANLINE && self.odd_frame && render {
+        let skip_render = self.render_prev_dot;
+        self.render_prev_dot = render;
+        let scanline_len = if self.scanline == PRERENDER_SCANLINE && self.odd_frame && skip_render {
             340
         } else {
             DOTS_PER_SCANLINE
@@ -326,6 +416,24 @@ impl Ppu {
                 self.odd_frame = !self.odd_frame;
             }
         }
+
+        self.dots += 1;
+
+        // ── CPU-side NMI edge sample (once per CPU cycle = every 3rd dot) ────
+        self.dot_phase += 1;
+        if self.dot_phase == 3 {
+            self.dot_phase = 0;
+            let line = self.nmi_line();
+            if line && !self.prev_nmi_line {
+                self.nmi_pending = true;
+            }
+            self.prev_nmi_line = line;
+        }
+    }
+
+    /// Level of the PPU's /NMI output (active state as a bool).
+    fn nmi_line(&self) -> bool {
+        self.vblank && (self.ctrl & 0x80 != 0)
     }
 
     fn rendering_enabled(&self) -> bool {
@@ -455,61 +563,102 @@ impl Ppu {
 
     // ── Sprite evaluation ─────────────────────────────────────────────────────
 
-    /// Evaluate sprites for the NEXT scanline; runs during dots 65–256 of visible scanlines.
+    /// Evaluate sprites for the NEXT scanline: a per-dot state machine over
+    /// dots 65–256 of VISIBLE scanlines, one OAM check per 2 dots (hardware
+    /// reads OAM on odd dots and writes secondary OAM on even dots):
+    ///
+    /// - An out-of-range sprite costs one step (2 dots): check Y, advance n.
+    /// - An in-range sprite costs four steps (8 dots): copy its 4 bytes.
+    /// - Once 8 sprites are found, the OVERFLOW SCAN begins, carrying the
+    ///   hardware bug: on each out-of-range check BOTH n and m increment, so
+    ///   successive sprites have successive bytes misinterpreted as their Y
+    ///   (the diagonal scan blargg's 4.Obscure documents). An in-range hit
+    ///   sets the overflow flag at that step's dot (3.Timing pins this) and
+    ///   is followed by 3 dummy reads. The scan stops when n walks past
+    ///   sprite 63 — without wrapping around (4.Obscure #7).
+    ///
+    /// The pre-render scanline does NOT evaluate (hardware): it only clears
+    /// the state, so scanline 0 always starts with an empty sprite set — on
+    /// real hardware sprites can never appear on scanline 0.
     fn evaluate_sprites(&mut self) {
-        // Clear secondary OAM at dot 65 (after clearing cycle 1–64). Note this
-        // must NOT touch sprite_count/sprite0_in_secondary — output_pixel()
-        // is still reading those every dot through 256 to render sprites
-        // found during the PREVIOUS scanline's evaluation.
+        // Clear/init at dot 65 (after the secondary-OAM clearing cycles
+        // 1-64). Note this must NOT touch sprite_count/sprite0_in_secondary —
+        // output_pixel() is still reading those every dot through 256 to
+        // render sprites found during the PREVIOUS scanline's evaluation.
         if self.dot == 65 {
             self.secondary_oam = [0xFF; 32];
             self.sprite_eval_count = 0;
             self.sprite0_eval = false;
+            self.eval_n = 0;
+            self.eval_m = 0;
+            self.eval_copy_left = 0;
+            self.eval_overflow_reads = 0;
+            self.eval_done = false;
         }
-        if self.dot < 65 || self.dot > 256 {
+        if self.scanline == PRERENDER_SCANLINE {
             return;
         }
-        if self.sprite_eval_count >= 8 {
-            // Already found 8 sprites; check overflow (simplified — no hardware bug)
+        // One step per odd dot in 65..=255.
+        if self.dot < 65 || self.dot > 255 || self.dot % 2 == 0 || self.eval_done {
             return;
         }
-        // Each OAM entry is 4 bytes; sprite index = (dot-65)/4 maps badly here,
-        // so we only do the full scan once at dot 256 to keep it simple.
-        if self.dot != 256 {
-            return;
-        }
-        // Pre-render's "next scanline" wraps around to scanline 0 of the new
-        // frame, not 262 (which doesn't exist).
-        let next_scanline = if self.scanline == PRERENDER_SCANLINE {
-            0
-        } else {
-            self.scanline + 1
-        };
+
+        // OAM Y is the sprite's top row minus 1 (hardware delays sprite
+        // rendering by one scanline) — matches fetch_sprites()'s row calc,
+        // which subtracts this same 1. Plain (non-wrapping) distance: a
+        // sprite with Y near 255 (a common "hide it" convention) must never
+        // wrap around to become visible at the top of the screen.
+        let next_scanline = self.scanline + 1;
         let height = self.sprite_height() as i32;
-        let mut n = 0usize;
-        while n < 64 && self.sprite_eval_count < 8 {
-            let y = self.oam[n * 4];
-            // OAM Y is the sprite's top row minus 1 (hardware delays sprite
-            // rendering by one scanline) — matches fetch_sprites()'s row calc,
-            // which already subtracts this same 1. Plain (non-wrapping)
-            // distance: a sprite with Y near 255 (a common "hide it"
-            // convention, since y+1 already exceeds every valid scanline)
-            // must never wrap around to become visible at the top of the
-            // screen — wrapping_sub would do that for small next_scanline.
-            let row = next_scanline as i32 - y as i32 - 1;
-            let in_range = (0..height).contains(&row);
-            if in_range {
-                let dst = self.sprite_eval_count * 4;
-                self.secondary_oam[dst..dst + 4].copy_from_slice(&self.oam[n * 4..n * 4 + 4]);
-                if n == 0 {
-                    self.sprite0_eval = true;
+        let in_range = |y: u8| (0..height).contains(&(next_scanline as i32 - y as i32 - 1));
+
+        if self.sprite_eval_count < 8 {
+            if self.eval_copy_left > 0 {
+                // Copying bytes 1-3 of an in-range sprite, one per step.
+                let byte = 4 - self.eval_copy_left as usize;
+                self.secondary_oam[self.sprite_eval_count * 4 + byte] =
+                    self.oam[self.eval_n * 4 + byte];
+                self.eval_copy_left -= 1;
+                if self.eval_copy_left == 0 {
+                    self.sprite_eval_count += 1;
+                    self.eval_n += 1;
+                    self.eval_done = self.eval_n == 64;
                 }
-                self.sprite_eval_count += 1;
+            } else {
+                let y = self.oam[self.eval_n * 4];
+                if in_range(y) {
+                    self.secondary_oam[self.sprite_eval_count * 4] = y;
+                    if self.eval_n == 0 {
+                        self.sprite0_eval = true;
+                    }
+                    self.eval_copy_left = 3;
+                } else {
+                    self.eval_n += 1;
+                    self.eval_done = self.eval_n == 64;
+                }
             }
-            n += 1;
-        }
-        if n < 64 && self.sprite_eval_count == 8 {
-            self.sprite_overflow = true;
+        } else if self.eval_overflow_reads > 0 {
+            // Dummy reads after the flag set; m increments with carry into n.
+            self.eval_overflow_reads -= 1;
+            self.eval_m += 1;
+            if self.eval_m == 4 {
+                self.eval_m = 0;
+                self.eval_n += 1;
+            }
+            if self.eval_overflow_reads == 0 || self.eval_n >= 64 {
+                self.eval_done = true;
+            }
+        } else {
+            // Buggy overflow scan: OAM[n][m] is treated as a Y coordinate.
+            let y = self.oam[self.eval_n * 4 + self.eval_m];
+            if in_range(y) {
+                self.sprite_overflow = true;
+                self.eval_overflow_reads = 3;
+            } else {
+                self.eval_n += 1;
+                self.eval_m = (self.eval_m + 1) & 3;
+                self.eval_done = self.eval_n == 64;
+            }
         }
     }
 
@@ -734,51 +883,112 @@ impl Ppu {
         }
     }
 
+    /// Current value of the open-bus decay register, with expired bits
+    /// (not refreshed with a 1 within OPEN_BUS_DECAY_DOTS) decayed to 0.
+    fn open_bus(&mut self) -> u8 {
+        for bit in 0..8 {
+            if self.io_bus & (1 << bit) != 0
+                && self.dots.saturating_sub(self.io_bus_stamp[bit]) > OPEN_BUS_DECAY_DOTS
+            {
+                self.io_bus &= !(1 << bit);
+            }
+        }
+        self.io_bus
+    }
+
+    /// Refresh the decay-register bits selected by `mask` with `value`,
+    /// restarting their decay timers. Unmasked bits keep their value and
+    /// their old timers.
+    fn refresh_open_bus(&mut self, value: u8, mask: u8) {
+        self.io_bus = (self.io_bus & !mask) | (value & mask);
+        for bit in 0..8 {
+            if mask & (1 << bit) != 0 {
+                self.io_bus_stamp[bit] = self.dots;
+            }
+        }
+    }
+
     /// Read a PPU register. `reg` is the 3-bit register select (addr & 7).
+    /// Open-bus behavior follows blargg's `ppu_open_bus` readme: write-only
+    /// registers return the decay register unrefreshed; $2002/$2004/$2007
+    /// return PPU-driven bits (which refresh their decay-register bits)
+    /// combined with decay-register bits for the rest.
     pub fn read_register(&mut self, reg: u8, cart: Option<&Cartridge>) -> u8 {
         match reg {
-            // $2002 PPUSTATUS — reading clears VBlank flag and write toggle
+            // $2002 PPUSTATUS — reading clears VBlank flag and write toggle.
+            // Bits 7-5 are PPU-driven (and refresh those decay bits); bits
+            // 4-0 read from the decay register.
             2 => {
                 let status = ((self.vblank as u8) << 7)
                     | ((self.sprite0_hit as u8) << 6)
-                    | ((self.sprite_overflow as u8) << 5);
+                    | ((self.sprite_overflow as u8) << 5)
+                    | (self.open_bus() & 0x1F);
+                self.refresh_open_bus(status, 0xE0);
                 self.vblank = false;
-                self.nmi_pending = false; // suppress NMI that hasn't fired yet
+                // Reading exactly 1 dot before VBL onset ((241,1) is the next
+                // dot to process) wins the race: the flag never sets this
+                // frame, and consequently no NMI fires. Reads at the set dot
+                // or 1 after suppress the NMI via the ordinary line-level
+                // mechanism (the clear above drops the line before the next
+                // per-cycle edge sample). An edge already latched into
+                // nmi_pending is NOT cleared — the CPU's edge detector cannot
+                // be un-latched by a $2002 read.
+                if self.scanline == VBLANK_SCANLINE && self.dot == 1 {
+                    self.suppress_vbl = true;
+                }
                 self.w = false;
                 status
             }
-            // $2004 OAMDATA
-            4 => self.oam[self.oam_addr as usize],
-            // $2007 PPUDATA — non-palette reads are buffered one cycle
+            // $2004 OAMDATA — fully PPU-driven; refreshes all decay bits.
+            // Attribute bytes (every 4th, offset 2) have no storage for bits
+            // 2-4, so they always read back clear.
+            4 => {
+                let mut value = self.oam[self.oam_addr as usize];
+                if self.oam_addr & 3 == 2 {
+                    value &= 0xE3;
+                }
+                self.refresh_open_bus(value, 0xFF);
+                value
+            }
+            // $2007 PPUDATA — non-palette reads are buffered one cycle and
+            // refresh all decay bits; palette reads drive only bits 5-0,
+            // with bits 7-6 coming from the decay register unrefreshed.
             7 => {
                 let addr = self.v;
                 self.v = self.v.wrapping_add(self.vram_increment());
                 if addr & 0x3FFF >= 0x3F00 {
                     // Palette: return immediately; refresh buffer from nametable behind palette
                     self.read_buf = self.ppu_read(addr & 0x2FFF, cart);
-                    self.ppu_read(addr, cart)
+                    let value = (self.open_bus() & 0xC0) | (self.ppu_read(addr, cart) & 0x3F);
+                    self.refresh_open_bus(value, 0x3F);
+                    value
                 } else {
                     let buffered = self.read_buf;
                     self.read_buf = self.ppu_read(addr, cart);
+                    self.refresh_open_bus(buffered, 0xFF);
                     buffered
                 }
             }
-            _ => 0,
+            // Write-only registers ($2000/$2001/$2003/$2005/$2006): reading
+            // returns the decay register and refreshes nothing.
+            _ => self.open_bus(),
         }
     }
 
     /// Write a PPU register. `reg` is the 3-bit register select (addr & 7).
+    /// Every write drives all 8 bits of the CPU-PPU bus, refreshing the
+    /// whole open-bus decay register with the written value.
     pub fn write_register(&mut self, reg: u8, data: u8, cart: Option<&mut Cartridge>) {
+        self.refresh_open_bus(data, 0xFF);
         match reg {
             // $2000 PPUCTRL
             0 => {
-                let nmi_was_on = self.ctrl & 0x80 != 0;
+                // NMI enable/disable needs no special handling here: the line
+                // level (vblank && enable) changes immediately, and the next
+                // per-cycle edge sample picks it up — enabling mid-VBlank
+                // fires the "instant NMI" quirk, disabling within a CPU cycle
+                // of VBL onset suppresses the NMI, both as on hardware.
                 self.ctrl = data;
-                let nmi_now_on = self.ctrl & 0x80 != 0;
-                // Turning NMI enable on mid-VBlank fires an immediate NMI
-                if !nmi_was_on && nmi_now_on && self.vblank {
-                    self.nmi_pending = true;
-                }
                 // Nametable select → t bits 10–11
                 self.t = (self.t & 0xF3FF) | ((data as u16 & 0x03) << 10);
             }
@@ -825,7 +1035,9 @@ impl Ppu {
 
     /// Write a single byte to OAM at offset `offset` (used by OAM DMA via $4014).
     /// DMA starts at the current OAMADDR ($2003) and wraps mod 256.
+    /// Hardware performs these as $2004 writes, so they refresh the open bus.
     pub fn oam_dma_write(&mut self, offset: u8, data: u8) {
+        self.refresh_open_bus(data, 0xFF);
         self.oam[self.oam_addr.wrapping_add(offset) as usize] = data;
     }
 }

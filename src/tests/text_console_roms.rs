@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use crate::bus::Bus;
 use crate::cartridge::Cartridge;
 use crate::cpu::Cpu;
+use crate::system::SystemClock;
 
 /// Write directly to fd 2, bypassing Rust's test harness capture — same
 /// technique as roms.rs::print_raw, duplicated here since this module has no
@@ -60,27 +61,13 @@ fn run_text_console_rom(dir: &str, filename: &str, frames: u32) -> String {
     let _ = bus.tick_ppu(7);
     let _ = bus.tick_apu(8);
 
+    // All per-cycle stepping rules (deferred NMI edges, $2002-read PPU
+    // pre-advance consumption, last-cycle IRQ flagging, DMA deferral) live in
+    // the shared SystemClock — the same stepping code main.rs runs.
+    let mut clock = SystemClock::new();
     let mut frames_done = 0u32;
     loop {
-        let cycles_before = cpu.cycles;
-        if bus.dma_active() {
-            bus.tick_dma();
-            if bus.tick_ppu(1) {
-                cpu.nmi();
-            }
-            if bus.tick_apu(1) {
-                cpu.irq();
-            }
-        } else {
-            cpu.tick(&mut bus);
-            let delta = cpu.cycles - cycles_before;
-            if bus.tick_ppu(delta) {
-                cpu.nmi();
-            }
-            if bus.tick_apu(delta) {
-                cpu.irq();
-            }
-        }
+        clock.step(&mut cpu, &mut bus);
 
         if bus.ppu.frame_ready {
             bus.ppu.frame_ready = false;

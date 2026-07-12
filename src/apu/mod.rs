@@ -238,20 +238,31 @@ impl Apu {
                 if self.irq_inhibit {
                     self.frame_irq_flag = false;
                 }
-                // On real hardware the frame counter reset takes effect 3-4 CPU
-                // cycles after the WRITE CYCLE (nesdev "APU Frame Counter" write
-                // jitter). This write is applied while the APU still sits at the
-                // START of the writing instruction: the caller only ticks the APU
-                // (tick_apu(delta)) after the whole instruction, and a $4017 write
-                // is in practice always an absolute store whose bus write happens
-                // on its 4th/last cycle. The APU is therefore 4 cycles behind the
-                // real write cycle at this point, and the correct delay from HERE
-                // is 4 (instruction cycles still to be ticked) + 3 (hardware
-                // post-write-cycle delay, sync_apu-aligned case) = 7. Verified against
-                // cpu_interrupts_v2/4-irq_and_dma's expected table (a flat 4 here
+                // On real hardware the frame counter reset takes effect 3 OR 4
+                // CPU cycles after the WRITE CYCLE, depending on whether that
+                // cycle lands on an even or odd APU get/put cycle (nesdev "APU
+                // Frame Counter" write jitter). blargg's sync_apu depends on
+                // this parity dependence: its `bit SNDCHN` / `bne` equalizer
+                // only locks the CPU to the APU divider if exactly one of the
+                // two parities sees the frame-IRQ flag at the probe read — a
+                // constant delay here silently defeats the lock and lets
+                // pre-sync parity leak into everything downstream (caught by
+                // cpu_interrupts_v2/4's +526 row flipping when an unrelated
+                // PPU change shifted frame counts).
+                //
+                // This write is applied while the APU still sits at the START
+                // of the writing instruction: the caller only ticks the APU
+                // (tick_apu(delta)) after the whole instruction, and a $4017
+                // write is in practice always an absolute store whose bus
+                // write happens on its 4th/last cycle. The APU is therefore 4
+                // cycles behind the real write cycle here, so the delay is
+                // 4 + (3 or 4). The parity mapping (even cycle_count → 3) was
+                // calibrated against cpu_interrupts_v2/4-irq_and_dma with the
+                // $2002-read VBL-suppression race implemented (a flat 7 was
+                // verified earlier for the even-entry case only; a flat 4
                 // shifts the whole table by exactly 3 rows) — see
                 // docs/investigations/cpu_interrupt_debug_log.md (2026-07-04).
-                self.frame_reset_delay = 7;
+                self.frame_reset_delay = if self.cycle_count & 1 == 0 { 7 } else { 8 };
                 // 5-step mode: immediate quarter/half-frame fires at write time.
                 if self.frame_mode {
                     self.clock_quarter_frame();

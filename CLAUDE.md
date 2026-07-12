@@ -40,7 +40,7 @@ cargo fmt            # format
 - **`src/tests/mod.rs`** — `TestBus`: flat 64 KB address space used by unit tests (no mirroring, no side effects).
 - **`src/tests/bus.rs`** — bus unit tests.
 - **`src/tests/cpu.rs`** — CPU unit tests.
-- **`src/tests/roms.rs`** — Blargg CPU ROM test harness. Polls $6000/$6001–$6003 for test completion; steps the machine via the shared `SystemClock` (`src/system.rs`), which carries all the per-cycle interrupt-delivery rules. Note: the `#[ignore]`d diagnostic tracers in this file keep their own private copies of older run loops and can go stale — trust `SystemClock`, not them. Runs the `instr_test-v5` suite (17 tests, all passing), `instr_timing` (passing), all 5 `instr_misc` tests (passing), plus `cpu_interrupts_v2` (all 6 passing).
+- **`src/tests/roms.rs`** — harness for every blargg suite using the $6000 result protocol. Polls $6000/$6001–$6003 for test completion; steps the machine via the shared `SystemClock` (`src/system.rs`), which carries all the per-cycle interrupt-delivery rules; handles status $81 (ROM requests a delayed warm reset, used by `cpu_reset`); asserts status 0 on completion — a nonzero status fails the test with the ROM's code and text. Note: the `#[ignore]`d diagnostic tracers in this file keep their own private copies of older run loops and can go stale — trust `SystemClock`, not them. Covers `instr_test-v5`, `instr_timing`, `instr_misc`, `cpu_interrupts_v2`, `instr_test-v3`, `nes_instr_test`, `cpu_dummy_writes`, `cpu_exec_space`, `cpu_reset`, `oam_read`, `oam_stress`, `ppu_open_bus`, and `ppu_vbl_nmi`; see Known gaps for the failing ones.
 - **`src/tests/ppu_roms.rs`** — Blargg PPU ROM test harness. Runs each ROM for 300 frames (~5 s NES time), then reads the result code from the nametable (the ROMs render `$XX` in ASCII tiles at nametable-0 row 5, col 2–4) and looks up its meaning from the per-ROM table in the README. On failure the panic message includes the result code and its description. Also saves a PNG screenshot to `tests/screenshots/ppu/output/` and pixel-compares against a golden in `tests/screenshots/ppu/golden/` if one exists. To bless a new golden: `cp tests/screenshots/ppu/output/<name>.png tests/screenshots/ppu/golden/<name>.png`.
 - **`src/tests/mapper_roms.rs`** — asserts `Cartridge::from_ines` fails cleanly with `UnsupportedMapper` for ROM suites that need mapper 3 (CNROM) or mapper 4 (MMC3), neither of which is implemented yet (`cpu_dummy_reads`, `ppu_read_buffer`, `mmc3_test`, `mmc3_test_2`, `mmc3_irq_tests`).
 - **`src/tests/text_console_roms.rs`** — harness for blargg ROM suites that print `PASSED`/`FAILED #<n>`/`Error <n>` text directly into PPU nametable 0 instead of using the `$6000` protocol (`vbl_nmi_timing`, `sprite_overflow_tests`, `branch_timing_tests`, `cpu_timing_test6`, `blargg_nes_cpu_test5`). Asserts the ROM's on-screen verdict — any failure marker fails the test, so the ROMs failing because of known emulator gaps show up as real `cargo test` failures; see the "Failing text-console tests" list under Known gaps.
@@ -85,7 +85,7 @@ tests/screenshots/
 
 ## Known gaps
 
-These are confirmed missing features tied to failing blargg ROM tests. The project currently passes **all 159** blargg CPU tests and **4 of 5** blargg PPU tests.
+**`cargo test` is fully green**: every wired-up blargg suite passes and asserts its ROM's own verdict (291 tests; the 16 `#[ignore]`d ones are manual diagnostic tracers plus the JAM-opcode ROM that can never finish). This section records what was fixed and where the remaining unwired/unsupported territory is (mappers 3/4, the APU suites).
 
 ### Fixed (previously listed here)
 
@@ -114,25 +114,36 @@ None on the CPU side. The blargg-verified per-cycle interrupt-delivery behavior 
 
 - **`blargg_nes_cpu_test5/cpu.nes` (06-abs_xy)** — reports "Error 1" on unofficial opcodes `9C`/`9E` (SHY/SHX). Newly discovered and unconfirmed; SHY/SHX already pass `instr_test-v5/07-abs_xy`, so the discrepancy is in some untested case. The test is `#[ignore]`d for a different reason (the ROM's opcode sweep hits a JAM/KIL opcode and hangs, on real hardware too); tracked here so it isn't lost.
 
-### Failing PPU tests
+### PPU tests: all passing
 
-- **`ppu/power_up_palette`** — result code 2: *Palette differs from table*. Power-up palette contents don't match the specific values on the test author's NES (this test is hardware-specific and may not be fixable in a general emulator).
+`ppu/power_up_palette` now passes: `Ppu::new` initializes palette RAM to the nesdev-documented 2C02 power-up palette — the same table the ROM was recorded from (its source says "these values are probably unique to my NES", but nesdev adopted them as the canonical power-up state and other accuracy-focused emulators ship them too). The golden screenshot was re-blessed for the passing "$01" screen.
 
-`ppu/vbl_clear_time` now passes (fixed as a side effect of the deferred NMI-edge-delivery fix —
+`ppu/vbl_clear_time` passes (fixed as a side effect of the deferred NMI-edge-delivery fix —
 see `docs/cpu_interrupts.md`).
 
-### Failing text-console tests
+### $6000-protocol tests: all passing
 
-These blargg ROMs report an on-screen failure, and their tests in `src/tests/text_console_roms.rs` assert that verdict, so they fail `cargo test` (like `ppu/power_up_palette` above) until the underlying gap is fixed. All are PPU timing/behavior gaps:
+The `roms.rs` harness (previously report-only for many suites) asserts every ROM's $6000 status, and all of those suites now pass. The last stragglers were fixed by open-bus modeling:
 
-- **`vbl_nmi_timing/2.vbl_timing`** — FAILED #2: flag should read as clear 3 PPU clocks before VBL.
-- **`vbl_nmi_timing/3.even_odd_frames`** — FAILED #2: pattern ----- should not skip any clocks.
-- **`vbl_nmi_timing/4.vbl_clear_timing`** — FAILED #2: cleared 3 or more PPU clocks too early.
-- **`vbl_nmi_timing/5.nmi_suppression`** — FAILED #3: reading flag when it's set should suppress NMI.
-- **`vbl_nmi_timing/6.nmi_disable`** — FAILED #2: NMI shouldn't occur when disabled 0 PPU clocks after VBL.
-- **`vbl_nmi_timing/7.nmi_timing`** — FAILED #2: NMI occurred 3 or more PPU clocks too early.
-- **`sprite_overflow_tests/2.Details`** — FAILED #9: shouldn't be set when all scanlines have 7 or fewer sprites.
-- **`sprite_overflow_tests/3.Timing`** — FAILED #3: cleared too early at end of VBL.
-- **`sprite_overflow_tests/4.Obscure`** — FAILED #7: checks that search stops at the last sprite without overflow.
+- **PPU open-bus decay register** (`Ppu::io_bus` + `open_bus()`/`refresh_open_bus()`, `src/ppu/mod.rs`): writes to any PPU register refresh all 8 bits, reads return decay-register bits for everything the PPU doesn't drive ($2002 drives bits 7-5, $2004 all, $2007 all / bits 5-0 for palette reads, write-only registers nothing), and each bit decays to 0 after ~600 ms (`OPEN_BUS_DECAY_DOTS`) without a 1-refresh. Fixed `ppu_open_bus`, `cpu_dummy_writes_ppumem`, `oam_stress`, and (with the one-byte-opcode dummy fetch below) `cpu_exec_space_ppuio`. Two adjacent fixes rode along: $2004 reads mask attribute bytes' nonexistent bits 2-4 to 0, and every one-byte opcode performs its hardware T2 dummy fetch of the following byte (`src/cpu/instructions.rs::execute`) — observable when executing out of PPU I/O space, where an RTS at $2001 must dummy-read $2002 and clear the PPU address latch.
+- **CPU open-bus latch** (`Bus::cpu_open_bus`, `src/bus.rs`): every bus transfer (reads, writes, opcode/operand fetches) updates the latch; reads of undriven addresses return it — $4000-$4014 and $4018-$401F entirely, $4015 bit 5, $4016/$4017 bits 5-7 (so `LDA $4016` naturally sees $40 in the top bits), and the cartridge's unmapped $4020-$5FFF expansion area (`Cartridge::read` returns `Option<u8>`; `None` = nothing drives the bus). No decay, unlike the PPU latch. Fixed `cpu_exec_space_apu`.
 
-The rest of the text-console suite passes and now asserts: `vbl_nmi_timing/1.frame_basics`, `sprite_overflow_tests/1.Basics` and `5.Emulator`, all 3 `branch_timing_tests`, `cpu_timing_test6`, and `blargg_nes_cpu_test5/official.nes`.
+**Harness rule**: emulator-external inspection (the $6000 result-protocol polling, debuggers) must use the side-effect-free `Bus::peek`, never `Bus::read` — harness reads through `read` corrupt the CPU open-bus latch between the emulated program's own transfers, which `cpu_exec_space_apu` (executing from open bus) catches immediately.
+
+`ppu_vbl_nmi/rom_singles/10-even_odd_timing` (and with it the combined `ppu_vbl_nmi.nes`) now passes. Two fixes: $2001 writes get the same 8-dots/apply/1-dot pre-advance as $2000 (previously they applied ~12 dots early, at the start of the writing instruction), and the odd-frame skipped-dot decision samples `rendering_enabled` at the start of pre-render dot 338 — one dot earlier than the wrap check (`Ppu::render_prev_dot`); all four of the ROM's sub-tests pin that single sample point.
+
+### Text-console tests: all passing
+
+All 5 `sprite_overflow_tests` now pass. Sprite evaluation was rewritten as a per-dot state machine (`Ppu::evaluate_sprites`, driven on odd dots 65-255 of visible scanlines): an out-of-range sprite costs 2 dots, an in-range sprite 8 dots (4-byte copy), so the overflow flag sets at the hardware-exact dot (3.Timing). Once 8 sprites are found, the scan continues with the hardware bug — both `n` and `m` increment on out-of-range checks, misinterpreting successive bytes of successive sprites as Y coordinates (4.Obscure's diagonal scan) — and stops without wrapping when `n` walks past sprite 63. The flag only sets when a 9th in-range (possibly misread) Y is found, never merely because 8 exist (2.Details #9). The pre-render scanline no longer evaluates sprites (hardware doesn't): it just clears the evaluation state, so scanline 0 always renders with an empty sprite set, as on real hardware.
+
+All 7 `vbl_nmi_timing` tests now pass. Three fixes: (a) the harness was switched to the shared `SystemClock` (its old hand-rolled loop never consumed the $2002-read PPU pre-advance, drifting the PPU 3 CPU cycles per read — this alone fixed `4.vbl_clear_timing` and `7.nmi_timing`); (b) the PPU's NMI is now modeled as hardware does it — a level (`vblank && nmi-enable`) edge-sampled once per CPU cycle — which yields the 2-dot NMI-suppression windows for $2002 reads and $2000 NMI-disables around VBL onset, plus the flag-never-sets race for a $2002 read 1 dot before VBL (see `src/ppu/mod.rs`, `Bus::read`/`Bus::write`); (c) the $4017 frame-counter reset delay is parity-dependent (see below).
+
+The rest of the text-console suite passes and asserts: all 7 `vbl_nmi_timing`, `sprite_overflow_tests/1.Basics` and `5.Emulator`, all 3 `branch_timing_tests`, `cpu_timing_test6`, and `blargg_nes_cpu_test5/official.nes`.
+
+### Sprite-0 hit latch delay is ~1 dot (the old 21 was harness drift)
+
+`SPRITE0_HIT_LATCH_DOTS` (`src/ppu/mod.rs`) is 1: the flag is visible via $2002 almost immediately after the colliding pixel (valid calibration window 0-2 dots against the `sprite_hit_tests_2005.10.05` timing ROMs). The previous value of 21 was calibrated while `sprite_hit_roms.rs` used a stale run loop that never consumed the $2002-read PPU pre-advance, double-advancing the PPU 9 dots per read — the "internal pipeline delay" was compensating for that drift. `sprite_hit_roms.rs` and `ppu_roms.rs` now step via the shared `SystemClock` like every other harness; if a sprite-hit timing test ever fails after a timing change, recalibrate the constant by sweeping it rather than trusting the old 18-23 window.
+
+### $4017 write-to-reset delay is parity-dependent
+
+The APU frame-counter reset takes effect 3 CPU cycles after the $4017 write cycle when that cycle lands on an even APU get/put cycle, 4 when odd (`Apu::write`, `frame_reset_delay = 7 or 8`). A constant delay silently defeats blargg's `sync_apu` parity equalizer (`bit SNDCHN` / `bne`), leaving the CPU-APU parity dependent on everything executed before the sync — it only ever worked because the pre-sync frame count happened to be constant. This surfaced as `cpu_interrupts_v2/4-irq_and_dma`'s +526 row flipping (513- vs 514-cycle OAM DMA) when the VBL-read suppression race changed how many frames the shell's $2002 poll loops consumed.

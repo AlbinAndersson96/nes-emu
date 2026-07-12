@@ -41,7 +41,7 @@ fn read_output(bus: &mut Bus) -> String {
     let mut out = String::new();
     let mut addr = 0x6004u16;
     loop {
-        let b = bus.read(addr);
+        let b = bus.peek(addr);
         if b == 0 {
             break;
         }
@@ -51,7 +51,7 @@ fn read_output(bus: &mut Bus) -> String {
     out
 }
 
-fn run_until_complete_trace(bus: &mut Bus, cpu: &mut Cpu, trace_nmi: bool) {
+fn run_until_complete_trace(filename: &str, bus: &mut Bus, cpu: &mut Cpu, trace_nmi: bool) {
     let mut total_cycles: u64 = 0;
     let mut nmi_count: u32 = 0;
     let mut last_nmi_cycle: u64 = 0;
@@ -61,24 +61,78 @@ fn run_until_complete_trace(bus: &mut Bus, cpu: &mut Cpu, trace_nmi: bool) {
     // docs/cpu_interrupts.md for how each rule was derived and verified.
     let mut clock = SystemClock::new();
 
+    // Status $81 means "needs the reset button pressed, but delayed by at
+    // least 100 msec from now" (see tests/roms/cpu_reset/readme.txt) — about
+    // 190,000 CPU cycles at 1.789773 MHz, rounded up for safety margin.
+    // Tracks the cycle at which $81 was first observed in the current phase
+    // so a warm reset only fires once that delay has elapsed; the tracker is
+    // cleared whenever status isn't $81 (including right after a reset
+    // fires), so a later $81 phase gets its own fresh wait.
+    const RESET_DELAY_CYCLES: u64 = 190_000;
+    const MAX_RESETS: u32 = 8;
+    let mut reset_request_since: Option<u64> = None;
+    let mut reset_count: u32 = 0;
+
     loop {
         let sig_valid =
-            bus.read(0x6001) == SIG[0] && bus.read(0x6002) == SIG[1] && bus.read(0x6003) == SIG[2];
+            bus.peek(0x6001) == SIG[0] && bus.peek(0x6002) == SIG[1] && bus.peek(0x6003) == SIG[2];
 
         if sig_valid {
-            let status = bus.read(0x6000);
-            if status < 0x80 {
-                let text = read_output(bus);
-                print_raw(text.trim());
-                assert_eq!(status, 0, "test failed with code {:#04x}", status);
-                return;
+            let status = bus.peek(0x6000);
+            if status == 0x81 {
+                let since = *reset_request_since.get_or_insert(total_cycles);
+                // Only fire the reset at an instruction boundary (empty
+                // micro-op queue) — `clock.step()` below ticks exactly one
+                // micro-op at a time, so this loop can observe $81 mid
+                // instruction; calling `warm_reset` there would change PC
+                // out from under an in-flight micro-op sequence and corrupt
+                // execution. The 100ms+ delay window gives ample slack to
+                // wait the handful of extra cycles until the current
+                // instruction retires.
+                let (_, _, queue_len) = cpu.debug_nmi_state();
+                if total_cycles.saturating_sub(since) >= RESET_DELAY_CYCLES && queue_len == 0 {
+                    reset_count += 1;
+                    if reset_count > MAX_RESETS {
+                        let text = read_output(bus);
+                        print_raw(text.trim());
+                        panic!(
+                            "{filename}: still requesting reset (status=$81) after {} warm resets",
+                            MAX_RESETS
+                        );
+                    }
+                    cpu.warm_reset(bus);
+                    let _ = bus.tick_ppu(7);
+                    let _ = bus.tick_apu(7);
+                    cpu.cycles += 7;
+                    total_cycles += 7;
+                    reset_request_since = None;
+                    continue;
+                }
+            } else {
+                reset_request_since = None;
+                if status < 0x80 {
+                    let text = read_output(bus);
+                    print_raw(&format!(
+                        "[{filename}] status={:#04x} text={}",
+                        status,
+                        text.trim()
+                    ));
+                    assert_eq!(
+                        status,
+                        0,
+                        "{filename}: ROM reported failure with code {:#04x}\n{}",
+                        status,
+                        text.trim()
+                    );
+                    return;
+                }
             }
         }
 
         if total_cycles >= MAX_CYCLES {
             let text = read_output(bus);
             print_raw(text.trim());
-            panic!("timed out after {} cycles", total_cycles);
+            panic!("{filename}: timed out after {} cycles", total_cycles);
         }
 
         let result = clock.step(cpu, bus);
@@ -111,7 +165,7 @@ fn run_rom_impl(filename: &str, trace_nmi: bool) {
     // hardware). APU advances by 8 to match cpu.cycles starting at 8.
     let _ = bus.tick_ppu(7);
     let _ = bus.tick_apu(8);
-    run_until_complete_trace(&mut bus, &mut cpu, trace_nmi);
+    run_until_complete_trace(filename, &mut bus, &mut cpu, trace_nmi);
 }
 
 macro_rules! rom_test {
@@ -119,105 +173,6 @@ macro_rules! rom_test {
         #[test]
         fn $name() {
             run_rom($file);
-        }
-    };
-}
-
-/// Like `run_rom`, but never asserts the ROM's own pass/fail verdict — only a
-/// panic or a MAX_CYCLES timeout fails the test. Used for suites we haven't
-/// verified the emulator against yet; the ROM's status/text is still printed
-/// so `cargo test -- --nocapture` shows real results.
-fn report_rom(filename: &str) {
-    let data = load_rom(filename);
-    let cartridge = Cartridge::from_ines(&data)
-        .unwrap_or_else(|e| panic!("failed to parse {}: {}", filename, e));
-    let mut bus = Bus::new();
-    bus.insert_cartridge(cartridge);
-    let mut cpu = Cpu::new();
-    cpu.reset(&mut bus);
-    let _ = bus.tick_ppu(7);
-    let _ = bus.tick_apu(8);
-
-    let mut total_cycles: u64 = 0;
-    let mut clock = SystemClock::new();
-
-    // Status $81 means "needs the reset button pressed, but delayed by at
-    // least 100 msec from now" (see tests/roms/cpu_reset/readme.txt) — about
-    // 190,000 CPU cycles at 1.789773 MHz, rounded up for safety margin.
-    // Tracks the cycle at which $81 was first observed in the current phase
-    // so a warm reset only fires once that delay has elapsed; the tracker is
-    // cleared whenever status isn't $81 (including right after a reset
-    // fires), so a later $81 phase gets its own fresh wait.
-    const RESET_DELAY_CYCLES: u64 = 190_000;
-    const MAX_RESETS: u32 = 8;
-    let mut reset_request_since: Option<u64> = None;
-    let mut reset_count: u32 = 0;
-
-    loop {
-        let sig_valid =
-            bus.read(0x6001) == SIG[0] && bus.read(0x6002) == SIG[1] && bus.read(0x6003) == SIG[2];
-
-        if sig_valid {
-            let status = bus.read(0x6000);
-            if status == 0x81 {
-                let since = *reset_request_since.get_or_insert(total_cycles);
-                // Only fire the reset at an instruction boundary (empty
-                // micro-op queue) — `clock.step()` below ticks exactly one
-                // micro-op at a time, so this loop can observe $81 mid
-                // instruction; calling `warm_reset` there would change PC
-                // out from under an in-flight micro-op sequence and corrupt
-                // execution. The 100ms+ delay window gives ample slack to
-                // wait the handful of extra cycles until the current
-                // instruction retires.
-                let (_, _, queue_len) = cpu.debug_nmi_state();
-                if total_cycles.saturating_sub(since) >= RESET_DELAY_CYCLES && queue_len == 0 {
-                    reset_count += 1;
-                    if reset_count > MAX_RESETS {
-                        let text = read_output(&mut bus);
-                        print_raw(text.trim());
-                        panic!(
-                            "{filename}: still requesting reset (status=$81) after {} warm resets",
-                            MAX_RESETS
-                        );
-                    }
-                    cpu.warm_reset(&mut bus);
-                    let _ = bus.tick_ppu(7);
-                    let _ = bus.tick_apu(7);
-                    cpu.cycles += 7;
-                    total_cycles += 7;
-                    reset_request_since = None;
-                    continue;
-                }
-            } else {
-                reset_request_since = None;
-                if status < 0x80 {
-                    let text = read_output(&mut bus);
-                    print_raw(&format!(
-                        "[{filename}] status={:#04x} text={}",
-                        status,
-                        text.trim()
-                    ));
-                    return;
-                }
-            }
-        }
-
-        if total_cycles >= MAX_CYCLES {
-            let text = read_output(&mut bus);
-            print_raw(text.trim());
-            panic!("{filename}: timed out after {} cycles", total_cycles);
-        }
-
-        let result = clock.step(&mut cpu, &mut bus);
-        total_cycles += result.cycles;
-    }
-}
-
-macro_rules! report_rom_test {
-    ($name:ident, $file:expr) => {
-        #[test]
-        fn $name() {
-            report_rom($file);
         }
     };
 }
@@ -293,185 +248,187 @@ rom_test!(instr_misc_all, "instr_misc/instr_misc.nes");
 // instr_timing — cycle-accurate instruction timing (Mapper 1 / MMC1)
 rom_test!(instr_timing, "instr_timing/instr_timing.nes");
 
-// --- Newly added suites below: report-only (see report_rom_test!) ---
+// --- Additional $6000-protocol suites; all assert the ROM's status like the
+// suites above. Known failing ones are listed under "Failing $6000-protocol
+// tests" in CLAUDE.md's Known gaps. ---
 
 // instr_test-v3 — older instr_test vintage (Mapper 1 / MMC1 for the combined ROMs)
-report_rom_test!(
+rom_test!(
     instr_test_v3_implied,
     "instr_test-v3/rom_singles/01-implied.nes"
 );
-report_rom_test!(
+rom_test!(
     instr_test_v3_immediate,
     "instr_test-v3/rom_singles/02-immediate.nes"
 );
-report_rom_test!(
+rom_test!(
     instr_test_v3_zero_page,
     "instr_test-v3/rom_singles/03-zero_page.nes"
 );
-report_rom_test!(
+rom_test!(
     instr_test_v3_zp_xy,
     "instr_test-v3/rom_singles/04-zp_xy.nes"
 );
-report_rom_test!(
+rom_test!(
     instr_test_v3_absolute,
     "instr_test-v3/rom_singles/05-absolute.nes"
 );
-report_rom_test!(
+rom_test!(
     instr_test_v3_abs_xy,
     "instr_test-v3/rom_singles/06-abs_xy.nes"
 );
-report_rom_test!(
+rom_test!(
     instr_test_v3_ind_x,
     "instr_test-v3/rom_singles/07-ind_x.nes"
 );
-report_rom_test!(
+rom_test!(
     instr_test_v3_ind_y,
     "instr_test-v3/rom_singles/08-ind_y.nes"
 );
-report_rom_test!(
+rom_test!(
     instr_test_v3_branches,
     "instr_test-v3/rom_singles/09-branches.nes"
 );
-report_rom_test!(
+rom_test!(
     instr_test_v3_stack,
     "instr_test-v3/rom_singles/10-stack.nes"
 );
-report_rom_test!(
+rom_test!(
     instr_test_v3_jmp_jsr,
     "instr_test-v3/rom_singles/11-jmp_jsr.nes"
 );
-report_rom_test!(instr_test_v3_rts, "instr_test-v3/rom_singles/12-rts.nes");
-report_rom_test!(instr_test_v3_rti, "instr_test-v3/rom_singles/13-rti.nes");
-report_rom_test!(instr_test_v3_brk, "instr_test-v3/rom_singles/14-brk.nes");
-report_rom_test!(
+rom_test!(instr_test_v3_rts, "instr_test-v3/rom_singles/12-rts.nes");
+rom_test!(instr_test_v3_rti, "instr_test-v3/rom_singles/13-rti.nes");
+rom_test!(instr_test_v3_brk, "instr_test-v3/rom_singles/14-brk.nes");
+rom_test!(
     instr_test_v3_special,
     "instr_test-v3/rom_singles/15-special.nes"
 );
-report_rom_test!(
+rom_test!(
     instr_test_v3_official_only,
     "instr_test-v3/official_only.nes"
 );
-report_rom_test!(instr_test_v3_all_instrs, "instr_test-v3/all_instrs.nes");
+rom_test!(instr_test_v3_all_instrs, "instr_test-v3/all_instrs.nes");
 
 // nes_instr_test — another instr_test vintage, rom_singles only (no combined ROM)
-report_rom_test!(
+rom_test!(
     nes_instr_test_implied,
     "nes_instr_test/rom_singles/01-implied.nes"
 );
-report_rom_test!(
+rom_test!(
     nes_instr_test_immediate,
     "nes_instr_test/rom_singles/02-immediate.nes"
 );
-report_rom_test!(
+rom_test!(
     nes_instr_test_zero_page,
     "nes_instr_test/rom_singles/03-zero_page.nes"
 );
-report_rom_test!(
+rom_test!(
     nes_instr_test_zp_xy,
     "nes_instr_test/rom_singles/04-zp_xy.nes"
 );
-report_rom_test!(
+rom_test!(
     nes_instr_test_absolute,
     "nes_instr_test/rom_singles/05-absolute.nes"
 );
-report_rom_test!(
+rom_test!(
     nes_instr_test_abs_xy,
     "nes_instr_test/rom_singles/06-abs_xy.nes"
 );
-report_rom_test!(
+rom_test!(
     nes_instr_test_ind_x,
     "nes_instr_test/rom_singles/07-ind_x.nes"
 );
-report_rom_test!(
+rom_test!(
     nes_instr_test_ind_y,
     "nes_instr_test/rom_singles/08-ind_y.nes"
 );
-report_rom_test!(
+rom_test!(
     nes_instr_test_branches,
     "nes_instr_test/rom_singles/09-branches.nes"
 );
-report_rom_test!(
+rom_test!(
     nes_instr_test_stack,
     "nes_instr_test/rom_singles/10-stack.nes"
 );
-report_rom_test!(
+rom_test!(
     nes_instr_test_special,
     "nes_instr_test/rom_singles/11-special.nes"
 );
 
 // cpu_dummy_writes — RMW double-write behavior (OAM and PPU-memory variants)
-report_rom_test!(
+rom_test!(
     cpu_dummy_writes_oam,
     "cpu_dummy_writes/cpu_dummy_writes_oam.nes"
 );
-report_rom_test!(
+rom_test!(
     cpu_dummy_writes_ppumem,
     "cpu_dummy_writes/cpu_dummy_writes_ppumem.nes"
 );
 
 // cpu_exec_space — CPU execution from I/O address space
-report_rom_test!(
+rom_test!(
     cpu_exec_space_apu,
     "cpu_exec_space/test_cpu_exec_space_apu.nes"
 );
-report_rom_test!(
+rom_test!(
     cpu_exec_space_ppuio,
     "cpu_exec_space/test_cpu_exec_space_ppuio.nes"
 );
 
 // cpu_reset — register/RAM state across a reset
-report_rom_test!(cpu_reset_ram_after_reset, "cpu_reset/ram_after_reset.nes");
-report_rom_test!(cpu_reset_registers, "cpu_reset/registers.nes");
+rom_test!(cpu_reset_ram_after_reset, "cpu_reset/ram_after_reset.nes");
+rom_test!(cpu_reset_registers, "cpu_reset/registers.nes");
 
 // oam_read / oam_stress — OAM read/DMA edge cases
-report_rom_test!(oam_read, "oam_read/oam_read.nes");
-report_rom_test!(oam_stress, "oam_stress/oam_stress.nes");
+rom_test!(oam_read, "oam_read/oam_read.nes");
+rom_test!(oam_stress, "oam_stress/oam_stress.nes");
 
 // ppu_open_bus — PPU register open-bus behavior
-report_rom_test!(ppu_open_bus, "ppu_open_bus/ppu_open_bus.nes");
+rom_test!(ppu_open_bus, "ppu_open_bus/ppu_open_bus.nes");
 
 // ppu_vbl_nmi — VBL/NMI timing (Mapper 1 for the combined ROM)
-report_rom_test!(
+rom_test!(
     ppu_vbl_nmi_vbl_basics,
     "ppu_vbl_nmi/rom_singles/01-vbl_basics.nes"
 );
-report_rom_test!(
+rom_test!(
     ppu_vbl_nmi_vbl_set_time,
     "ppu_vbl_nmi/rom_singles/02-vbl_set_time.nes"
 );
-report_rom_test!(
+rom_test!(
     ppu_vbl_nmi_vbl_clear_time,
     "ppu_vbl_nmi/rom_singles/03-vbl_clear_time.nes"
 );
-report_rom_test!(
+rom_test!(
     ppu_vbl_nmi_nmi_control,
     "ppu_vbl_nmi/rom_singles/04-nmi_control.nes"
 );
-report_rom_test!(
+rom_test!(
     ppu_vbl_nmi_nmi_timing,
     "ppu_vbl_nmi/rom_singles/05-nmi_timing.nes"
 );
-report_rom_test!(
+rom_test!(
     ppu_vbl_nmi_suppression,
     "ppu_vbl_nmi/rom_singles/06-suppression.nes"
 );
-report_rom_test!(
+rom_test!(
     ppu_vbl_nmi_nmi_on_timing,
     "ppu_vbl_nmi/rom_singles/07-nmi_on_timing.nes"
 );
-report_rom_test!(
+rom_test!(
     ppu_vbl_nmi_nmi_off_timing,
     "ppu_vbl_nmi/rom_singles/08-nmi_off_timing.nes"
 );
-report_rom_test!(
+rom_test!(
     ppu_vbl_nmi_even_odd_frames,
     "ppu_vbl_nmi/rom_singles/09-even_odd_frames.nes"
 );
-report_rom_test!(
+rom_test!(
     ppu_vbl_nmi_even_odd_timing,
     "ppu_vbl_nmi/rom_singles/10-even_odd_timing.nes"
 );
-report_rom_test!(ppu_vbl_nmi_all, "ppu_vbl_nmi/ppu_vbl_nmi.nes");
+rom_test!(ppu_vbl_nmi_all, "ppu_vbl_nmi/ppu_vbl_nmi.nes");
 
 // Diagnostic: run test 2 with NMI cycle tracing. Not in CI; run manually with:
 //   cargo test nmi_and_brk_trace -- --nocapture 2>&1 | head -40
@@ -501,9 +458,9 @@ fn nmi_brk_crc_trace() {
 
     loop {
         let sig_valid =
-            bus.read(0x6001) == SIG[0] && bus.read(0x6002) == SIG[1] && bus.read(0x6003) == SIG[2];
+            bus.peek(0x6001) == SIG[0] && bus.peek(0x6002) == SIG[1] && bus.peek(0x6003) == SIG[2];
         if sig_valid {
-            let status = bus.read(0x6000);
+            let status = bus.peek(0x6000);
             if status < 0x80 {
                 return; // pass — just collecting trace
             }
@@ -614,9 +571,9 @@ fn nmi_brk_row_trace() {
 
     loop {
         let sig_valid =
-            bus.read(0x6001) == SIG[0] && bus.read(0x6002) == SIG[1] && bus.read(0x6003) == SIG[2];
+            bus.peek(0x6001) == SIG[0] && bus.peek(0x6002) == SIG[1] && bus.peek(0x6003) == SIG[2];
         if sig_valid {
-            let status = bus.read(0x6000);
+            let status = bus.peek(0x6000);
             if status < 0x80 {
                 let text = read_output(&mut bus);
                 print_raw(text.trim());
@@ -739,9 +696,9 @@ fn nmi_brk_micro_trace() {
 
     loop {
         let sig_valid =
-            bus.read(0x6001) == SIG[0] && bus.read(0x6002) == SIG[1] && bus.read(0x6003) == SIG[2];
+            bus.peek(0x6001) == SIG[0] && bus.peek(0x6002) == SIG[1] && bus.peek(0x6003) == SIG[2];
         if sig_valid {
-            let status = bus.read(0x6000);
+            let status = bus.peek(0x6000);
             if status < 0x80 {
                 return; // just collecting trace
             }
@@ -869,9 +826,9 @@ fn nmi_irq_generic_trace() {
 
     loop {
         let sig_valid =
-            bus.read(0x6001) == SIG[0] && bus.read(0x6002) == SIG[1] && bus.read(0x6003) == SIG[2];
+            bus.peek(0x6001) == SIG[0] && bus.peek(0x6002) == SIG[1] && bus.peek(0x6003) == SIG[2];
         if sig_valid {
-            let status = bus.read(0x6000);
+            let status = bus.peek(0x6000);
             if status < 0x80 {
                 return; // just collecting trace
             }
@@ -977,9 +934,9 @@ fn nmi_irq_row_trace() {
 
     loop {
         let sig_valid =
-            bus.read(0x6001) == SIG[0] && bus.read(0x6002) == SIG[1] && bus.read(0x6003) == SIG[2];
+            bus.peek(0x6001) == SIG[0] && bus.peek(0x6002) == SIG[1] && bus.peek(0x6003) == SIG[2];
         if sig_valid {
-            let status = bus.read(0x6000);
+            let status = bus.peek(0x6000);
             if status < 0x80 {
                 return;
             }
@@ -1106,9 +1063,9 @@ fn nmi_irq_stage_trace() {
 
     loop {
         let sig_valid =
-            bus.read(0x6001) == SIG[0] && bus.read(0x6002) == SIG[1] && bus.read(0x6003) == SIG[2];
+            bus.peek(0x6001) == SIG[0] && bus.peek(0x6002) == SIG[1] && bus.peek(0x6003) == SIG[2];
         if sig_valid {
-            let status = bus.read(0x6000);
+            let status = bus.peek(0x6000);
             if status < 0x80 {
                 return;
             }
@@ -1618,11 +1575,11 @@ fn nmi_irq_row0_arbitration_trace() {
         eprintln!("=== defer_irq={} trace_row={} ===", defer_irq, trace_row);
 
         loop {
-            let sig_valid = bus.read(0x6001) == SIG[0]
-                && bus.read(0x6002) == SIG[1]
-                && bus.read(0x6003) == SIG[2];
+            let sig_valid = bus.peek(0x6001) == SIG[0]
+                && bus.peek(0x6002) == SIG[1]
+                && bus.peek(0x6003) == SIG[2];
             if sig_valid {
-                let status = bus.read(0x6000);
+                let status = bus.peek(0x6000);
                 if status < 0x80 {
                     return;
                 }
@@ -1775,9 +1732,9 @@ fn nmi_irq_all_rows_summary() {
 
     loop {
         let sig_valid =
-            bus.read(0x6001) == SIG[0] && bus.read(0x6002) == SIG[1] && bus.read(0x6003) == SIG[2];
+            bus.peek(0x6001) == SIG[0] && bus.peek(0x6002) == SIG[1] && bus.peek(0x6003) == SIG[2];
         if sig_valid {
-            let status = bus.read(0x6000);
+            let status = bus.peek(0x6000);
             if status < 0x80 {
                 return;
             }
