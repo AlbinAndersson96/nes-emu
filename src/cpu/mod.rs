@@ -156,19 +156,6 @@ impl Cpu {
         self.interrupt_poll_suppressed = true;
     }
 
-    /// Diagnostic accessor for interrupt-timing tracers: (pending_nmi, nmi_pending, queue_len).
-    #[cfg(test)]
-    pub(crate) fn debug_nmi_state(&self) -> (bool, bool, u8) {
-        (self.pending_nmi, self.nmi_pending, self.queue_len)
-    }
-
-    /// Diagnostic accessor for the NMI-vs-IRQ arbitration tracer:
-    /// (irq_pending, irq_inhibit_next, flag(FLAG_I)).
-    #[cfg(test)]
-    pub(crate) fn debug_irq_state(&self) -> (bool, bool, bool) {
-        (self.irq_pending, self.irq_inhibit_next, self.flag(FLAG_I))
-    }
-
     pub fn reset(&mut self, bus: &mut dyn Bus) {
         self.a = 0;
         self.x = 0;

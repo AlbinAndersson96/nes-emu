@@ -1,8 +1,7 @@
 //! Harness for blargg ROM suites that print their verdict as text into PPU
 //! nametable 0 instead of using the `$6000` result protocol. Each test
-//! asserts the ROM's on-screen verdict, so ROMs that fail because of known
-//! emulator gaps fail `cargo test` — see the "Failing text-console tests"
-//! list under Known gaps in CLAUDE.md for the currently expected failures.
+//! asserts the ROM's on-screen verdict, so any emulator regression shows up
+//! as a real `cargo test` failure.
 
 use std::path::PathBuf;
 

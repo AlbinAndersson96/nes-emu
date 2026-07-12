@@ -161,16 +161,6 @@ pub struct Ppu {
 }
 
 impl Ppu {
-    /// Diagnostic accessor for cycle-exact interrupt-timing tracers: set the
-    /// exact (dot, scanline) position directly, bypassing tick(), for
-    /// dot-level precision that `tick_ppu`'s CPU-cycle (3-dot) granularity
-    /// can't reach.
-    #[cfg(test)]
-    pub(crate) fn debug_set_position(&mut self, dot: u16, scanline: u16) {
-        self.dot = dot;
-        self.scanline = scanline;
-    }
-
     pub fn new() -> Self {
         Self {
             ctrl: 0,

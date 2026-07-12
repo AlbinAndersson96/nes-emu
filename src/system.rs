@@ -29,11 +29,9 @@ pub struct SystemClock {
     in_dma: bool,
 }
 
-/// What a single `SystemClock::step` did — cycle count for pacing, NMI
-/// delivery for diagnostics.
+/// What a single `SystemClock::step` did — cycle count for pacing.
 pub struct StepResult {
     pub cycles: u64,
-    pub nmi: bool,
 }
 
 impl SystemClock {
@@ -59,10 +57,7 @@ impl SystemClock {
             if bus.tick_apu(1) && !cpu.irq_line_pending() {
                 self.dma_irq_deferred = true;
             }
-            return StepResult {
-                cycles: 1,
-                nmi: false,
-            };
+            return StepResult { cycles: 1 };
         }
 
         if self.in_dma {
@@ -122,10 +117,7 @@ impl SystemClock {
             }
         }
 
-        StepResult {
-            cycles: delta,
-            nmi: got_nmi,
-        }
+        StepResult { cycles: delta }
     }
 }
 
