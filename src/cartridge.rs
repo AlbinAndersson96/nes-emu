@@ -70,8 +70,10 @@ impl Cartridge {
         let mapper: Box<dyn Mapper> = match mapper_id {
             0 => Box::new(Nrom),
             1 => Box::new(Mmc1::new(prg_banks)),
+            2 => Box::new(Uxrom::new()),
             3 => Box::new(Cnrom::new()),
             4 => Box::new(Mmc3::new(prg_banks)),
+            7 => Box::new(Axrom::new()),
             _ => return Err(CartridgeError::UnsupportedMapper(mapper_id)),
         };
 
@@ -309,6 +311,40 @@ impl Mapper for Mmc1 {
 }
 
 // ---------------------------------------------------------------------------
+// Mapper 2 — UxROM
+//
+// Any $8000-$FFFF write selects the 16 KB PRG-ROM bank at $8000-$BFFF; the
+// last bank is fixed at $C000-$FFFF. CHR is unbanked (these boards carry
+// 8 KB CHR-RAM). Bus conflicts are not modeled, as for CNROM below.
+// ---------------------------------------------------------------------------
+
+struct Uxrom {
+    prg_bank: usize,
+}
+
+impl Uxrom {
+    fn new() -> Self {
+        Self { prg_bank: 0 }
+    }
+}
+
+impl Mapper for Uxrom {
+    fn prg_offset(&self, rom_len: usize, addr: u16) -> usize {
+        let bank_count = rom_len / 0x4000;
+        if addr < 0xC000 {
+            (self.prg_bank % bank_count) * 0x4000 + (addr - 0x8000) as usize
+        } else {
+            (bank_count - 1) * 0x4000 + (addr - 0xC000) as usize
+        }
+    }
+
+    fn write_prg(&mut self, _addr: u16, data: u8) {
+        // 4 register bits covers UNROM (8 banks) and UOROM (16 banks).
+        self.prg_bank = (data & 0x0F) as usize;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Mapper 3 — CNROM
 //
 // Fixed NROM-style PRG; any $8000-$FFFF write selects an 8 KB CHR-ROM bank
@@ -512,5 +548,48 @@ impl Mapper for Mmc3 {
 
     fn irq_pending(&self) -> bool {
         self.irq_flag
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mapper 7 — AxROM
+//
+// Any $8000-$FFFF write selects a 32 KB PRG-ROM bank (bits 0-2) and the
+// single-screen nametable page (bit 4). CHR is unbanked 8 KB CHR-RAM.
+// Bus conflicts are not modeled (and most AxROM boards have none anyway).
+// ---------------------------------------------------------------------------
+
+struct Axrom {
+    prg_bank: usize,
+    /// Bit 4 of the last write: which 1 KB VRAM page all four nametables map to.
+    vram_page_high: bool,
+}
+
+impl Axrom {
+    fn new() -> Self {
+        Self {
+            prg_bank: 0,
+            vram_page_high: false,
+        }
+    }
+}
+
+impl Mapper for Axrom {
+    fn prg_offset(&self, rom_len: usize, addr: u16) -> usize {
+        let bank_count = (rom_len / 0x8000).max(1);
+        (self.prg_bank % bank_count) * 0x8000 + (addr - 0x8000) as usize
+    }
+
+    fn write_prg(&mut self, _addr: u16, data: u8) {
+        self.prg_bank = (data & 0x07) as usize;
+        self.vram_page_high = data & 0x10 != 0;
+    }
+
+    fn mirroring(&self) -> Option<Mirroring> {
+        Some(if self.vram_page_high {
+            Mirroring::SingleHigh
+        } else {
+            Mirroring::SingleLow
+        })
     }
 }
