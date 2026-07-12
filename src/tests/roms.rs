@@ -430,6 +430,38 @@ rom_test!(
 );
 rom_test!(ppu_vbl_nmi_all, "ppu_vbl_nmi/ppu_vbl_nmi.nes");
 
+// ppu_read_buffer — $2007 read-buffer behavior (mapper 3 / CNROM, 32 KB
+// banked CHR-ROM; also exercises CHR bank switching)
+rom_test!(ppu_read_buffer, "ppu_read_buffer/test_ppu_read_buffer.nes");
+
+// mmc3_test — MMC3 scanline counter / IRQ (mapper 4). 6-MMC6.nes is NOT
+// wired: it tests MMC6 (and rev-A-like MMC3 chips), whose IRQ-on-forced-
+// reload behavior is mutually exclusive with the normal MMC3 behavior that
+// 5-MMC3.nes verifies (see the suite's readme).
+rom_test!(mmc3_test_clocking, "mmc3_test/1-clocking.nes");
+rom_test!(mmc3_test_details, "mmc3_test/2-details.nes");
+rom_test!(mmc3_test_a12_clocking, "mmc3_test/3-A12_clocking.nes");
+rom_test!(mmc3_test_scanline_timing, "mmc3_test/4-scanline_timing.nes");
+rom_test!(mmc3_test_mmc3, "mmc3_test/5-MMC3.nes");
+
+// mmc3_test_2 — later revision of the same suite. 6-MMC3_alt.nes is NOT
+// wired for the same reason as 6-MMC6 above (alternate/rev-A behavior,
+// mutually exclusive with 5-MMC3).
+rom_test!(
+    mmc3_test_2_clocking,
+    "mmc3_test_2/rom_singles/1-clocking.nes"
+);
+rom_test!(mmc3_test_2_details, "mmc3_test_2/rom_singles/2-details.nes");
+rom_test!(
+    mmc3_test_2_a12_clocking,
+    "mmc3_test_2/rom_singles/3-A12_clocking.nes"
+);
+rom_test!(
+    mmc3_test_2_scanline_timing,
+    "mmc3_test_2/rom_singles/4-scanline_timing.nes"
+);
+rom_test!(mmc3_test_2_mmc3, "mmc3_test_2/rom_singles/5-MMC3.nes");
+
 // Diagnostic: run test 2 with NMI cycle tracing. Not in CI; run manually with:
 //   cargo test nmi_and_brk_trace -- --nocapture 2>&1 | head -40
 #[test]

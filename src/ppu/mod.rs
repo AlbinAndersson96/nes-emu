@@ -252,19 +252,21 @@ impl Ppu {
     /// position the sampling point within (not just at the end of) the read
     /// cycle; callers must keep whole-instruction totals a multiple of 3 so
     /// the PPU-CPU dot alignment never drifts.
-    pub fn tick_dots(&mut self, dots: u64, cart: Option<&mut Cartridge>) {
-        // Split borrow: we need &mut self and &Cartridge simultaneously.
-        // Safety: we pass cart as Option<&Cartridge> (shared ref) to helpers
-        // that only read it; ppu_write can take &mut Cartridge but that's CHR-RAM
-        // which happens only via register writes, not during tick.
-        let cart_ref: Option<&Cartridge> = cart.map(|c| &*c);
+    pub fn tick_dots(&mut self, dots: u64, mut cart: Option<&mut Cartridge>) {
         for _ in 0..dots {
-            self.clock_dot(cart_ref);
+            self.clock_dot(cart.as_deref_mut());
+        }
+    }
+
+    /// Report a PPU address-bus value to the mapper (MMC3 A12 IRQ clocking).
+    fn notify_ppu_bus(&self, cart: Option<&mut Cartridge>, addr: u16) {
+        if let Some(c) = cart {
+            c.ppu_bus_addr(addr, self.dots);
         }
     }
 
     /// Clock one PPU dot: run events for (scanline, dot), then advance counters.
-    fn clock_dot(&mut self, cart: Option<&Cartridge>) {
+    fn clock_dot(&mut self, mut cart: Option<&mut Cartridge>) {
         let render = self.rendering_enabled();
         let visible = self.scanline <= 239;
         let is_render_scanline = visible || self.scanline == PRERENDER_SCANLINE;
@@ -322,7 +324,13 @@ impl Ppu {
         // ── Background tile fetch (visible + pre-render, dots 1–256, 321–336) ─
         if render && is_render_scanline {
             match self.dot {
-                1..=256 | 321..=336 => self.bg_fetch(cart),
+                1..=256 | 321..=336 => self.bg_fetch(cart.as_deref_mut()),
+                // Dummy nametable fetches at the end of the line (hardware
+                // does two, dots 337-340). The data is unused, but the PPU
+                // address bus carries the nametable address (A12 low), which
+                // the MMC3's A12 low-time filter needs to see between one
+                // line's last pattern fetch and the next line's first.
+                337 | 339 => self.notify_ppu_bus(cart.as_deref_mut(), 0x2000 | (self.v & 0x0FFF)),
                 _ => {}
             }
         }
@@ -528,33 +536,52 @@ impl Ppu {
         self.bg_shift_attr_hi <<= 1;
     }
 
+    /// Pattern-table address (plane 0) for the background tile currently
+    /// latched in bg_nt_byte.
+    fn bg_pattern_addr(&self) -> u16 {
+        let fine_y = (self.v >> 12) & 0x07;
+        self.bg_pattern_base() | ((self.bg_nt_byte as u16) << 4) | fine_y
+    }
+
     /// Run the per-8-dot background tile fetch sequence (called at dots 1..=336).
-    fn bg_fetch(&mut self, cart: Option<&Cartridge>) {
+    ///
+    /// Mapper A12 events: the nametable/attribute fetches report their
+    /// (A12-low) addresses at the fetch dots; the tile's pattern address is
+    /// reported once, on the group's LAST dot (dot%8 == 0, i.e. dots 8, 16,
+    /// …, 256, 328, 336) — the group's only possible A12 rise. That dot is
+    /// calibrated against blargg's mmc3_test 4-scanline_timing (see
+    /// fetch_sprites; the BG-driven clock must land exactly 256 dots before
+    /// the sprite-driven one, and the prefetch-driven clock 320 after it).
+    fn bg_fetch(&mut self, mut cart: Option<&mut Cartridge>) {
         match self.dot % 8 {
+            0 => {
+                let addr = self.bg_pattern_addr();
+                self.notify_ppu_bus(cart, addr);
+            }
             1 => {
                 // Reload shift registers with the tile fetched in the previous 8-dot window
                 self.reload_bg_shifters();
                 // Fetch nametable byte
                 let nt_addr = 0x2000 | (self.v & 0x0FFF);
+                self.notify_ppu_bus(cart.as_deref_mut(), nt_addr);
                 self.bg_nt_byte = self.ppu_read(nt_addr, cart);
             }
             3 => {
                 // Fetch attribute byte
                 let attr_addr =
                     0x23C0 | (self.v & 0x0C00) | ((self.v >> 4) & 0x38) | ((self.v >> 2) & 0x07);
+                self.notify_ppu_bus(cart.as_deref_mut(), attr_addr);
                 let attr = self.ppu_read(attr_addr, cart);
                 // Select the 2-bit palette for the current 2×2 tile quadrant
                 let shift = ((self.v >> 4) & 0x04) | (self.v & 0x02);
                 self.bg_attr_byte = (attr >> shift) & 0x03;
             }
             5 => {
-                let fine_y = (self.v >> 12) & 0x07;
-                let addr = self.bg_pattern_base() | ((self.bg_nt_byte as u16) << 4) | fine_y;
+                let addr = self.bg_pattern_addr();
                 self.bg_pat_lo = self.ppu_read(addr, cart);
             }
             7 => {
-                let fine_y = (self.v >> 12) & 0x07;
-                let addr = self.bg_pattern_base() | ((self.bg_nt_byte as u16) << 4) | fine_y | 8;
+                let addr = self.bg_pattern_addr() | 8;
                 self.bg_pat_hi = self.ppu_read(addr, cart);
             }
             _ => {}
@@ -662,37 +689,21 @@ impl Ppu {
         }
     }
 
-    /// Fetch sprite patterns for the sprites found in secondary OAM (dots 257–320).
-    fn fetch_sprites(&mut self, cart: Option<&Cartridge>) {
-        if self.dot < 257 || self.dot > 320 {
-            return;
-        }
-        // Evaluation for this scanline finished at dot 256; hand its results
-        // off to the render-facing fields now, before output_pixel() needs
-        // them on the very next scanline's dot 1.
-        if self.dot == 257 {
-            self.sprite_count = self.sprite_eval_count;
-            self.sprite0_in_secondary = self.sprite0_eval;
-        }
-        let idx = ((self.dot - 257) / 8) as usize;
-        if idx >= self.sprite_count {
-            return;
-        }
-        // Only do the fetch on the last dot of each 8-dot slot
-        if (self.dot - 257) % 8 != 7 {
-            return;
-        }
-
+    /// Pattern-table address (plane 0) for sprite fetch slot `idx`, computed
+    /// from secondary OAM. Empty slots read as $FF-filled (evaluation clears
+    /// secondary OAM to $FF), reproducing the hardware's dummy tile-$FF
+    /// fetches — whose bus address (A12 in particular) the MMC3 IRQ counter
+    /// observes even when fewer than 8 sprites were found.
+    fn sprite_pattern_addr(&self, idx: usize) -> u16 {
         let y_pos = self.secondary_oam[idx * 4] as u16;
         let tile = self.secondary_oam[idx * 4 + 1];
         let attr = self.secondary_oam[idx * 4 + 2];
-        let x_pos = self.secondary_oam[idx * 4 + 3];
         let flip_v = attr & 0x80 != 0;
         let height = self.sprite_height();
 
         let mut row = (self.scanline + 1).saturating_sub(y_pos + 1);
         if flip_v {
-            row = (height - 1) - row;
+            row = (height - 1).saturating_sub(row);
         }
 
         let (pt_base, tile_idx) = if height == 16 {
@@ -707,22 +718,67 @@ impl Ppu {
             (self.sprite_pattern_base(), tile as u16)
         };
 
-        let row_in_tile = row & 0x07;
-        let addr_lo = pt_base | (tile_idx << 4) | row_in_tile;
-        let lo = self.ppu_read(addr_lo, cart);
-        let hi = self.ppu_read(addr_lo | 8, cart);
+        pt_base | (tile_idx << 4) | (row & 0x07)
+    }
 
-        // Horizontal flip
-        let (lo, hi) = if attr & 0x40 != 0 {
-            (lo.reverse_bits(), hi.reverse_bits())
-        } else {
-            (lo, hi)
-        };
+    /// Fetch sprite patterns for the sprites found in secondary OAM (dots 257–320).
+    ///
+    /// Each 8-dot slot reports a mapper-visible bus sequence — garbage
+    /// nametable/attribute addresses (offsets 0/2, A12 low) and the slot's
+    /// pattern address (offset 7, the slot's only possible A12 rise) — for
+    /// ALL 8 slots, occupied or not, so the mapper sees a hardware-like A12
+    /// waveform even on empty scanlines (dummy tile-$FF fetches). The
+    /// pattern-notify dot (260+... in hardware terms; slot offset 7 = dot
+    /// 264+8k here) and the matching BG dots in bg_fetch were calibrated as
+    /// a set against blargg's mmc3_test 4-scanline_timing, which brackets
+    /// the IRQ moment to 1 PPU dot in both $2000=$08 and $2000=$10 modes:
+    /// sprite-driven clock = BG-driven clock + 256 dots, prefetch-driven
+    /// clock = BG + 320, all three anchored to the $2002-read sampling
+    /// point this emulator's VBL timing is calibrated to. The fetched data
+    /// is captured into the shift registers on the same dot, for occupied
+    /// slots only.
+    fn fetch_sprites(&mut self, mut cart: Option<&mut Cartridge>) {
+        if self.dot < 257 || self.dot > 320 {
+            return;
+        }
+        // Evaluation for this scanline finished at dot 256; hand its results
+        // off to the render-facing fields now, before output_pixel() needs
+        // them on the very next scanline's dot 1.
+        if self.dot == 257 {
+            self.sprite_count = self.sprite_eval_count;
+            self.sprite0_in_secondary = self.sprite0_eval;
+        }
+        let idx = ((self.dot - 257) / 8) as usize;
+        match (self.dot - 257) % 8 {
+            0 | 2 => {
+                self.notify_ppu_bus(cart, 0x2000 | (self.v & 0x0FFF));
+            }
+            7 => {
+                let addr = self.sprite_pattern_addr(idx);
+                self.notify_ppu_bus(cart.as_deref_mut(), addr);
+                if idx >= self.sprite_count {
+                    return;
+                }
+                let attr = self.secondary_oam[idx * 4 + 2];
+                let x_pos = self.secondary_oam[idx * 4 + 3];
+                let addr_lo = self.sprite_pattern_addr(idx);
+                let lo = self.ppu_read(addr_lo, cart.as_deref_mut());
+                let hi = self.ppu_read(addr_lo | 8, cart);
 
-        self.sprite_shift_lo[idx] = lo;
-        self.sprite_shift_hi[idx] = hi;
-        self.sprite_attr[idx] = attr;
-        self.sprite_x[idx] = x_pos;
+                // Horizontal flip
+                let (lo, hi) = if attr & 0x40 != 0 {
+                    (lo.reverse_bits(), hi.reverse_bits())
+                } else {
+                    (lo, hi)
+                };
+
+                self.sprite_shift_lo[idx] = lo;
+                self.sprite_shift_hi[idx] = hi;
+                self.sprite_attr[idx] = attr;
+                self.sprite_x[idx] = x_pos;
+            }
+            _ => {}
+        }
     }
 
     // ── Pixel output ──────────────────────────────────────────────────────────
@@ -860,8 +916,14 @@ impl Ppu {
         idx
     }
 
-    fn ppu_read(&self, addr: u16, cart: Option<&Cartridge>) -> u8 {
-        match addr & 0x3FFF {
+    // Data access only — callers report bus addresses to the mapper via
+    // notify_ppu_bus separately, because the mapper-visible A12 timing (the
+    // dot at which an address appears on the bus) is calibrated against
+    // blargg's mmc3_test 4-scanline_timing and does not always coincide with
+    // the dot at which this emulator finds it convenient to fetch the data.
+    fn ppu_read(&self, addr: u16, cart: Option<&mut Cartridge>) -> u8 {
+        let addr = addr & 0x3FFF;
+        match addr {
             0x0000..=0x1FFF => cart.map_or(0, |c| c.chr_read(addr)),
             0x2000..=0x3EFF => self.vram[self.mirror_vram_addr(addr)],
             _ => self.palette[Self::palette_idx(addr)],
@@ -869,7 +931,8 @@ impl Ppu {
     }
 
     fn ppu_write(&mut self, addr: u16, data: u8, cart: Option<&mut Cartridge>) {
-        match addr & 0x3FFF {
+        let addr = addr & 0x3FFF;
+        match addr {
             0x0000..=0x1FFF => {
                 if let Some(c) = cart {
                     c.chr_write(addr, data);
@@ -913,7 +976,7 @@ impl Ppu {
     /// registers return the decay register unrefreshed; $2002/$2004/$2007
     /// return PPU-driven bits (which refresh their decay-register bits)
     /// combined with decay-register bits for the rest.
-    pub fn read_register(&mut self, reg: u8, cart: Option<&Cartridge>) -> u8 {
+    pub fn read_register(&mut self, reg: u8, mut cart: Option<&mut Cartridge>) -> u8 {
         match reg {
             // $2002 PPUSTATUS — reading clears VBlank flag and write toggle.
             // Bits 7-5 are PPU-driven (and refresh those decay bits); bits
@@ -956,18 +1019,28 @@ impl Ppu {
             7 => {
                 let addr = self.v;
                 self.v = self.v.wrapping_add(self.vram_increment());
-                if addr & 0x3FFF >= 0x3F00 {
+                // The access itself puts v on the PPU bus (an A12 rise the
+                // MMC3 observes), then the bus follows the incremented v.
+                self.notify_ppu_bus(cart.as_deref_mut(), addr & 0x3FFF);
+                let value = if addr & 0x3FFF >= 0x3F00 {
                     // Palette: return immediately; refresh buffer from nametable behind palette
-                    self.read_buf = self.ppu_read(addr & 0x2FFF, cart);
-                    let value = (self.open_bus() & 0xC0) | (self.ppu_read(addr, cart) & 0x3F);
+                    self.read_buf = self.ppu_read(addr & 0x2FFF, cart.as_deref_mut());
+                    let value = (self.open_bus() & 0xC0)
+                        | (self.ppu_read(addr, cart.as_deref_mut()) & 0x3F);
                     self.refresh_open_bus(value, 0x3F);
                     value
                 } else {
                     let buffered = self.read_buf;
-                    self.read_buf = self.ppu_read(addr, cart);
+                    self.read_buf = self.ppu_read(addr, cart.as_deref_mut());
                     self.refresh_open_bus(buffered, 0xFF);
                     buffered
-                }
+                };
+                // After the access the PPU's address bus follows the
+                // incremented v — an A12 rise the MMC3 counter observes
+                // (blargg 3-A12_clocking #5: a $2007 read at $0FFF clocks
+                // the counter via the increment to $1000).
+                self.notify_ppu_bus(cart, self.v & 0x3FFF);
+                value
             }
             // Write-only registers ($2000/$2001/$2003/$2005/$2006): reading
             // returns the decay register and refreshes nothing.
@@ -978,7 +1051,7 @@ impl Ppu {
     /// Write a PPU register. `reg` is the 3-bit register select (addr & 7).
     /// Every write drives all 8 bits of the CPU-PPU bus, refreshing the
     /// whole open-bus decay register with the written value.
-    pub fn write_register(&mut self, reg: u8, data: u8, cart: Option<&mut Cartridge>) {
+    pub fn write_register(&mut self, reg: u8, data: u8, mut cart: Option<&mut Cartridge>) {
         self.refresh_open_bus(data, 0xFF);
         match reg {
             // $2000 PPUCTRL
@@ -1020,14 +1093,21 @@ impl Ppu {
                 } else {
                     self.t = (self.t & 0xFF00) | data as u16;
                     self.v = self.t;
+                    // The PPU address bus follows v — the MMC3 IRQ counter
+                    // clocks on A12 rises produced by $2006 writes (blargg
+                    // 3-A12_clocking #4).
+                    self.notify_ppu_bus(cart, self.v & 0x3FFF);
                 }
                 self.w = !self.w;
             }
             // $2007 PPUDATA
             7 => {
                 let addr = self.v;
-                self.ppu_write(addr, data, cart);
+                self.notify_ppu_bus(cart.as_deref_mut(), addr & 0x3FFF);
+                self.ppu_write(addr, data, cart.as_deref_mut());
                 self.v = self.v.wrapping_add(self.vram_increment());
+                // Post-increment bus value, as for $2007 reads.
+                self.notify_ppu_bus(cart, self.v & 0x3FFF);
             }
             _ => {}
         }
