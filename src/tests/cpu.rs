@@ -1365,3 +1365,59 @@ fn kil_never_falls_through_to_a_following_non_kil_opcode() {
         "LDA #$42 must never have executed — the CPU should still be jammed on the KIL opcode"
     );
 }
+
+// ---------------------------------------------------------------------------
+// DMA stall cycle reporting (CpuBus::take_dma_stall_cycles)
+// ---------------------------------------------------------------------------
+
+struct StallBus {
+    mem: [u8; 65536],
+    stall_on_next_read: u32,
+}
+
+impl StallBus {
+    fn new() -> Self {
+        Self {
+            mem: [0u8; 65536],
+            stall_on_next_read: 0,
+        }
+    }
+}
+
+impl crate::cpu::Bus for StallBus {
+    fn read(&mut self, addr: u16) -> u8 {
+        self.mem[addr as usize]
+    }
+    fn write(&mut self, addr: u16, data: u8) {
+        self.mem[addr as usize] = data;
+    }
+    fn take_dma_stall_cycles(&mut self) -> u32 {
+        let n = self.stall_on_next_read;
+        self.stall_on_next_read = 0;
+        n
+    }
+}
+
+#[test]
+fn dma_stall_cycles_are_folded_into_cpu_cycles() {
+    let mut cpu = Cpu::new();
+    cpu.pc = 0x0200;
+    let mut bus = StallBus::new();
+    bus.mem[0x0200] = 0xA9; // LDA #$42 — normally 2 cycles
+    bus.mem[0x0201] = 0x42;
+    bus.stall_on_next_read = 4; // simulate a 4-cycle DMC DMA stall mid-instruction
+    let cycles = cpu.step(&mut bus);
+    assert_eq!(cpu.a, 0x42);
+    assert_eq!(cycles, 6); // 2 base + 4 stolen by the stall
+}
+
+#[test]
+fn no_stall_leaves_cycle_count_unchanged() {
+    let mut cpu = Cpu::new();
+    cpu.pc = 0x0200;
+    let mut bus = StallBus::new();
+    bus.mem[0x0200] = 0xA9;
+    bus.mem[0x0201] = 0x42;
+    let cycles = cpu.step(&mut bus);
+    assert_eq!(cycles, 2);
+}
