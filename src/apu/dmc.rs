@@ -48,8 +48,9 @@ impl DmcChannel {
             shift_register: 0,
             bits_remaining: 0,
             silence: true,
-            // Period halved because we clock at APU rate (every 2 CPU cycles)
-            timer: NTSC_RATE[0] >> 1,
+            // Period halved because we clock at APU rate (every 2 CPU
+            // cycles), minus 1 because the countdown fires on the 0 tick.
+            timer: (NTSC_RATE[0] >> 1) - 1,
         }
     }
 
@@ -130,7 +131,12 @@ impl DmcChannel {
             self.timer -= 1;
             return false;
         }
-        self.timer = NTSC_RATE[self.rate_index as usize] >> 1;
+        // Reload with period-1: a countdown that fires on the tick where it
+        // reads 0 spans reload+1 ticks, so NTSC_RATE/2 here would stretch the
+        // output-bit period to NTSC_RATE+2 CPU cycles (AccuracyCoin's DMASync
+        // hard-codes the true 432-cycle fetch spacing at rate $F and can
+        // never lock on otherwise).
+        self.timer = (NTSC_RATE[self.rate_index as usize] >> 1) - 1;
         self.clock_output_unit();
         // Return true when a DMA fetch is needed so the caller can stall the CPU.
         self.needs_dma()
