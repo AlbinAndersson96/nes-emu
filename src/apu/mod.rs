@@ -71,6 +71,8 @@ pub struct Apu {
     /// channel's timer clocks on this cycle). Only meaningful between a
     /// reseed and the next debt drain.
     dmc_realtime_parity: bool,
+    /// Total dmc_tick_realtime calls — exact wall-cycle stamp for tracing.
+    dmc_ticks: u64,
 }
 
 impl Apu {
@@ -90,6 +92,7 @@ impl Apu {
             dmc_debt: 0,
             dmc_realtime_needs_reseed: true,
             dmc_realtime_parity: false,
+            dmc_ticks: 0,
         }
     }
 
@@ -193,6 +196,11 @@ impl Apu {
         self.cycle_count
     }
 
+    /// Total realtime DMC ticks, for debug tracing only.
+    pub fn debug_dmc_ticks(&self) -> u64 {
+        self.dmc_ticks
+    }
+
     /// Real-time, DMC-only clock: advances just the DMC channel's internal
     /// APU-rate timer by one CPU cycle, called directly from `Bus::read`/
     /// `write` so a fetch can be detected and serviced mid-instruction
@@ -207,6 +215,7 @@ impl Apu {
     /// page 13/14 DMA tests if they don't pass (see docs/superpowers/plans/
     /// 2026-07-13-dmc-dma-cycle-accurate.md).
     pub fn dmc_tick_realtime(&mut self) -> bool {
+        self.dmc_ticks += 1;
         if self.dmc_realtime_needs_reseed {
             // cycle_count parity, matching tick_one's channel-clock anchor
             // (see the comment there for why frame_cycles must not be used).

@@ -392,9 +392,10 @@ impl Bus {
         let halt_cycles = if aligned { 2 } else { 3 };
         if std::env::var_os("TRACE_DMC_DMA").is_some() {
             eprintln!(
-                "[dmc-dma] halt addr={addr:04X} stall={} aligned={aligned} apucyc={}",
+                "[dmc-dma] halt addr={addr:04X} stall={} aligned={aligned} apucyc={} tick={}",
                 halt_cycles + 1,
-                self.apu.debug_cycle_count()
+                self.apu.debug_cycle_count(),
+                self.apu.debug_dmc_ticks()
             );
         }
         for _ in 0..halt_cycles {
