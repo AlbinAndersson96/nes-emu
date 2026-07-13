@@ -139,7 +139,13 @@ impl Apu {
 
         // Channel timers.
         // Pulse and noise timers count at APU rate (every 2 CPU cycles).
-        if c & 1 == 0 {
+        // Anchored to cycle_count, NOT frame_cycles: the divide-by-2 that
+        // clocks channel timers on hardware is a free-running clock, but
+        // frame_cycles resets to 0 on $4017 writes at arbitrary parity —
+        // anchoring to it flips the get/put phase of the DMC timer (and the
+        // DMC-DMA stall-length decision) on ~half of all $4017 writes, which
+        // AccuracyCoin's DMA tests catch as per-test-random stall lengths.
+        if self.cycle_count & 1 == 0 {
             self.pulse1.clock_timer();
             self.pulse2.clock_timer();
             self.noise.clock_timer();
@@ -196,7 +202,9 @@ impl Apu {
     /// 2026-07-13-dmc-dma-cycle-accurate.md).
     pub fn dmc_tick_realtime(&mut self) -> bool {
         if self.dmc_realtime_needs_reseed {
-            self.dmc_realtime_parity = self.frame_cycles & 1 == 1;
+            // cycle_count parity, matching tick_one's channel-clock anchor
+            // (see the comment there for why frame_cycles must not be used).
+            self.dmc_realtime_parity = self.cycle_count & 1 == 1;
             self.dmc_realtime_needs_reseed = false;
         } else {
             self.dmc_realtime_parity = !self.dmc_realtime_parity;
@@ -215,7 +223,7 @@ impl Apu {
     /// cycle itself — `cycle_parity()` is post-hoc and stale mid-instruction.
     pub fn dmc_realtime_current_parity(&self) -> bool {
         if self.dmc_realtime_needs_reseed {
-            self.frame_cycles & 1 == 1
+            self.cycle_count & 1 == 1
         } else {
             !self.dmc_realtime_parity
         }
