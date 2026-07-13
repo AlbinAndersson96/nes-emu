@@ -19,6 +19,11 @@ use crate::ppu::Ppu;
 ///   $4020–$FFFF  Cartridge (mapper, PRG-ROM, WRAM)
 /// CPU cycles the APU is pre-advanced when $4015 is read (see Bus::read).
 const APU_READ_PREADVANCE: u32 = 4;
+/// Which `apu.cycle_parity()` value corresponds to a 3-cycle (vs. 4-cycle)
+/// DMC DMA stall — the DMC-DMA analog of the OAM-DMA 513/514 decision.
+/// Best-effort initial value; sweep against AccuracyCoin's page 13 DMA tests
+/// if they don't pass (see docs/superpowers/plans/2026-07-13-dmc-dma-cycle-accurate.md).
+const DMC_DMA_ALIGNED_PARITY: bool = true;
 
 pub struct Bus {
     ram: [u8; 2048],
@@ -34,8 +39,12 @@ pub struct Bus {
     oam_dma_len: u16,
     oam_dma_page: u8,
     oam_dma_byte_idx: u16,
-    /// DMC DMA: counts down 4 cycles while the CPU is stalled for a sample fetch.
-    dmc_dma_cycles_left: u8,
+    /// Extra CPU cycles consumed by an in-line DMC DMA stall since the last
+    /// `take_dma_stall_cycles()` call.
+    dma_stall_extra_cycles: u32,
+    /// Guards against the DMC-DMA halt/fetch sequence's own nested `read`
+    /// calls re-triggering DMA arming.
+    dmc_dma_in_progress: bool,
     /// CPU cycles by which the PPU was pre-advanced during a $2002 read (to
     /// simulate T4-read timing). Consumed by the run loop to avoid double-advancing.
     ppu_preadvance_cycles: u32,
@@ -71,7 +80,8 @@ impl Bus {
             oam_dma_len: 0,
             oam_dma_page: 0,
             oam_dma_byte_idx: 0,
-            dmc_dma_cycles_left: 0,
+            dma_stall_extra_cycles: 0,
+            dmc_dma_in_progress: false,
             ppu_preadvance_cycles: 0,
             ppu_preadvance_nmi: false,
             apu_preadvance_cycles: 0,
@@ -100,13 +110,15 @@ impl Bus {
         }
     }
 
-    /// Returns true when OAM or DMC DMA is in progress (CPU must be stalled).
+    /// Returns true when OAM DMA is in progress (CPU must be stalled).
+    /// DMC DMA no longer needs a separate stepping loop here — it happens
+    /// synchronously inside `CpuBus::read`, and its cycle count is reported
+    /// back via `take_dma_stall_cycles`.
     pub fn dma_active(&self) -> bool {
-        self.oam_dma_active || self.dmc_dma_cycles_left > 0
+        self.oam_dma_active
     }
 
-    /// Advance one DMA cycle. OAM DMA copies one byte every two cycles;
-    /// DMC DMA simply counts down and fetches the byte on the last cycle.
+    /// Advance one DMA cycle. OAM DMA copies one byte every two cycles.
     pub fn tick_dma(&mut self) {
         if self.oam_dma_active {
             // Wait cycles first (1, or 2 for an odd-cycle start), then one byte
@@ -122,13 +134,6 @@ impl Bus {
             self.oam_dma_cycles_left -= 1;
             if self.oam_dma_cycles_left == 0 {
                 self.oam_dma_active = false;
-            }
-        } else if self.dmc_dma_cycles_left > 0 {
-            self.dmc_dma_cycles_left -= 1;
-            if self.dmc_dma_cycles_left == 0 && self.apu.dmc_needs_dma() {
-                let addr = self.apu.dmc_dma_address();
-                let data = self.read(addr);
-                self.apu.dmc_supply_byte(data);
             }
         }
     }
@@ -164,16 +169,15 @@ impl Bus {
     /// raised — the OR of the APU's IRQ line and the cartridge mapper's
     /// (e.g. the MMC3 scanline counter, clocked by the PPU ticking that runs
     /// before this within the same cycle). Both lines are level-triggered.
-    /// If the DMC reader needs a byte, arms a 4-cycle DMA stall; tick_dma() will
-    /// fetch and supply the byte on the final cycle of the stall.
+    /// DMC DMA is no longer armed here: it's detected and serviced
+    /// synchronously, mid-instruction, by `CpuBus::read`/`write` (see
+    /// `maybe_dmc_dma`), which reports its stall cycles via
+    /// `take_dma_stall_cycles` instead.
     pub fn tick_apu(&mut self, cpu_cycles: u64) -> bool {
         // Repay any $4015-read pre-advance first so total APU time is conserved.
         let repay = (self.apu_preadvance_cycles as u64).min(cpu_cycles);
         self.apu_preadvance_cycles -= repay as u32;
         let irq = self.apu.tick((cpu_cycles - repay) as u32);
-        if self.apu.dmc_needs_dma() && self.dmc_dma_cycles_left == 0 {
-            self.dmc_dma_cycles_left = 4;
-        }
         irq || self.cartridge.as_ref().is_some_and(|c| c.irq_pending())
     }
 
@@ -295,16 +299,91 @@ impl Bus {
                 .unwrap_or(self.cpu_open_bus),
         }
     }
+
+    /// Like `read_decoded`, but for `$2002`/`$4015` skips the one-time
+    /// instruction-start-relative pre-advance dance (the `tick_dots(8)`/
+    /// `apu.tick(APU_READ_PREADVANCE)` jumps). Used for the nested dummy
+    /// reads a DMC-DMA halt/alignment cycle performs at the CPU's own
+    /// in-flight address: those reads are already at their correct real-time
+    /// position (this whole call sequence IS the real-time stepping), so
+    /// applying the lump pre-advance again would double-count PPU dots/APU
+    /// cycles. Side effects (VBlank clear, $2007 latch reset, frame-IRQ-flag
+    /// clear) still apply normally.
+    fn read_decoded_live(&mut self, addr: u16) -> u8 {
+        match addr {
+            0x2000..=0x3FFF => {
+                let reg = (addr & 0x0007) as u8;
+                self.ppu.read_register(reg, self.cartridge.as_mut())
+            }
+            0x4015 => (self.apu.read(addr) & 0xDF) | (self.cpu_open_bus & 0x20),
+            _ => self.read_decoded(addr),
+        }
+    }
+
+    /// Advance the DMC channel's real-time clock for one CPU cycle
+    /// (see `Apu::dmc_tick_realtime`).
+    fn dmc_realtime_advance(&mut self) {
+        self.apu.dmc_tick_realtime();
+    }
+
+    /// A read that also advances the DMC real-time clock — used for the
+    /// halt/alignment/fetch cycles the DMA sequence itself performs, and for
+    /// the DMC's own sample fetch.
+    fn read_live(&mut self, addr: u16) -> u8 {
+        self.dmc_realtime_advance();
+        let value = self.read_decoded_live(addr);
+        self.cpu_open_bus = value;
+        value
+    }
+
+    /// Called at the top of every CPU read. Advances the DMC real-time clock
+    /// for this cycle; if a fetch is now due (and neither an OAM DMA nor a
+    /// nested DMC-DMA sequence is already in progress), halts the CPU here —
+    /// real hardware can only sample RDY on a read cycle, never mid-write —
+    /// performing 2 or 3 dummy re-reads of `addr` (the CPU's own in-flight
+    /// target address, matching real hardware repeating the same read while
+    /// halted) followed by the real sample fetch at the DMC's own address.
+    /// Each of those cycles is a real, side-effecting bus access: a dummy
+    /// re-read of $2002/$4015/$4016/$2007 during the halt has the same read
+    /// side effects an ordinary read there would.
+    fn maybe_dmc_dma(&mut self, addr: u16) {
+        if self.dmc_dma_in_progress || self.oam_dma_active {
+            self.dmc_realtime_advance();
+            return;
+        }
+        self.dmc_realtime_advance();
+        if !self.apu.dmc_needs_dma() {
+            return;
+        }
+        self.dmc_dma_in_progress = true;
+        let aligned = self.apu.cycle_parity() == DMC_DMA_ALIGNED_PARITY;
+        let halt_cycles = if aligned { 2 } else { 3 };
+        for _ in 0..halt_cycles {
+            let _ = self.read_live(addr);
+            self.dma_stall_extra_cycles += 1;
+        }
+        let dmc_addr = self.apu.dmc_dma_address();
+        let data = self.read_live(dmc_addr);
+        self.apu.dmc_supply_byte(data);
+        self.dma_stall_extra_cycles += 1;
+        self.dmc_dma_in_progress = false;
+    }
 }
 
 impl CpuBus for Bus {
     fn read(&mut self, addr: u16) -> u8 {
+        self.maybe_dmc_dma(addr);
         let value = self.read_decoded(addr);
         self.cpu_open_bus = value;
         value
     }
 
     fn write(&mut self, addr: u16, data: u8) {
+        // Real hardware can only halt the CPU (sample RDY) on a read cycle,
+        // never mid-write — so a write only advances the DMC's real-time
+        // clock; if it makes needs_dma() true, the halt/fetch happens on the
+        // CPU's next read instead.
+        self.dmc_realtime_advance();
         self.cpu_open_bus = data;
         match addr {
             // Internal RAM + mirrors
@@ -378,5 +457,11 @@ impl CpuBus for Bus {
                 }
             }
         }
+    }
+
+    fn take_dma_stall_cycles(&mut self) -> u32 {
+        let n = self.dma_stall_extra_cycles;
+        self.dma_stall_extra_cycles = 0;
+        n
     }
 }

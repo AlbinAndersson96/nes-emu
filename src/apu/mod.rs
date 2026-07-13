@@ -56,6 +56,21 @@ pub struct Apu {
     /// frame_cycles). Its parity models the APU's divide-by-2 get/put clock,
     /// which decides whether an OAM DMA takes 513 or 514 cycles.
     cycle_count: u64,
+
+    /// APU-rate clocks already applied to the DMC channel by
+    /// `dmc_tick_realtime` (called mid-instruction from `Bus::read`/`write`),
+    /// which `tick_one`'s own DMC clocking must skip so the channel's timer
+    /// is never decremented twice for the same CPU cycle.
+    dmc_debt: u32,
+    /// True when the next `dmc_tick_realtime` call must reseed its phase
+    /// from `frame_cycles` (i.e. no debt is outstanding, so `frame_cycles`
+    /// is currently authoritative). Set whenever `tick_one` drains `dmc_debt`
+    /// back to 0.
+    dmc_realtime_needs_reseed: bool,
+    /// This-CPU-cycle's DMC APU-rate phase once seeded (true = the DMC
+    /// channel's timer clocks on this cycle). Only meaningful between a
+    /// reseed and the next debt drain.
+    dmc_realtime_parity: bool,
 }
 
 impl Apu {
@@ -72,6 +87,9 @@ impl Apu {
             frame_cycles: 0,
             frame_reset_delay: 0,
             cycle_count: 0,
+            dmc_debt: 0,
+            dmc_realtime_needs_reseed: true,
+            dmc_realtime_parity: false,
         }
     }
 
@@ -125,9 +143,18 @@ impl Apu {
             self.pulse1.clock_timer();
             self.pulse2.clock_timer();
             self.noise.clock_timer();
-            // DMC timer also at APU rate; ignore the DMA-needed return value here —
-            // the bus handles DMA stalls by calling dmc.needs_dma() after each tick.
-            self.dmc.clock_timer();
+            // DMC timer also clocks at APU rate, but may already have been
+            // advanced in real time by dmc_tick_realtime (called mid-
+            // instruction from Bus::read/write) — skip re-clocking it here
+            // for cycles already paid for, so it's never decremented twice.
+            if self.dmc_debt > 0 {
+                self.dmc_debt -= 1;
+                if self.dmc_debt == 0 {
+                    self.dmc_realtime_needs_reseed = true;
+                }
+            } else {
+                self.dmc.clock_timer();
+            }
         }
         // Triangle timer counts at full CPU rate.
         self.triangle.clock_timer();
@@ -152,6 +179,34 @@ impl Apu {
     /// 514-cycle OAM DMA stall.
     pub fn cycle_parity(&self) -> bool {
         self.cycle_count & 1 == 1
+    }
+
+    /// Real-time, DMC-only clock: advances just the DMC channel's internal
+    /// APU-rate timer by one CPU cycle, called directly from `Bus::read`/
+    /// `write` so a fetch can be detected and serviced mid-instruction
+    /// (unlike every other channel and the frame counter, which only ever
+    /// advance via the post-hoc `tick`/`tick_one` called after a whole
+    /// instruction completes). Does not touch `cycle_count` or
+    /// `frame_cycles`; `tick_one`'s own DMC clocking consults `dmc_debt` to
+    /// avoid double-clocking the cycles already applied here.
+    ///
+    /// The phase seed (which CPU cycle within an APU-rate pair this is) is a
+    /// best-effort initial calibration — sweep it against AccuracyCoin's
+    /// page 13/14 DMA tests if they don't pass (see docs/superpowers/plans/
+    /// 2026-07-13-dmc-dma-cycle-accurate.md).
+    pub fn dmc_tick_realtime(&mut self) -> bool {
+        if self.dmc_realtime_needs_reseed {
+            self.dmc_realtime_parity = self.frame_cycles & 1 == 1;
+            self.dmc_realtime_needs_reseed = false;
+        } else {
+            self.dmc_realtime_parity = !self.dmc_realtime_parity;
+        }
+        if self.dmc_realtime_parity {
+            self.dmc_debt += 1;
+            self.dmc.clock_timer()
+        } else {
+            self.dmc.needs_dma()
+        }
     }
 
     fn take_irq(&mut self) -> bool {

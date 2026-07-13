@@ -434,6 +434,14 @@ impl Ppu {
         self.vblank && (self.ctrl & 0x80 != 0)
     }
 
+    /// Test-only helper: force the VBlank flag on directly, so a test can
+    /// observe a subsequent $2002 read's side effect (clearing it) without
+    /// having to run the PPU up to real VBlank onset.
+    #[cfg(test)]
+    pub fn force_vblank_for_test(&mut self) {
+        self.vblank = true;
+    }
+
     fn rendering_enabled(&self) -> bool {
         self.mask & 0x18 != 0
     }
