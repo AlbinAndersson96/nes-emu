@@ -1,3 +1,4 @@
+mod accuracycoin;
 mod bus;
 mod cartridge;
 mod cpu;
