@@ -24,6 +24,12 @@ const APU_READ_PREADVANCE: u32 = 4;
 /// Best-effort initial value; sweep against AccuracyCoin's page 13 DMA tests
 /// if they don't pass (see docs/superpowers/plans/2026-07-13-dmc-dma-cycle-accurate.md).
 const DMC_DMA_ALIGNED_PARITY: bool = true;
+/// CPU cycles between a $4015 write that starts a fresh DMC sample and the
+/// first cycle the resulting load DMA may halt the CPU. AccuracyCoin's
+/// "DMA + $2002 Read" pins the halt to the 4th cycle after the write cycle
+/// ("Load DMA after 2 APU cycles"): the 3 intervening cycles consume this
+/// countdown, so the halt-eligibility check first passes on cycle write+4.
+const DMC_LOAD_DMA_DELAY: u8 = 3;
 
 pub struct Bus {
     ram: [u8; 2048],
@@ -45,6 +51,9 @@ pub struct Bus {
     /// Guards against the DMC-DMA halt/fetch sequence's own nested `read`
     /// calls re-triggering DMA arming.
     dmc_dma_in_progress: bool,
+    /// Countdown (in CPU cycles) before an enable-started DMC load DMA may
+    /// halt the CPU; see DMC_LOAD_DMA_DELAY.
+    dmc_load_delay: u8,
     /// CPU cycles by which the PPU was pre-advanced during a $2002 read (to
     /// simulate T4-read timing). Consumed by the run loop to avoid double-advancing.
     ppu_preadvance_cycles: u32,
@@ -82,6 +91,7 @@ impl Bus {
             oam_dma_byte_idx: 0,
             dma_stall_extra_cycles: 0,
             dmc_dma_in_progress: false,
+            dmc_load_delay: 0,
             ppu_preadvance_cycles: 0,
             ppu_preadvance_nmi: false,
             apu_preadvance_cycles: 0,
@@ -361,6 +371,11 @@ impl Bus {
             self.dmc_realtime_advance();
             return;
         }
+        if self.dmc_load_delay > 0 {
+            self.dmc_load_delay -= 1;
+            self.dmc_realtime_advance();
+            return;
+        }
         // Only a request that asserted on an EARLIER cycle halts this read —
         // hardware samples RDY too late in a cycle to halt the very cycle the
         // sample buffer empties, so the halt lands on the following read
@@ -377,8 +392,9 @@ impl Bus {
         let halt_cycles = if aligned { 2 } else { 3 };
         if std::env::var_os("TRACE_DMC_DMA").is_some() {
             eprintln!(
-                "[dmc-dma] halt addr={addr:04X} stall={} aligned={aligned}",
-                halt_cycles + 1
+                "[dmc-dma] halt addr={addr:04X} stall={} aligned={aligned} apucyc={}",
+                halt_cycles + 1,
+                self.apu.debug_cycle_count()
             );
         }
         for _ in 0..halt_cycles {
@@ -407,7 +423,11 @@ impl CpuBus for Bus {
         // Real hardware can only halt the CPU (sample RDY) on a read cycle,
         // never mid-write — so a write only advances the DMC's real-time
         // clock; if it makes needs_dma() true, the halt/fetch happens on the
-        // CPU's next read instead.
+        // CPU's next read instead. Write cycles still consume the load-DMA
+        // delay countdown.
+        if self.dmc_load_delay > 0 {
+            self.dmc_load_delay -= 1;
+        }
         self.dmc_realtime_advance();
         self.cpu_open_bus = data;
         match addr {
@@ -462,7 +482,16 @@ impl CpuBus for Bus {
             0x4014 => self.oam_dma(data),
 
             // APU status
-            0x4015 => self.apu.write(addr, data),
+            0x4015 => {
+                // A write that starts a fresh sample (needs_dma goes
+                // false -> true) arms the load-DMA delay; a reload request
+                // already pending before the write is not delayed.
+                let was_needed = self.apu.dmc_needs_dma();
+                self.apu.write(addr, data);
+                if !was_needed && self.apu.dmc_needs_dma() {
+                    self.dmc_load_delay = DMC_LOAD_DMA_DELAY;
+                }
+            }
 
             0x4016 => {
                 // Controller strobe: reload shift registers while bit 0 is set

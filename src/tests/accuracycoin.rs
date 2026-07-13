@@ -242,6 +242,7 @@ fn accuracycoin_run_all() {
     let mut clock = SystemClock::new();
     let mut started = false;
     let mut last_tally = 0xFFu8;
+    let mut apureg_seen = false;
 
     loop {
         clock.step(&mut cpu, &mut bus);
@@ -262,6 +263,14 @@ fn accuracycoin_run_all() {
         if !started && running != 0 {
             started = true;
             print_raw(&format!("[accuracycoin] run-all started at cycle {cycles}"));
+        }
+        if started && bus.peek(0x045C) != 0 && !apureg_seen {
+            apureg_seen = true;
+            print_raw(&format!(
+                "[accuracycoin] APURegActivation result ${:02X}; pre-check counter $50={} (cycle {cycles})",
+                bus.peek(0x045C),
+                bus.peek(0x50)
+            ));
         }
         if started {
             let tally = bus.peek(POST_ALL_TEST_TALLY);

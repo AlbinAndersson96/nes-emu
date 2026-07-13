@@ -187,6 +187,12 @@ impl Apu {
         self.cycle_count & 1 == 1
     }
 
+    /// Raw free-running cycle counter, for debug tracing only (post-hoc:
+    /// mid-instruction it lags real time by up to the instruction length).
+    pub fn debug_cycle_count(&self) -> u64 {
+        self.cycle_count
+    }
+
     /// Real-time, DMC-only clock: advances just the DMC channel's internal
     /// APU-rate timer by one CPU cycle, called directly from `Bus::read`/
     /// `write` so a fetch can be detected and serviced mid-instruction
