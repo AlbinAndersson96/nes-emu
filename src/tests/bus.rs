@@ -32,38 +32,44 @@ fn controller_2_reads_from_4017_independently_of_controller_1() {
 }
 
 #[test]
-fn dmc_dma_halt_read_updates_open_bus_and_clears_vblank() {
+fn dmc_dma_halt_reads_hit_the_cpu_target_address_with_real_side_effects() {
     let mut bus = Bus::new();
-    // Force the PPU into a state where $2002 currently reads back with
-    // VBlank set, so the halt-cycle dummy read's side effect (clearing it)
-    // is directly observable.
-    bus.ppu.force_vblank_for_test();
-    assert_eq!(bus.read(0x2002) & 0x80, 0x80);
-    bus.ppu.force_vblank_for_test();
-
-    // Prime the DMC to need a fetch on its very next real-time clock: rate 0
-    // (fastest), enabled with a 1-byte sample.
     bus.write(0x4010, 0x00);
-    bus.write(0x4012, 0x00); // sample address $C000
-    bus.write(0x4013, 0x00); // length 1
-    bus.write(0x4015, 0x10); // enable DMC
+    bus.write(0x4012, 0x00);
+    bus.write(0x4013, 0x00);
+    bus.write(0x4015, 0x10); // enable DMC — arms needs_dma() once the timer fires
 
-    // Drive enough real reads (each ticking the DMC's real-time clock) for
-    // the timer to underflow and a DMA to trigger. Reading $2002 repeatedly
-    // both advances the clock and is the register under test for the halt
-    // cycles' side effects.
-    let mut saw_cleared_vblank_mid_stream = false;
+    // Prime controller 1 with a known 8-bit pattern; each $4016 read shifts
+    // the register by exactly one bit position.
+    bus.set_controller_state(0, 0b1011_0100);
+    bus.write(0x4016, 1);
+    bus.write(0x4016, 0);
+
+    // Drive real $4016 reads (each also ticking the DMC's real-time clock)
+    // until one of them happens to be the read the DMC's timer underflows
+    // on. If a DMC DMA halt/fetch sequence lands on THIS read, its 2-3 dummy
+    // re-reads target the CPU's own in-flight address — $4016 itself — so
+    // the shift register advances by MORE than the single position an
+    // ordinary read would produce. A single before/after comparison against
+    // the deterministic single-shift formula proves extra real reads of
+    // $4016 happened inside that one logical CPU read.
+    let mut found_extra_shift = false;
     for _ in 0..600 {
-        let v = bus.read(0x2002);
-        if v & 0x80 == 0 {
-            saw_cleared_vblank_mid_stream = true;
+        let before = bus.peek_controller_shift(0);
+        let _ = bus.read(0x4016);
+        let after = bus.peek_controller_shift(0);
+        let expected_single_shift = (before >> 1) | 0x80;
+        if after != expected_single_shift {
+            found_extra_shift = true;
             break;
         }
     }
     assert!(
-        saw_cleared_vblank_mid_stream,
-        "a DMC DMA halt-cycle dummy read of $2002 should clear VBlank just \
-         like any other $2002 read"
+        found_extra_shift,
+        "a DMC DMA halt/fetch sequence landing on a $4016 read should \
+         perform its own real, side-effecting re-reads of $4016 (the CPU's \
+         in-flight target address), shifting the register by more than the \
+         single position an ordinary read would"
     );
 }
 

@@ -110,6 +110,16 @@ impl Bus {
         }
     }
 
+    /// Test-only accessor: exposes a controller port's raw shift-register
+    /// state for tests that need to distinguish "exactly one $4016 read
+    /// happened" from "extra reads of the same address happened," since each
+    /// read shifts the register by exactly one bit (see the `0x4016` arm of
+    /// `read_decoded`).
+    #[cfg(test)]
+    pub(crate) fn peek_controller_shift(&self, port: usize) -> u8 {
+        self.controller_shift[port]
+    }
+
     /// Returns true when OAM DMA is in progress (CPU must be stalled).
     /// DMC DMA no longer needs a separate stepping loop here — it happens
     /// synchronously inside `CpuBus::read`, and its cycle count is reported
