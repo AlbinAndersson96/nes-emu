@@ -361,13 +361,26 @@ impl Bus {
             self.dmc_realtime_advance();
             return;
         }
-        self.dmc_realtime_advance();
+        // Only a request that asserted on an EARLIER cycle halts this read —
+        // hardware samples RDY too late in a cycle to halt the very cycle the
+        // sample buffer empties, so the halt lands on the following read
+        // (AccuracyCoin's DMASync_Loop annotation pins this: the halt repeats
+        // the LDA $4000 data-read cycle, one cycle after the assert).
+        // The advance for this cycle happens after the stall below (the
+        // resumed read), or immediately when there's no request.
         if !self.apu.dmc_needs_dma() {
+            self.dmc_realtime_advance();
             return;
         }
         self.dmc_dma_in_progress = true;
-        let aligned = self.apu.cycle_parity() == DMC_DMA_ALIGNED_PARITY;
+        let aligned = self.apu.dmc_realtime_current_parity() == DMC_DMA_ALIGNED_PARITY;
         let halt_cycles = if aligned { 2 } else { 3 };
+        if std::env::var_os("TRACE_DMC_DMA").is_some() {
+            eprintln!(
+                "[dmc-dma] halt addr={addr:04X} stall={} aligned={aligned}",
+                halt_cycles + 1
+            );
+        }
         for _ in 0..halt_cycles {
             let _ = self.read_live(addr);
             self.dma_stall_extra_cycles += 1;
@@ -377,6 +390,8 @@ impl Bus {
         self.apu.dmc_supply_byte(data);
         self.dma_stall_extra_cycles += 1;
         self.dmc_dma_in_progress = false;
+        // The resumed read's own cycle.
+        self.dmc_realtime_advance();
     }
 }
 

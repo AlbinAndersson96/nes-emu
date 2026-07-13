@@ -209,6 +209,18 @@ impl Apu {
         }
     }
 
+    /// The APU-rate phase the NEXT `dmc_tick_realtime` call will compute for
+    /// the current CPU cycle, without advancing anything. Used by the DMC-DMA
+    /// stall-length decision, which needs the live get/put phase of the halt
+    /// cycle itself — `cycle_parity()` is post-hoc and stale mid-instruction.
+    pub fn dmc_realtime_current_parity(&self) -> bool {
+        if self.dmc_realtime_needs_reseed {
+            self.frame_cycles & 1 == 1
+        } else {
+            !self.dmc_realtime_parity
+        }
+    }
+
     fn take_irq(&mut self) -> bool {
         // Level-triggered: the IRQ line is asserted as long as frame_irq_flag is
         // set (and not inhibited), or the DMC IRQ flag is set.  Nothing is
