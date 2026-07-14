@@ -1,12 +1,55 @@
 # AccuracyCoin results
 
-**Status (2026-07-14, branch `worktree-dmc-dma-cycle-accurate` @ `868b98a` + the
-JSR/RTS silent-cycle fix): 100 of the 141 tests pass**, same raw count as the prior
-session, but the composition shifted — see "Session 2" below before assuming "100" means
-"unchanged". `cargo test` remains fully green (318 passed / 0 failed; +6 over the prior
-session's 312 from the new cycle-accuracy unit tests in `src/tests/cpu.rs`).
-(Page 15, "Power On State", is all `DRAW` tests with no pass/fail verdict and is excluded
-from the 141.)
+**Status (2026-07-14, branch `worktree-dmc-dma-cycle-accurate`): 105 of the 141 tests
+pass**, up from 100 (Session 2) / 91 (develop baseline). `cargo test` remains fully green
+(321 passed / 0 failed). (Page 15, "Power On State", is all `DRAW` tests with no pass/fail
+verdict and is excluded from the 141.)
+
+## Session 3 (2026-07-14): OAMADDR reset during sprite fetch — the Sprite Zero Hit cluster
+
+Investigated the ~11-test Sprite Zero Hit cluster (Sprite0Hit_Behavior, ArbitrarySpriteZero,
+SprOverflow_Behavior, MisalignedOAM_Behavior, Address2004_Behavior, SuddenlyResizeSprite,
+OAM_Corruption, AttributesAsTiles, RenderingFlagBehavior, ALE + Read, Hybrid Addresses),
+which all shared error code 1 and several literally prerequisite-check "Sprite Zero Hits
+should be working". Root cause (found via systematic debugging: instrumented harness runs
+dumping PPU mask/OAMADDR/OAM state at the exact cycle window `Sprite0Hit_Behavior` ran —
+see the git history of this file for the removed temporary instrumentation): our PPU never
+implemented the documented nesdev hardware quirk that **OAMADDR ($2003) is forced to 0
+during ticks 257-320 of every visible and pre-render scanline while rendering is enabled**.
+`Sprite0Hit_Behavior`'s own setup left OAMADDR at 5 from an earlier register write; without
+the reset, its `$4014` OAM DMA (256 bytes, always full-wrapping) still ran correctly, but
+started at OAM byte 5 instead of 0 — so "sprite 0" (OAM bytes 0-3, which is what hit
+detection and rendering always look at, regardless of where the DMA started) ended up
+holding the *wrapped tail* of the source page (still `$FF` filler) instead of the intended
+sprite's Y/CHR/Attr/X bytes.
+
+**Fix** (TDD: `oam_addr_resets_to_zero_during_sprite_fetch_when_rendering`,
+`oam_addr_untouched_by_sprite_fetch_window_when_rendering_disabled`, and
+`oam_dma_after_sprite_fetch_reset_lands_sprite_zero_at_oam_zero` in `src/tests/ppu.rs`,
+watched RED before the fix): `Ppu::fetch_sprites`'s existing `dot == 257` branch now also
+sets `self.oam_addr = 0`, gated the same way as the rest of sprite fetch/evaluation (only
+while `render && is_render_scanline`). `Ppu::oam_addr()`/`Ppu::oam_byte()` were added as
+permanent `pub(crate)` test accessors (mirroring the existing `nt0_tile()`).
+
+**Result: 5 tests newly pass cleanly** (Sprite0Hit_Behavior, SprOverflow_Behavior,
+AttributesAsTiles, RenderingFlagBehavior, SuddenlyResizeSprite), and 7 more progressed past
+their "Sprite Zero Hits should be working" prerequisite into their own next, more specific
+sub-check (ArbitrarySpriteZero code 1→2, Address2004_Behavior 1→4, InstructionTiming 6→2,
+OAM_Corruption 1→2, Rendering2007Read 1→2, ALERead 1→2, HybridAddresses 1→2) — real
+progress, though those 7 still need their own follow-up work. Full `cargo test` stayed
+green throughout (318→321, +3 new PPU tests), with **zero regressions** across the whole
+blargg suite despite touching sprite-fetch/evaluation code exercised by
+`sprite_overflow_tests`, `sprite_hit_tests_2005.10.05`, `oam_read`, and `oam_stress`.
+
+One curiosity, not chased further (out of scope — entangled with the already-documented,
+unresolved `Implied Dummy Reads` hang from Session 2): with this fix, a full AccuracyCoin
+run now finishes in ~6s instead of the ~70s `MAX_CYCLES` timeout, and ZP `$12`
+(`DMASync_PreTest`) reads back `$00` instead of `$01` — both fully deterministic across
+repeated runs. This means the OAMADDR fix shifted the exact cycle timing enough to change
+*how* the `Implied Dummy Reads` runaway-recursion chaos resolves (apparently now unwinding
+back into the ROM's own control flow earlier/differently), not that it fixed or worsened
+that bug. `Implied Dummy Reads`, `Branch Dummy Reads`, `JSR Edge Cases`, and
+`Internal Data Bus` remain `NOT-RUN` exactly as in Session 2.
 
 ## Session 2 (2026-07-14): JSR/RTS/RTI/PLA/PLP silent-cycle fix
 
@@ -208,23 +251,23 @@ instruction stream, one cycle of drift from the different JSR/RTS history. Fixin
 resolved exactly one test cleanly (DMA + $4015 Read) and surfaced a deeper, still-unresolved
 DMA-during-JSR timing issue (the `Implied Dummy Reads` hang) — see "Session 2" above.
 
-## Remaining failures (37 failing + 4 hung = 41 non-passing), by cluster
+## Remaining failures (32 failing + 4 hung = 36 non-passing), by cluster
 
 Codes are the ROM's on-screen error codes; meanings from `README.md`. Table regenerated
-2026-07-14 at the post-Session-2 state (`aligned=true`, `delay=3`).
+2026-07-14 at the post-Session-3 state.
 
 ### DMC DMA cluster
 | Test | Code | Meaning |
 |---|---|---|
 | APU Register Activation | 4 | Controllers were clocked by the bus conflict with OAM DMA when they shouldn't have been (or vice versa — see README's success-code table for this test). |
-| Instruction Timing | 6 | Cycle counts / DMA data-bus interaction; progressed past the prior session's code-2 failure. |
+| Instruction Timing | 2 | The DMA timing is not accurate enough to test this — progressed past Session 2's code-6 failure once the sprite-fetch OAMADDR fix landed. |
 | Delta Modulation Channel | L | Writing $4015 when the DMC timer has 2 cycles until clocked shouldn't trigger the DMA until after the write's 3-4 cycle delay — the load-delay vs timer-edge interaction, finer than the fixed 3-cycle `DMC_LOAD_DMA_DELAY`. |
 | Controller Strobing | 4 | Controllers should not be strobed on put→get transitions (needs cycle-accurate $4016 write phase). |
 | Controller Clocking | 2 | Reading a strobed controller port shouldn't affect shift register contents. |
 | Frame Counter IRQ | 7 | IRQ flag shouldn't clear yet on a get→put transition (frame-counter/$4015-read edge, adjacent to but not the same as the DMA work). |
-| DMA + $2007 Write | 1 | New regression this session — see "Newly broken" above; likely the same inline-rerun sensitivity as APU Register Activation. |
+| DMA + $2007 Write | 1 | Session 2 regression — see its "Newly broken" note; likely the same inline-rerun sensitivity as APU Register Activation. |
 
-### Hung (never reach a verdict) — the `Implied Dummy Reads` chain, see investigation above
+### Hung (never reach a verdict) — the `Implied Dummy Reads` chain, unresolved, see Session 2
 | Test |
 |---|
 | Implied Dummy Reads |
@@ -240,23 +283,26 @@ Codes are the ROM's on-screen error codes; meanings from `README.md`. Table rege
 | Explicit DMA Abort | 2 | Mid-stall DMA cancellation not modeled. |
 | Implicit DMA Abort | 2 | Mid-stall DMA cancellation not modeled. |
 
-### Sprite Zero Hit cluster (pre-existing; likely one bug cascading into ~11 failures)
-All code 1, and several messages literally read "Sprite Zero Hits should be working":
-Sprite 0 Hit behavior, Arbitrary Sprite zero, Sprite overflow behavior, Misaligned OAM
-behavior, Address $2004 behavior, Suddenly Resize Sprite, $2007 read w/ rendering,
-ALE + Read, Hybrid Addresses, $2002 flag timing (code 1), OAM Corruption (code 1 —
-"failed to sync CPU to VBlank at boot"; also the test where manual vs automated runs
-disagreed on `develop`).
+### Sprite Zero Hit cluster — mostly FIXED in Session 3 (see above); 6 items remain
+The shared "Sprite Zero Hits should be working" root cause (missing OAMADDR reset during
+sprite fetch) is fixed. Five tests now pass outright. The rest progressed to their own
+next-level checks — no longer a single shared root cause, back to independent bugs:
+| Test | Code | Meaning |
+|---|---|---|
+| Arbitrary Sprite Zero | 2 | The first processed sprite of a scanline should be treated as "sprite zero" — a sprite-evaluation-order bug, not the OAMADDR one. |
+| Misaligned OAM Behavior | 1 | Misaligned OAM should be able to trigger a sprite zero hit (this test's own code-1 prerequisite, unrelated to the fixed one). |
+| Address $2004 Behavior | 4 | Reads from $2004 during PPU cycles 1-64 of a visible scanline (rendering enabled) should always read $FF. |
+| OAM Corruption | 2 | OAM Corruption should "corrupt" a row in OAM by copying the 8 values from row 0 to another row — a real hardware quirk (stray OAM writes during evaluation) not yet modeled. |
+| $2007 read w/ rendering | 2 | A well-timed read from $2007 should be able to affect the PPU address bus during the background read cadence, reading a bit plane from an unintended address. |
+| ALE + Read / Hybrid Addresses | 2 | Same class as the $2007-read item above, for $2007/$2006 respectively. |
 
-### Independent smaller items (pre-existing, unrelated to the DMC-DMA/JSR work)
+### Independent smaller items (pre-existing, unrelated to the DMC-DMA/JSR/OAMADDR work)
 | Test | Code | Meaning |
 |---|---|---|
 | Open Bus (page 1) | 7 | PC in open bus should execute from floating data bus values; write cycles should update the bus. |
 | SHA $93/$9F, SHS $9B, SHY $9C, SHX $9E | 1 | Target address of the instruction was not correct (see also `blargg_nes_cpu_test5` SHY/SHX note in CLAUDE.md). |
 | All NOP instructions | 2 | Opcode $0C (NOP Absolute) malfunctioned. |
 | Palette RAM Quirks | 6 | Greyscale mode should zero the low 4 bits of reads. |
-| Rendering Flag Behavior | 2 | BG shift registers should clock when only sprites render. |
-| Attributes As Tiles | 1 | Attribute bytes as tile data (scanlines 0-15). |
 | Stale BG / Sprite Shift Registers | 3 / 3 | Shift registers shouldn't clock during H/F-Blank. |
 | BG Serial In | 2 | Shift registers should bring in 1s at bit 0. |
 | $2004 Stress / $2007 Stress | 2 / 2 | OAMADDR-overflow reads / read-buffer fill timing. |
