@@ -228,6 +228,7 @@ impl Cpu {
                 self.cycles += 1; // T2 dummy
                 let p = (self.p & !FLAG_B) | FLAG_U;
                 self.queue_interrupt_sequence(0xFFFA, p);
+                self.cycles += bus.take_dma_stall_cycles() as u64;
                 return;
             }
 
@@ -283,12 +284,14 @@ impl Cpu {
                 self.cycles += 1;
                 let p = (self.p & !FLAG_B) | FLAG_U;
                 self.queue_interrupt_sequence(0xFFFE, p);
+                self.cycles += bus.take_dma_stall_cycles() as u64;
                 return;
             }
 
             self.queue_head = 0;
             self.queue_len = 0;
             self.enqueue(MicroOp::RunInstruction(opcode));
+            self.cycles += bus.take_dma_stall_cycles() as u64;
             return;
         }
 
@@ -302,6 +305,7 @@ impl Cpu {
                 let cycles = instructions::execute(self, bus, opcode);
                 // T1 (opcode fetch) was already counted in the queue-empty path.
                 self.cycles += (cycles - 1) as u64;
+                self.cycles += bus.take_dma_stall_cycles() as u64;
 
                 // A taken non-page-crossing branch (3 cycles, no BranchPageFix queued)
                 // ignores IRQ at its last clock (T3). If an IRQ arrives during this
@@ -628,6 +632,13 @@ pub trait Bus {
     /// (e.g. reading $2002 clears the VBlank flag on real hardware).
     fn read(&mut self, addr: u16) -> u8;
     fn write(&mut self, addr: u16, data: u8);
+
+    /// Extra CPU cycles consumed by an in-line DMA stall (currently: DMC DMA)
+    /// since the last call, to be folded into `Cpu::cycles`. Buses that never
+    /// stall the CPU in-line (e.g. `TestBus`) use the default of 0.
+    fn take_dma_stall_cycles(&mut self) -> u32 {
+        0
+    }
 }
 
 fn page_crossed(a: u16, b: u16) -> bool {

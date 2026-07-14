@@ -598,6 +598,9 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, opcode: u8) -> u8 {
             3
         } // PHP
         0x68 => {
+            // T3: internal operation (increment S) — dummy read before the
+            // real pop (see rts()/rti() for the same hardware pattern).
+            let _ = bus.read(0x0100 | cpu.sp as u16);
             let v = cpu.pop(bus);
             cpu.a = v;
             cpu.set_nz(v);
@@ -606,6 +609,7 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, opcode: u8) -> u8 {
         0x28 => {
             // PLP
             let old_i = cpu.flag(FLAG_I);
+            let _ = bus.read(0x0100 | cpu.sp as u16);
             let v = cpu.pop(bus);
             cpu.p = (v & !FLAG_B) | FLAG_U;
             if old_i && !cpu.flag(FLAG_I) {
@@ -1459,16 +1463,33 @@ fn branch(cpu: &mut Cpu, bus: &mut dyn Bus, taken: bool) -> u8 {
 }
 
 fn jsr(cpu: &mut Cpu, bus: &mut dyn Bus) {
-    let target = cpu.fetch_u16(bus);
-    cpu.push_u16(bus, cpu.pc.wrapping_sub(1));
-    cpu.pc = target;
+    // T2: fetch ADL. T3: internal operation (predecrement S) — on real
+    // hardware this still drives the address bus with a dummy read of the
+    // current stack location before the two pushes. T4-T5: push return
+    // address (address of the ADH byte). T6: fetch ADH.
+    let lo = cpu.fetch(bus) as u16;
+    let _ = bus.read(0x0100 | cpu.sp as u16);
+    cpu.push_u16(bus, cpu.pc);
+    let hi = cpu.fetch(bus) as u16;
+    cpu.pc = (hi << 8) | lo;
 }
 
 fn rts(cpu: &mut Cpu, bus: &mut dyn Bus) {
-    cpu.pc = cpu.pop_u16(bus).wrapping_add(1);
+    // T3: internal operation (increment S) — dummy read of the stack
+    // location before it's incremented (pop_u16 performs the real
+    // increment+read for T4/T5). T6: dummy read at the popped PC before the
+    // final increment — a real bus cycle, distinct from the next
+    // instruction's own opcode fetch at PC+1.
+    let _ = bus.read(0x0100 | cpu.sp as u16);
+    let target = cpu.pop_u16(bus);
+    let _ = bus.read(target);
+    cpu.pc = target.wrapping_add(1);
 }
 
 fn rti(cpu: &mut Cpu, bus: &mut dyn Bus) {
+    // T3: internal operation (increment S) — dummy read before the first
+    // real pop (see rts() above for the same pattern).
+    let _ = bus.read(0x0100 | cpu.sp as u16);
     let p = cpu.pop(bus);
     cpu.p = (p & !FLAG_B) | FLAG_U;
     cpu.pc = cpu.pop_u16(bus);

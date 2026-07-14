@@ -148,8 +148,9 @@ pub struct Ppu {
     // every 2 dots, so the overflow flag sets at the hardware-exact dot
     // (blargg sprite_overflow_tests/3.Timing) and the buggy diagonal
     // overflow scan (4.Obscure) falls out of eval_n/eval_m.
-    eval_n: usize,           // primary OAM sprite index (0-63)
+    eval_n: usize,           // objects decided so far (0-64); addressing index once in the overflow scan
     eval_m: usize,           // byte-within-sprite offset used by the overflow scan
+    eval_addr: u8,           // hardware OAMADDR-during-evaluation byte pointer, seeded from oam_addr at dot 65
     eval_copy_left: u8,      // bytes 1-3 still to copy for an in-range sprite
     eval_overflow_reads: u8, // the 3 dummy reads after the overflow flag sets
     eval_done: bool,         // n wrapped past 63 — evaluation idles until next line
@@ -219,6 +220,7 @@ impl Ppu {
             sprite0_eval: false,
             eval_n: 0,
             eval_m: 0,
+            eval_addr: 0,
             eval_copy_left: 0,
             eval_overflow_reads: 0,
             eval_done: false,
@@ -467,6 +469,25 @@ impl Ppu {
         }
     }
 
+    /// Advance `v` after a $2007 access, per hardware. Outside rendering (or
+    /// during VBlank), a $2007 read/write does the documented +1/+32
+    /// `vram_increment()`. But a $2007 access during rendering (on a visible
+    /// or pre-render scanline, with rendering enabled) doesn't go through the
+    /// normal increment logic at all — it triggers the same coarse-X-increment
+    /// + Y-increment pulse the background fetch pipeline itself uses,
+    /// regardless of which dot the access lands on. AccuracyCoin's "$2007
+    /// Read w/ Rendering" test pins this to exactly v += $1001 from a
+    /// no-wrap starting v (+1 coarse X, +$1000 fine Y).
+    fn advance_v_after_ppudata_access(&mut self) {
+        let is_render_scanline = self.scanline <= 239 || self.scanline == PRERENDER_SCANLINE;
+        if self.rendering_enabled() && is_render_scanline {
+            self.increment_coarse_x();
+            self.increment_y();
+        } else {
+            self.v = self.v.wrapping_add(self.vram_increment());
+        }
+    }
+
     /// Copy horizontal bits (coarse X + horizontal nametable) from t to v.
     fn copy_t_to_v_horizontal(&mut self) {
         self.v = (self.v & !0x041F) | (self.t & 0x041F);
@@ -608,6 +629,12 @@ impl Ppu {
             self.sprite0_eval = false;
             self.eval_n = 0;
             self.eval_m = 0;
+            // Hardware seeds its OAM byte pointer from whatever OAMADDR
+            // ($2003) currently holds — not always 0. A CPU write to $2003
+            // between the previous scanline's forced reset (dots 257-320)
+            // and this scanline's dot 65 sticks, and evaluation walks from
+            // there, byte by byte, possibly starting misaligned.
+            self.eval_addr = self.oam_addr;
             self.eval_copy_left = 0;
             self.eval_overflow_reads = 0;
             self.eval_done = false;
@@ -631,25 +658,45 @@ impl Ppu {
 
         if self.sprite_eval_count < 8 {
             if self.eval_copy_left > 0 {
-                // Copying bytes 1-3 of an in-range sprite, one per step.
+                // Copying bytes 1-3 of an in-range sprite, one per step, by
+                // walking eval_addr forward — not always eval_n*4+byte, since
+                // a misaligned start makes these bytes span what would
+                // otherwise be two different OAM objects.
                 let byte = 4 - self.eval_copy_left as usize;
                 self.secondary_oam[self.sprite_eval_count * 4 + byte] =
-                    self.oam[self.eval_n * 4 + byte];
+                    self.oam[self.eval_addr as usize];
+                self.eval_addr = self.eval_addr.wrapping_add(1);
                 self.eval_copy_left -= 1;
                 if self.eval_copy_left == 0 {
                     self.sprite_eval_count += 1;
                     self.eval_n += 1;
                     self.eval_done = self.eval_n == 64;
+                    if self.sprite_eval_count == 8 {
+                        // Hand off to the overflow scan below, which
+                        // addresses via eval_n/eval_m — reconcile them from
+                        // the byte pointer we've actually been walking.
+                        self.eval_n = (self.eval_addr / 4) as usize;
+                        self.eval_m = (self.eval_addr % 4) as usize;
+                    }
                 }
             } else {
-                let y = self.oam[self.eval_n * 4];
+                let y = self.oam[self.eval_addr as usize];
                 if in_range(y) {
                     self.secondary_oam[self.sprite_eval_count * 4] = y;
+                    // "Sprite zero" isn't literally OAM index 0 — it's
+                    // whichever object evaluation examines FIRST this
+                    // scanline (eval_n, our decision counter, is still 0
+                    // only on that first decision). If that first object is
+                    // out of range instead, no sprite zero exists this
+                    // scanline at all, regardless of what a later object
+                    // lands on in secondary OAM slot 0.
                     if self.eval_n == 0 {
                         self.sprite0_eval = true;
                     }
+                    self.eval_addr = self.eval_addr.wrapping_add(1);
                     self.eval_copy_left = 3;
                 } else {
+                    self.eval_addr = self.eval_addr.wrapping_add(4) & 0xFC;
                     self.eval_n += 1;
                     self.eval_done = self.eval_n == 64;
                 }
@@ -737,6 +784,14 @@ impl Ppu {
         if self.dot == 257 {
             self.sprite_count = self.sprite_eval_count;
             self.sprite0_in_secondary = self.sprite0_eval;
+            // Hardware quirk: OAMADDR is forced to 0 during ticks 257-320 of
+            // every visible/pre-render scanline while rendering. A CPU write
+            // to $2003 that sets OAMADDR nonzero and is never followed by
+            // another $2003 write before the next rendered frame's sprite
+            // fetch will observe OAMADDR back at 0 — most importantly, a
+            // later $4014 OAM DMA then starts copying at OAM byte 0 instead
+            // of wrapping mid-array.
+            self.oam_addr = 0;
         }
         let idx = ((self.dot - 257) / 8) as usize;
         match (self.dot - 257) % 8 {
@@ -873,6 +928,32 @@ impl Ppu {
         self.vram[row * 32 + col]
     }
 
+    /// Current OAMADDR ($2003), for tests.
+    pub(crate) fn oam_addr(&self) -> u8 {
+        self.oam_addr
+    }
+
+    /// Current VRAM address (the Loopy `v` register), for tests.
+    pub(crate) fn v(&self) -> u16 {
+        self.v
+    }
+
+    /// A byte of the secondary-OAM buffer sprite evaluation just built, for tests.
+    pub(crate) fn secondary_oam_byte(&self, i: usize) -> u8 {
+        self.secondary_oam[i]
+    }
+
+    /// Whether evaluation flagged secondary-OAM slot 0 as "sprite zero" this
+    /// scanline, for tests.
+    pub(crate) fn sprite0_eval(&self) -> bool {
+        self.sprite0_eval
+    }
+
+    /// Read a raw OAM byte by index (0-255), for tests.
+    pub(crate) fn oam_byte(&self, i: usize) -> u8 {
+        self.oam[i]
+    }
+
     pub fn take_nmi(&mut self) -> bool {
         let v = self.nmi_pending;
         self.nmi_pending = false;
@@ -994,10 +1075,20 @@ impl Ppu {
             }
             // $2004 OAMDATA — fully PPU-driven; refreshes all decay bits.
             // Attribute bytes (every 4th, offset 2) have no storage for bits
-            // 2-4, so they always read back clear.
+            // 2-4, so they always read back clear. Dots 1-64 of every
+            // visible/pre-render scanline are spent clearing secondary OAM to
+            // $FF while rendering — a read during that window observes that
+            // internal bus activity instead of the real byte at OAMADDR.
             4 => {
-                let mut value = self.oam[self.oam_addr as usize];
-                if self.oam_addr & 3 == 2 {
+                let clearing_secondary_oam = self.rendering_enabled()
+                    && (self.scanline <= 239 || self.scanline == PRERENDER_SCANLINE)
+                    && (1..=64).contains(&self.dot);
+                let mut value = if clearing_secondary_oam {
+                    0xFF
+                } else {
+                    self.oam[self.oam_addr as usize]
+                };
+                if !clearing_secondary_oam && self.oam_addr & 3 == 2 {
                     value &= 0xE3;
                 }
                 self.refresh_open_bus(value, 0xFF);
@@ -1008,7 +1099,7 @@ impl Ppu {
             // with bits 7-6 coming from the decay register unrefreshed.
             7 => {
                 let addr = self.v;
-                self.v = self.v.wrapping_add(self.vram_increment());
+                self.advance_v_after_ppudata_access();
                 // The access itself puts v on the PPU bus (an A12 rise the
                 // MMC3 observes), then the bus follows the incremented v.
                 self.notify_ppu_bus(cart.as_deref_mut(), addr & 0x3FFF);
@@ -1095,7 +1186,7 @@ impl Ppu {
                 let addr = self.v;
                 self.notify_ppu_bus(cart.as_deref_mut(), addr & 0x3FFF);
                 self.ppu_write(addr, data, cart.as_deref_mut());
-                self.v = self.v.wrapping_add(self.vram_increment());
+                self.advance_v_after_ppudata_access();
                 // Post-increment bus value, as for $2007 reads.
                 self.notify_ppu_bus(cart, self.v & 0x3FFF);
             }
