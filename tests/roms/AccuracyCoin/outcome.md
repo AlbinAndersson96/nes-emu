@@ -1,9 +1,67 @@
 # AccuracyCoin results
 
-**Status (2026-07-14, branch `worktree-dmc-dma-cycle-accurate`): 105 of the 141 tests
-pass**, up from 100 (Session 2) / 91 (develop baseline). `cargo test` remains fully green
-(325 passed / 0 failed). (Page 15, "Power On State", is all `DRAW` tests with no pass/fail
-verdict and is excluded from the 141.)
+**Status (2026-07-14, branch `worktree-dmc-dma-cycle-accurate`): 108 of the 141 tests
+pass**, up from 105 (Session 4) / 100 (Session 2) / 91 (develop baseline). `cargo test`
+remains fully green (331 passed / 0 failed). (Page 15, "Power On State", is all `DRAW`
+tests with no pass/fail verdict and is excluded from the 141.)
+
+## Session 5 (2026-07-14): sprite evaluation seeded from OAMADDR; $2004-during-clear
+
+Two independent fixes, both following up on the Session 3 Sprite Zero Hit cluster work:
+
+**Sprite evaluation now starts from OAMADDR, not always OAM index 0.** Real hardware
+seeds its per-scanline sprite-evaluation OAM byte pointer from whatever `$2003` currently
+holds — not hardcoded 0 — and walks it byte-by-byte (`+1` per byte while copying an
+in-range sprite, `+4` then `& $FC` to skip/realign past an out-of-range one), which is how
+"misaligned OAM" and "arbitrary sprite zero" happen on real hardware. `Ppu::evaluate_sprites`
+hardcoded its walk to start at `eval_n=0` and treated literal OAM index 0 as "sprite zero"
+for hit-detection purposes; both were wrong. Fixed with a new `eval_addr: u8` field (the
+actual walked byte pointer, seeded from `oam_addr` at dot 65) driving the non-overflow
+evaluation phase, while `eval_n` becomes a pure "objects decided" counter (unrelated to
+addressing) whose `==0` check now correctly means "this is the very first decision this
+scanline" — matching AccuracyCoin's own walkthrough: "sprite zero" isn't whichever object
+lands in secondary OAM slot 0, it's specifically whether the *first-examined* object was
+accepted; if it's rejected, no sprite zero exists that scanline at all, regardless of what
+a later object finds. The buggy overflow-scan diagonal walk (already correct, blargg-
+verified) is untouched — at the moment secondary OAM fills (the 8th accept), `eval_n`/
+`eval_m` are reconciled from the just-walked `eval_addr` so the overflow phase picks up
+from the right place.
+
+TDD: 3 new `src/tests/ppu.rs` tests (`sprite_evaluation_starts_at_oamaddr_not_always_oam_index_zero`,
+`sprite_evaluation_first_examined_object_out_of_range_means_no_sprite_zero_this_scanline`,
+`sprite_evaluation_misaligned_oamaddr_walks_byte_by_byte`) — the first two attempts at the
+latter two tests turned out to pass even against the *old* buggy code because the test data
+didn't distinguish "walks from OAMADDR" from "always starts at 0, but happens to reach the
+same bytes anyway"; rewritten with explicit CHR-byte markers that only match under correct
+addressing. Fixed `Arbitrary Sprite Zero` and `Misaligned OAM Behavior` cleanly. `cargo test`
+328→331/0 stayed green throughout, including all of `sprite_overflow_tests` (the overflow
+scan's own blargg-verified behavior).
+
+**`$2004` reads during the secondary-OAM-clear window (dots 1-64) always return `$FF`.**
+While rendering, dots 1-64 of every visible/pre-render scanline are spent clearing
+secondary OAM to `$FF` — the PPU is internally busy with that write activity, and a
+`$2004` read during the window observes it instead of the real byte at OAMADDR.
+`Ppu::read_register`'s `4 =>` arm read `oam[oam_addr]` unconditionally. Fixed by checking
+`rendering_enabled() && is_render_scanline && (1..=64).contains(&dot)` and returning `$FF`
+when true (with the attribute-byte bit-masking correctly skipped in that case too, since
+there's no real OAM byte being read). 3 new TDD tests, `cargo test` stayed green.
+
+This fix is verified correct in isolation but did **not** move `Address $2004 Behavior`'s
+score (still code 4) — investigated with temporary tracing (removed before committing): its
+Test 4 syncs to a precise dot via `VblSync_Plus_A` + a fixed-length OAM DMA + a
+cycle-counted `Clockslide`, expecting to land in a visible scanline's dots 1-64, but our
+emulator's read actually lands at scanline 261 (pre-render), dot 335 — nowhere near the
+1-64 window on any scanline. That's a separate VBlank-sync/OAM-DMA-length precision issue
+in the surrounding timing, not a flaw in the `$FF`-return logic itself; not chased further.
+
+**Deliberately not attempted: `OAM Corruption`.** Its own test comments describe a
+cycle-alignment-dependent internal "secondary OAM address" register with three different
+per-phase increment rules (dots 1-64, 65-256, 257-320) plus a full row-corruption
+mechanism triggered by disabling rendering mid-scanline — comparable in scope to the
+ALE/octal-latch quirk (`ALE + Read`/`Hybrid Addresses`) already flagged as its own
+dedicated effort rather than a quick fix. Skipped for the same reason: high implementation
+risk to already-solid sprite-evaluation code, for one test of very narrow real-world
+relevance.
 
 ## Session 4 (2026-07-14): $2007 access during rendering uses the glitch increment
 
@@ -281,22 +339,21 @@ instruction stream, one cycle of drift from the different JSR/RTS history. Fixin
 resolved exactly one test cleanly (DMA + $4015 Read) and surfaced a deeper, still-unresolved
 DMA-during-JSR timing issue (the `Implied Dummy Reads` hang) — see "Session 2" above.
 
-## Remaining failures (32 failing + 4 hung = 36 non-passing), by cluster
+## Remaining failures (29 failing + 4 hung = 33 non-passing), by cluster
 
 Codes are the ROM's on-screen error codes; meanings from `README.md`. Table regenerated
-2026-07-14 at the post-Session-4 state.
+2026-07-14 at the post-Session-5 state.
 
 ### DMC DMA cluster
 | Test | Code | Meaning |
 |---|---|---|
 | APU Register Activation | 4 | Controllers were clocked by the bus conflict with OAM DMA when they shouldn't have been (or vice versa — see README's success-code table for this test). |
-| Instruction Timing | 6 | Cycle counts / DMA data-bus interaction — reverted to Session 2's code after Session 4's $2007 fix; see Session 4's note (downstream `Implied Dummy Reads` noise, not a fix regression). |
+| Instruction Timing | 6 | Cycle counts / DMA data-bus interaction — downstream `Implied Dummy Reads` noise, code has bounced between 2 and 6 across sessions without any change to this cluster's own code. |
 | Delta Modulation Channel | L | Writing $4015 when the DMC timer has 2 cycles until clocked shouldn't trigger the DMA until after the write's 3-4 cycle delay — the load-delay vs timer-edge interaction, finer than the fixed 3-cycle `DMC_LOAD_DMA_DELAY`. |
 | Controller Strobing | 4 | Controllers should not be strobed on put→get transitions (needs cycle-accurate $4016 write phase). |
 | Controller Clocking | 2 | Reading a strobed controller port shouldn't affect shift register contents. |
 | Frame Counter IRQ | 7 | IRQ flag shouldn't clear yet on a get→put transition (frame-counter/$4015-read edge, adjacent to but not the same as the DMA work). |
 | DMA + $2007 Write | 1 | Session 2 regression — see its "Newly broken" note; likely the same inline-rerun sensitivity as APU Register Activation. |
-| INC $4014 | 2 | New in Session 4, downstream `Implied Dummy Reads` noise (Test 2 runs with rendering explicitly disabled, doesn't touch the $2007-during-rendering code path at all) — see Session 4's note. |
 
 ### Hung (never reach a verdict) — the `Implied Dummy Reads` chain, unresolved, see Session 2
 | Test |
@@ -314,23 +371,23 @@ Codes are the ROM's on-screen error codes; meanings from `README.md`. Table rege
 | Explicit DMA Abort | 2 | Mid-stall DMA cancellation not modeled. |
 | Implicit DMA Abort | 2 | Mid-stall DMA cancellation not modeled. |
 
-### Sprite Zero Hit cluster — mostly FIXED in Sessions 3-4; 4 items remain
+### Sprite Zero Hit cluster — FIXED in Sessions 3-5, only `OAM Corruption` remains
 The shared "Sprite Zero Hits should be working" root cause (missing OAMADDR reset during
-sprite fetch, Session 3) and `$2007 Read w/ Rendering`'s glitch-increment (Session 4) are
-both fixed. Six tests now pass outright. The rest are independent bugs:
+sprite fetch, Session 3), `$2007 Read w/ Rendering`'s glitch-increment (Session 4), and
+the OAMADDR-seeded sprite evaluation / `$2004`-during-clear bugs (Session 5) are all fixed.
+Eight tests now pass outright.
 | Test | Code | Meaning |
 |---|---|---|
-| Arbitrary Sprite Zero | 2 | The first processed sprite of a scanline should be treated as "sprite zero" — a sprite-evaluation-order bug, not the OAMADDR one. |
-| Misaligned OAM Behavior | 1 | Misaligned OAM should be able to trigger a sprite zero hit (this test's own code-1 prerequisite, unrelated to the fixed one). |
-| Address $2004 Behavior | 4 | Reads from $2004 during PPU cycles 1-64 of a visible scanline (rendering enabled) should always read $FF. |
-| OAM Corruption | 2 | OAM Corruption should "corrupt" a row in OAM by copying the 8 values from row 0 to another row — a real hardware quirk (stray OAM writes during evaluation) not yet modeled. |
+| Address $2004 Behavior | 4 | The `$FF`-during-clear fix (Session 5) is verified correct in isolation, but this test's own VBlank-sync precision lands the read at the wrong dot entirely (scanline 261 dot 335, nowhere near dots 1-64) — a separate timing bug, not chased. |
+| OAM Corruption | 2 | Cycle-alignment-dependent internal "secondary OAM address" register + full row-corruption mechanism — deliberately not attempted, comparable complexity/risk to the ALE quirk below. |
 
 ### PPU-address-bus-during-background-fetch cluster — NOT the $2007-increment glitch, still open
 `ALE + Read` and `Hybrid Addresses` describe a *different* mechanism from the one Session 4
 fixed: a well-timed $2007/$2006 access substitutes the CPU-supplied address for the
 background pipeline's own next fetch address on that exact dot (reading/fetching from an
-"unintended address"), rather than just glitching the post-access increment. Candidate next
-target — not yet investigated.
+"unintended address"), rather than just glitching the post-access increment. Scoped but
+deliberately not attempted — see Session 4's assessment (requires a real octal-latch/ALE
+bus model, comparable effort/risk to `OAM Corruption` above).
 | Test | Code | Meaning |
 |---|---|---|
 | ALE + Read | 2 | A well-timed read from $2007 should be able to affect the PPU address bus during the background read cadence, reading a bit plane from an unintended address. |
@@ -346,6 +403,7 @@ target — not yet investigated.
 | Stale BG / Sprite Shift Registers | 3 / 3 | Shift registers shouldn't clock during H/F-Blank. |
 | BG Serial In | 2 | Shift registers should bring in 1s at bit 0. |
 | $2004 Stress / $2007 Stress | 2 / 2 | OAMADDR-overflow reads / read-buffer fill timing. |
+| 2002 Flag Clear Timing | 1 | Flags weren't cleared on the correct PPU cycle. |
 | 2002 Flag Clear Timing | 1 | Flags weren't cleared on the correct PPU cycle. |
 | 2002 Flag Clear Timing | 1 | Flags weren't cleared on the correct PPU cycle. |
 
