@@ -870,6 +870,58 @@ fn jsr_pushes_pc_minus_one() {
     assert_eq!(saved_pc, 0x0202); // PC after JSR operand, minus 1
 }
 
+// Real 6502 hardware drives the address bus on every cycle of every
+// instruction, including cycles whose result is discarded ("internal
+// operations"). JSR's cycle 3 is a dummy read of the current stack address
+// before the two pushes. Every CPU cycle must correspond to exactly one
+// `Bus::read`/`Bus::write` call — the DMC DMA halt-detection logic hooks
+// into those calls to decide when to steal a cycle, so a cycle with no bus
+// access is invisible to it and the DMA timing drifts (see the DMC DMA
+// cycle accuracy note in CLAUDE.md).
+#[test]
+fn jsr_bus_access_sequence() {
+    let (mut cpu, mut bus) = make();
+    w(&mut bus, 0x0200, &[0x20, 0x00, 0x04]); // JSR $0400
+    let sp = cpu.sp; // 0xFD
+    bus.trace.clear();
+    cpu.step(&mut bus);
+    assert_eq!(
+        bus.trace,
+        vec![
+            (0x0200, false),                        // T1 opcode fetch
+            (0x0201, false),                        // T2 fetch ADL
+            (0x0100 | sp as u16, false),             // T3 dummy internal stack read
+            (0x0100 | sp as u16, true),              // T4 push PCH
+            (0x0100 | sp.wrapping_sub(1) as u16, true), // T5 push PCL
+            (0x0202, false),                         // T6 fetch ADH
+        ]
+    );
+    assert_eq!(cpu.pc, 0x0400);
+}
+
+#[test]
+fn rts_bus_access_sequence() {
+    let (mut cpu, mut bus) = make();
+    w(&mut bus, 0x0200, &[0x20, 0x00, 0x04]); // JSR $0400
+    bus.mem[0x0400] = 0x60; // RTS
+    cpu.step(&mut bus); // JSR
+    let sp = cpu.sp; // 0xFB
+    bus.trace.clear();
+    cpu.step(&mut bus); // RTS
+    assert_eq!(
+        bus.trace,
+        vec![
+            (0x0400, false),                            // T1 opcode fetch
+            (0x0401, false),                             // T2 dummy fetch of next byte
+            (0x0100 | sp as u16, false),                  // T3 dummy internal S++ read
+            (0x0100 | sp.wrapping_add(1) as u16, false),  // T4 pop PCL
+            (0x0100 | sp.wrapping_add(2) as u16, false),  // T5 pop PCH
+            (0x0202, false),                              // T6 dummy read at popped PC (pre-increment)
+        ]
+    );
+    assert_eq!(cpu.pc, 0x0203);
+}
+
 // ---------------------------------------------------------------------------
 // Stack: PHA / PLA / PHP / PLP
 // ---------------------------------------------------------------------------
@@ -916,6 +968,62 @@ fn plp_clears_b_sets_u() {
     assert!(cpu.flag(FLAG_U));
 }
 
+#[test]
+fn pha_bus_access_sequence() {
+    // PHA is already cycle-accurate (T1 opcode, T2 dispatcher dummy fetch,
+    // T3 push) — regression check for the JSR/RTS/RTI/PLA/PLP silent-cycle
+    // audit rather than a fix target.
+    let (mut cpu, mut bus) = make();
+    w(&mut bus, 0x0200, &[0x48]); // PHA
+    let sp = cpu.sp;
+    bus.trace.clear();
+    cpu.step(&mut bus);
+    assert_eq!(
+        bus.trace,
+        vec![(0x0200, false), (0x0201, false), (0x0100 | sp as u16, true)]
+    );
+}
+
+#[test]
+fn pla_bus_access_sequence() {
+    let (mut cpu, mut bus) = make();
+    w(&mut bus, 0x0200, &[0x68]); // PLA
+    cpu.push(&mut bus, 0x42);
+    let sp = cpu.sp;
+    bus.trace.clear();
+    cpu.step(&mut bus);
+    assert_eq!(
+        bus.trace,
+        vec![
+            (0x0200, false),                            // T1 opcode fetch
+            (0x0201, false),                             // T2 dummy fetch of next byte
+            (0x0100 | sp as u16, false),                  // T3 dummy internal S++ read
+            (0x0100 | sp.wrapping_add(1) as u16, false),  // T4 pop A
+        ]
+    );
+    assert_eq!(cpu.a, 0x42);
+}
+
+#[test]
+fn plp_bus_access_sequence() {
+    let (mut cpu, mut bus) = make();
+    w(&mut bus, 0x0200, &[0x28]); // PLP
+    cpu.push(&mut bus, FLAG_C);
+    let sp = cpu.sp;
+    bus.trace.clear();
+    cpu.step(&mut bus);
+    assert_eq!(
+        bus.trace,
+        vec![
+            (0x0200, false),
+            (0x0201, false),
+            (0x0100 | sp as u16, false),
+            (0x0100 | sp.wrapping_add(1) as u16, false),
+        ]
+    );
+    assert!(cpu.flag(FLAG_C));
+}
+
 // ---------------------------------------------------------------------------
 // BRK / RTI
 // ---------------------------------------------------------------------------
@@ -959,6 +1067,31 @@ fn rti_restores_state() {
     assert!(cpu.flag(FLAG_C));
     assert!(!cpu.flag(FLAG_B));
     assert_eq!(cycles, 6);
+}
+
+#[test]
+fn rti_bus_access_sequence() {
+    let (mut cpu, mut bus) = make();
+    cpu.sp = 0xFA;
+    bus.mem[0x01FB] = FLAG_U | FLAG_C; // P
+    bus.mem[0x01FC] = 0x02; // PC lo
+    bus.mem[0x01FD] = 0x03; // PC hi -> $0302
+    w(&mut bus, 0x0200, &[0x40]); // RTI
+    let sp = cpu.sp; // 0xFA
+    bus.trace.clear();
+    cpu.step(&mut bus);
+    assert_eq!(
+        bus.trace,
+        vec![
+            (0x0200, false),                             // T1 opcode fetch
+            (0x0201, false),                              // T2 dummy fetch of next byte
+            (0x0100 | sp as u16, false),                   // T3 dummy internal S++ read
+            (0x0100 | sp.wrapping_add(1) as u16, false),   // T4 pop P
+            (0x0100 | sp.wrapping_add(2) as u16, false),   // T5 pop PCL
+            (0x0100 | sp.wrapping_add(3) as u16, false),   // T6 pop PCH
+        ]
+    );
+    assert_eq!(cpu.pc, 0x0302);
 }
 
 // ---------------------------------------------------------------------------
