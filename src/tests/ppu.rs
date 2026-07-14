@@ -712,3 +712,133 @@ fn ppudata_read_during_vblank_uses_normal_increment_even_if_rendering_was_enable
     let _ = ppu.read_register(7, None);
     assert_eq!(ppu.v(), 0x2001);
 }
+
+// ── Sprite evaluation seeded from a nonzero/misaligned OAMADDR ────────────────
+//
+// Real hardware's sprite evaluation doesn't always start at OAM byte 0 — it
+// starts wherever OAMADDR ($2003) currently points, which the CPU can set to
+// any value (including a non-multiple-of-4 "misaligned" one) right before
+// evaluation begins (dot 65). AccuracyCoin's "Arbitrary Sprite Zero" and
+// "Misaligned OAM Behavior" tests exploit this: whichever object is examined
+// FIRST is treated as "sprite zero" for hit-detection purposes, even if it
+// isn't literally OAM index 0 — and if that object is out of range, "sprite
+// zero" never exists that scanline at all, regardless of what lands in
+// secondary OAM slot 0. `evaluate_sprites` hardcoded its OAM byte pointer to
+// start at 0 and treated literal OAM index 0 as sprite zero, ignoring
+// OAMADDR entirely.
+
+fn setup_oam(ppu: &mut Ppu, bytes: &[u8; 256]) {
+    ppu.write_register(3, 0, None);
+    for (i, &b) in bytes.iter().enumerate() {
+        ppu.oam_dma_write(i as u8, b);
+    }
+}
+
+#[test]
+fn sprite_evaluation_starts_at_oamaddr_not_always_oam_index_zero() {
+    let mut ppu = Ppu::new();
+    let mut oam = [0xFFu8; 256];
+    oam[128] = 0x00; // "object 32"'s Y position: in range for next_scanline=1
+    setup_oam(&mut ppu, &oam);
+
+    tick_to(&mut ppu, 0, 60); // before evaluation starts, rendering still off
+    ppu.write_register(1, 0x18, None); // enable rendering
+    ppu.write_register(3, 128, None); // OAMADDR = 32*4, as if the CPU just wrote $2003
+    tick_to(&mut ppu, 0, 256); // run evaluation for scanline 1 to completion
+
+    assert!(ppu.sprite0_eval());
+    assert_eq!(ppu.secondary_oam_byte(0), 0x00);
+}
+
+#[test]
+fn sprite_evaluation_first_examined_object_out_of_range_means_no_sprite_zero_this_scanline() {
+    let mut ppu = Ppu::new();
+    let mut oam = [0xFFu8; 256];
+    oam[0] = 0x00; // object 0's Y is in range too — a wrong implementation
+    oam[1] = 0xBB; // that starts at index 0 would wrongly pick this CHR marker
+    oam[128] = 0xFF; // "object 32"'s Y: out of range — first examined, and rejected
+    oam[132] = 0x00; // "object 33"'s Y: in range, would land in secondary OAM slot 0
+    oam[133] = 0xAA; // ...but must NOT be reached, since object 32 was rejected first
+    setup_oam(&mut ppu, &oam);
+
+    tick_to(&mut ppu, 0, 60);
+    ppu.write_register(1, 0x18, None);
+    ppu.write_register(3, 128, None);
+    tick_to(&mut ppu, 0, 256);
+
+    // Object 33 is legitimately found and lands in secondary OAM slot 0 (it's
+    // the first object evaluation *accepts*), but since object 32 was the
+    // first object *examined* and was rejected, no sprite zero exists this
+    // scanline at all — object 33 must not be flagged as sprite zero despite
+    // occupying slot 0.
+    assert_eq!(ppu.secondary_oam_byte(0), 0x00);
+    assert_eq!(ppu.secondary_oam_byte(1), 0xAA);
+    assert!(!ppu.sprite0_eval());
+}
+
+#[test]
+fn sprite_evaluation_misaligned_oamaddr_walks_byte_by_byte() {
+    // OAMADDR = 1 (misaligned): the "Y" checked is OAM[1], and on rejection
+    // OAMADDR advances by 4 then realigns via & $FC, per AccuracyCoin's own
+    // documented walkthrough (e.g. starting misaligned at $80 -> rejected ->
+    // $84, still 4-aligned from then on).
+    let mut ppu = Ppu::new();
+    let mut oam = [0xFFu8; 256];
+    oam[0] = 0x00; // object 0's Y is in range too — a wrong implementation
+    oam[1] = 0xFF; // that starts at index 0 would wrongly accept it immediately
+    oam[4] = 0x00; // after +4 & $FC realignment (1+4=5, 5&$FC=4): in range
+    oam[5] = 0xCC; // the CHR marker that should end up in secondary OAM
+    setup_oam(&mut ppu, &oam);
+
+    tick_to(&mut ppu, 0, 60);
+    ppu.write_register(1, 0x18, None);
+    ppu.write_register(3, 1, None);
+    tick_to(&mut ppu, 0, 256);
+
+    assert_eq!(ppu.secondary_oam_byte(0), 0x00);
+    assert_eq!(ppu.secondary_oam_byte(1), 0xCC);
+}
+
+// ── $2004 reads during the secondary-OAM-clear window (dots 1-64) ────────────
+//
+// While rendering, dots 1-64 of every visible/pre-render scanline are spent
+// clearing secondary OAM to $FF — the PPU is internally busy writing $FF over
+// and over, and a $2004 read during that window reads that same bus activity
+// instead of the real OAMDATA at OAMADDR. AccuracyCoin's "Address $2004
+// Behavior" test 4 pins this: even with OAMADDR pointing at a real, non-$FF
+// byte, a $2004 read during dots 1-64 (rendering enabled) must return $FF.
+
+#[test]
+fn oamdata_read_during_secondary_oam_clear_window_always_returns_ff() {
+    let mut ppu = Ppu::new();
+    let mut oam = [0xAAu8; 256]; // definitely not $FF, so a real read would differ
+    oam[0] = 0x5A;
+    setup_oam(&mut ppu, &oam);
+    ppu.write_register(3, 0, None); // OAMADDR = 0
+    ppu.write_register(1, 0x18, None); // enable rendering
+    tick_to(&mut ppu, 0, 30); // dot 30: inside the 1-64 clear window
+    assert_eq!(ppu.read_register(4, None), 0xFF);
+}
+
+#[test]
+fn oamdata_read_outside_clear_window_returns_real_oam_value() {
+    let mut ppu = Ppu::new();
+    let mut oam = [0xAAu8; 256];
+    oam[0] = 0x5A;
+    setup_oam(&mut ppu, &oam);
+    ppu.write_register(3, 0, None);
+    ppu.write_register(1, 0x18, None);
+    tick_to(&mut ppu, 0, 100); // dot 100: well past the clear window
+    assert_eq!(ppu.read_register(4, None), 0x5A);
+}
+
+#[test]
+fn oamdata_read_during_dots_1_64_with_rendering_disabled_returns_real_oam_value() {
+    let mut ppu = Ppu::new();
+    let mut oam = [0xAAu8; 256];
+    oam[0] = 0x5A;
+    setup_oam(&mut ppu, &oam);
+    ppu.write_register(3, 0, None); // rendering left disabled
+    tick_to(&mut ppu, 0, 30);
+    assert_eq!(ppu.read_register(4, None), 0x5A);
+}

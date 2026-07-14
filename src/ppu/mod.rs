@@ -148,8 +148,9 @@ pub struct Ppu {
     // every 2 dots, so the overflow flag sets at the hardware-exact dot
     // (blargg sprite_overflow_tests/3.Timing) and the buggy diagonal
     // overflow scan (4.Obscure) falls out of eval_n/eval_m.
-    eval_n: usize,           // primary OAM sprite index (0-63)
+    eval_n: usize,           // objects decided so far (0-64); addressing index once in the overflow scan
     eval_m: usize,           // byte-within-sprite offset used by the overflow scan
+    eval_addr: u8,           // hardware OAMADDR-during-evaluation byte pointer, seeded from oam_addr at dot 65
     eval_copy_left: u8,      // bytes 1-3 still to copy for an in-range sprite
     eval_overflow_reads: u8, // the 3 dummy reads after the overflow flag sets
     eval_done: bool,         // n wrapped past 63 — evaluation idles until next line
@@ -219,6 +220,7 @@ impl Ppu {
             sprite0_eval: false,
             eval_n: 0,
             eval_m: 0,
+            eval_addr: 0,
             eval_copy_left: 0,
             eval_overflow_reads: 0,
             eval_done: false,
@@ -627,6 +629,12 @@ impl Ppu {
             self.sprite0_eval = false;
             self.eval_n = 0;
             self.eval_m = 0;
+            // Hardware seeds its OAM byte pointer from whatever OAMADDR
+            // ($2003) currently holds — not always 0. A CPU write to $2003
+            // between the previous scanline's forced reset (dots 257-320)
+            // and this scanline's dot 65 sticks, and evaluation walks from
+            // there, byte by byte, possibly starting misaligned.
+            self.eval_addr = self.oam_addr;
             self.eval_copy_left = 0;
             self.eval_overflow_reads = 0;
             self.eval_done = false;
@@ -650,25 +658,45 @@ impl Ppu {
 
         if self.sprite_eval_count < 8 {
             if self.eval_copy_left > 0 {
-                // Copying bytes 1-3 of an in-range sprite, one per step.
+                // Copying bytes 1-3 of an in-range sprite, one per step, by
+                // walking eval_addr forward — not always eval_n*4+byte, since
+                // a misaligned start makes these bytes span what would
+                // otherwise be two different OAM objects.
                 let byte = 4 - self.eval_copy_left as usize;
                 self.secondary_oam[self.sprite_eval_count * 4 + byte] =
-                    self.oam[self.eval_n * 4 + byte];
+                    self.oam[self.eval_addr as usize];
+                self.eval_addr = self.eval_addr.wrapping_add(1);
                 self.eval_copy_left -= 1;
                 if self.eval_copy_left == 0 {
                     self.sprite_eval_count += 1;
                     self.eval_n += 1;
                     self.eval_done = self.eval_n == 64;
+                    if self.sprite_eval_count == 8 {
+                        // Hand off to the overflow scan below, which
+                        // addresses via eval_n/eval_m — reconcile them from
+                        // the byte pointer we've actually been walking.
+                        self.eval_n = (self.eval_addr / 4) as usize;
+                        self.eval_m = (self.eval_addr % 4) as usize;
+                    }
                 }
             } else {
-                let y = self.oam[self.eval_n * 4];
+                let y = self.oam[self.eval_addr as usize];
                 if in_range(y) {
                     self.secondary_oam[self.sprite_eval_count * 4] = y;
+                    // "Sprite zero" isn't literally OAM index 0 — it's
+                    // whichever object evaluation examines FIRST this
+                    // scanline (eval_n, our decision counter, is still 0
+                    // only on that first decision). If that first object is
+                    // out of range instead, no sprite zero exists this
+                    // scanline at all, regardless of what a later object
+                    // lands on in secondary OAM slot 0.
                     if self.eval_n == 0 {
                         self.sprite0_eval = true;
                     }
+                    self.eval_addr = self.eval_addr.wrapping_add(1);
                     self.eval_copy_left = 3;
                 } else {
+                    self.eval_addr = self.eval_addr.wrapping_add(4) & 0xFC;
                     self.eval_n += 1;
                     self.eval_done = self.eval_n == 64;
                 }
@@ -910,6 +938,17 @@ impl Ppu {
         self.v
     }
 
+    /// A byte of the secondary-OAM buffer sprite evaluation just built, for tests.
+    pub(crate) fn secondary_oam_byte(&self, i: usize) -> u8 {
+        self.secondary_oam[i]
+    }
+
+    /// Whether evaluation flagged secondary-OAM slot 0 as "sprite zero" this
+    /// scanline, for tests.
+    pub(crate) fn sprite0_eval(&self) -> bool {
+        self.sprite0_eval
+    }
+
     /// Read a raw OAM byte by index (0-255), for tests.
     pub(crate) fn oam_byte(&self, i: usize) -> u8 {
         self.oam[i]
@@ -1036,10 +1075,20 @@ impl Ppu {
             }
             // $2004 OAMDATA — fully PPU-driven; refreshes all decay bits.
             // Attribute bytes (every 4th, offset 2) have no storage for bits
-            // 2-4, so they always read back clear.
+            // 2-4, so they always read back clear. Dots 1-64 of every
+            // visible/pre-render scanline are spent clearing secondary OAM to
+            // $FF while rendering — a read during that window observes that
+            // internal bus activity instead of the real byte at OAMADDR.
             4 => {
-                let mut value = self.oam[self.oam_addr as usize];
-                if self.oam_addr & 3 == 2 {
+                let clearing_secondary_oam = self.rendering_enabled()
+                    && (self.scanline <= 239 || self.scanline == PRERENDER_SCANLINE)
+                    && (1..=64).contains(&self.dot);
+                let mut value = if clearing_secondary_oam {
+                    0xFF
+                } else {
+                    self.oam[self.oam_addr as usize]
+                };
+                if !clearing_secondary_oam && self.oam_addr & 3 == 2 {
                     value &= 0xE3;
                 }
                 self.refresh_open_bus(value, 0xFF);
