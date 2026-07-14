@@ -2,8 +2,38 @@
 
 **Status (2026-07-14, branch `worktree-dmc-dma-cycle-accurate`): 105 of the 141 tests
 pass**, up from 100 (Session 2) / 91 (develop baseline). `cargo test` remains fully green
-(321 passed / 0 failed). (Page 15, "Power On State", is all `DRAW` tests with no pass/fail
+(325 passed / 0 failed). (Page 15, "Power On State", is all `DRAW` tests with no pass/fail
 verdict and is excluded from the 141.)
+
+## Session 4 (2026-07-14): $2007 access during rendering uses the glitch increment
+
+`$2007 Read w/ Rendering`'s error code 2 is a distinct, well-documented hardware quirk from
+the Session 3 OAMADDR fix: a $2007 read *or write* while rendering is enabled, on a visible
+or pre-render scanline, does not use the normal `vram_increment()` (+1 or +32 depending on
+the PPUCTRL increment-mode bit) at all — it instead triggers the same coarse-X-increment +
+Y-increment pulse the background fetch pipeline itself uses on every 8th dot / dot 256,
+regardless of which dot the CPU access actually lands on. `Ppu::read_register`/
+`write_register`'s `7 =>` arms called `self.v.wrapping_add(self.vram_increment())`
+unconditionally — this quirk was simply never implemented.
+
+**Fix**: `Ppu::advance_v_after_ppudata_access()` (a new helper, replacing the inline
+`vram_increment()` call at both the read and write `7 =>` sites) checks
+`rendering_enabled() && (scanline <= 239 || scanline == PRERENDER_SCANLINE)`; when true it
+calls `increment_coarse_x()` + `increment_y()` (the same methods the render pipeline itself
+uses) instead of the normal increment. TDD: 4 new `src/tests/ppu.rs` tests —
+`ppudata_read_during_rendering_uses_coarse_x_and_y_glitch_increment` and its write/negative
+siblings assert exactly `v += $1001` from a no-wrap starting `v` (`+1` coarse X, `+$1000`
+fine Y), matching the ROM's own comment ("the correct answer is, v += $1001") to the byte.
+Watched RED first. `cargo test` 321→325/0, zero regressions.
+
+**Result**: `$2007 Read w/ Rendering` now passes cleanly. Net AccuracyCoin score stayed at
+105/141 — `INC $4014` newly failed (code 2) and `Instruction Timing` reverted to its
+Session-2 code 6. Neither test touches `$2007` during rendering (INC4014's Test 2 runs with
+rendering explicitly *disabled*), and both sit downstream of the `Implied Dummy Reads`
+cluster in the ROM's fixed test order — the same entangled-chaos pattern already seen twice
+(Session 3's fix similarly shuffled which downstream tests pass without changing any CPU
+cycle count). Not treated as a real regression in this fix; not chased further, consistent
+with leaving `Implied Dummy Reads` itself for a dedicated future session.
 
 ## Session 3 (2026-07-14): OAMADDR reset during sprite fetch — the Sprite Zero Hit cluster
 
@@ -254,18 +284,19 @@ DMA-during-JSR timing issue (the `Implied Dummy Reads` hang) — see "Session 2"
 ## Remaining failures (32 failing + 4 hung = 36 non-passing), by cluster
 
 Codes are the ROM's on-screen error codes; meanings from `README.md`. Table regenerated
-2026-07-14 at the post-Session-3 state.
+2026-07-14 at the post-Session-4 state.
 
 ### DMC DMA cluster
 | Test | Code | Meaning |
 |---|---|---|
 | APU Register Activation | 4 | Controllers were clocked by the bus conflict with OAM DMA when they shouldn't have been (or vice versa — see README's success-code table for this test). |
-| Instruction Timing | 2 | The DMA timing is not accurate enough to test this — progressed past Session 2's code-6 failure once the sprite-fetch OAMADDR fix landed. |
+| Instruction Timing | 6 | Cycle counts / DMA data-bus interaction — reverted to Session 2's code after Session 4's $2007 fix; see Session 4's note (downstream `Implied Dummy Reads` noise, not a fix regression). |
 | Delta Modulation Channel | L | Writing $4015 when the DMC timer has 2 cycles until clocked shouldn't trigger the DMA until after the write's 3-4 cycle delay — the load-delay vs timer-edge interaction, finer than the fixed 3-cycle `DMC_LOAD_DMA_DELAY`. |
 | Controller Strobing | 4 | Controllers should not be strobed on put→get transitions (needs cycle-accurate $4016 write phase). |
 | Controller Clocking | 2 | Reading a strobed controller port shouldn't affect shift register contents. |
 | Frame Counter IRQ | 7 | IRQ flag shouldn't clear yet on a get→put transition (frame-counter/$4015-read edge, adjacent to but not the same as the DMA work). |
 | DMA + $2007 Write | 1 | Session 2 regression — see its "Newly broken" note; likely the same inline-rerun sensitivity as APU Register Activation. |
+| INC $4014 | 2 | New in Session 4, downstream `Implied Dummy Reads` noise (Test 2 runs with rendering explicitly disabled, doesn't touch the $2007-during-rendering code path at all) — see Session 4's note. |
 
 ### Hung (never reach a verdict) — the `Implied Dummy Reads` chain, unresolved, see Session 2
 | Test |
@@ -283,20 +314,29 @@ Codes are the ROM's on-screen error codes; meanings from `README.md`. Table rege
 | Explicit DMA Abort | 2 | Mid-stall DMA cancellation not modeled. |
 | Implicit DMA Abort | 2 | Mid-stall DMA cancellation not modeled. |
 
-### Sprite Zero Hit cluster — mostly FIXED in Session 3 (see above); 6 items remain
+### Sprite Zero Hit cluster — mostly FIXED in Sessions 3-4; 4 items remain
 The shared "Sprite Zero Hits should be working" root cause (missing OAMADDR reset during
-sprite fetch) is fixed. Five tests now pass outright. The rest progressed to their own
-next-level checks — no longer a single shared root cause, back to independent bugs:
+sprite fetch, Session 3) and `$2007 Read w/ Rendering`'s glitch-increment (Session 4) are
+both fixed. Six tests now pass outright. The rest are independent bugs:
 | Test | Code | Meaning |
 |---|---|---|
 | Arbitrary Sprite Zero | 2 | The first processed sprite of a scanline should be treated as "sprite zero" — a sprite-evaluation-order bug, not the OAMADDR one. |
 | Misaligned OAM Behavior | 1 | Misaligned OAM should be able to trigger a sprite zero hit (this test's own code-1 prerequisite, unrelated to the fixed one). |
 | Address $2004 Behavior | 4 | Reads from $2004 during PPU cycles 1-64 of a visible scanline (rendering enabled) should always read $FF. |
 | OAM Corruption | 2 | OAM Corruption should "corrupt" a row in OAM by copying the 8 values from row 0 to another row — a real hardware quirk (stray OAM writes during evaluation) not yet modeled. |
-| $2007 read w/ rendering | 2 | A well-timed read from $2007 should be able to affect the PPU address bus during the background read cadence, reading a bit plane from an unintended address. |
-| ALE + Read / Hybrid Addresses | 2 | Same class as the $2007-read item above, for $2007/$2006 respectively. |
 
-### Independent smaller items (pre-existing, unrelated to the DMC-DMA/JSR/OAMADDR work)
+### PPU-address-bus-during-background-fetch cluster — NOT the $2007-increment glitch, still open
+`ALE + Read` and `Hybrid Addresses` describe a *different* mechanism from the one Session 4
+fixed: a well-timed $2007/$2006 access substitutes the CPU-supplied address for the
+background pipeline's own next fetch address on that exact dot (reading/fetching from an
+"unintended address"), rather than just glitching the post-access increment. Candidate next
+target — not yet investigated.
+| Test | Code | Meaning |
+|---|---|---|
+| ALE + Read | 2 | A well-timed read from $2007 should be able to affect the PPU address bus during the background read cadence, reading a bit plane from an unintended address. |
+| Hybrid Addresses | 2 | A well-timed write to $2006 should be able to affect the PPU address bus during the background read cadence, performing a nametable fetch from an unintended address. |
+
+### Independent smaller items (pre-existing, unrelated to the DMC-DMA/JSR/OAMADDR/$2007 work)
 | Test | Code | Meaning |
 |---|---|---|
 | Open Bus (page 1) | 7 | PC in open bus should execute from floating data bus values; write cycles should update the bus. |
@@ -306,6 +346,7 @@ next-level checks — no longer a single shared root cause, back to independent 
 | Stale BG / Sprite Shift Registers | 3 / 3 | Shift registers shouldn't clock during H/F-Blank. |
 | BG Serial In | 2 | Shift registers should bring in 1s at bit 0. |
 | $2004 Stress / $2007 Stress | 2 / 2 | OAMADDR-overflow reads / read-buffer fill timing. |
+| 2002 Flag Clear Timing | 1 | Flags weren't cleared on the correct PPU cycle. |
 | 2002 Flag Clear Timing | 1 | Flags weren't cleared on the correct PPU cycle. |
 
 ## Calibration constants (all in code; re-swept in Session 2, unchanged)
