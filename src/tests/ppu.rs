@@ -660,3 +660,55 @@ fn oam_dma_after_sprite_fetch_reset_lands_sprite_zero_at_oam_zero() {
         [0x00, 0xFC, 0x00, 0x08]
     );
 }
+
+// ── $2007 access during rendering: glitch increment ───────────────────────────
+//
+// Documented hardware quirk: a $2007 read or write that happens while
+// rendering is enabled, during a visible or pre-render scanline, does NOT use
+// the normal +1/+32 vram_increment() — instead it triggers the same
+// coarse-X-increment + Y-increment pulse the background fetch pipeline itself
+// uses. AccuracyCoin's "$2007 Read w/ Rendering" test pins this to exactly
+// v += $1001 from a starting v with coarse X < 31 and fine Y < 7 (the
+// no-wrap case): +1 from increment_coarse_x, +$1000 from increment_y.
+
+#[test]
+fn ppudata_read_during_rendering_uses_coarse_x_and_y_glitch_increment() {
+    let mut ppu = Ppu::new();
+    tick_to(&mut ppu, 10, 100); // advance to a visible scanline with rendering off
+    ppu.write_register(1, 0x18, None); // enable BG + sprite rendering
+    ppu.write_register(6, 0x20, None); // v = $2000 (coarse X=0, coarse Y=0, fine Y=0)
+    ppu.write_register(6, 0x00, None);
+    let _ = ppu.read_register(7, None);
+    assert_eq!(ppu.v(), 0x2000 + 0x1001);
+}
+
+#[test]
+fn ppudata_write_during_rendering_uses_coarse_x_and_y_glitch_increment() {
+    let mut ppu = Ppu::new();
+    tick_to(&mut ppu, 10, 100);
+    ppu.write_register(1, 0x18, None);
+    ppu.write_register(6, 0x20, None);
+    ppu.write_register(6, 0x00, None);
+    ppu.write_register(7, 0x00, None);
+    assert_eq!(ppu.v(), 0x2000 + 0x1001);
+}
+
+#[test]
+fn ppudata_read_outside_rendering_uses_normal_increment() {
+    let mut ppu = Ppu::new();
+    ppu.write_register(6, 0x20, None); // v = $2000; rendering left disabled
+    ppu.write_register(6, 0x00, None);
+    let _ = ppu.read_register(7, None);
+    assert_eq!(ppu.v(), 0x2001); // normal +1 (PPUCTRL increment-mode bit clear)
+}
+
+#[test]
+fn ppudata_read_during_vblank_uses_normal_increment_even_if_rendering_was_enabled() {
+    let mut ppu = Ppu::new();
+    ppu.write_register(1, 0x18, None); // rendering enabled...
+    tick_to(&mut ppu, 245, 100); // ...but we're in VBlank, not a render scanline
+    ppu.write_register(6, 0x20, None);
+    ppu.write_register(6, 0x00, None);
+    let _ = ppu.read_register(7, None);
+    assert_eq!(ppu.v(), 0x2001);
+}

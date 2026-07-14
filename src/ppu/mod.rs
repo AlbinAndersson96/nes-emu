@@ -467,6 +467,25 @@ impl Ppu {
         }
     }
 
+    /// Advance `v` after a $2007 access, per hardware. Outside rendering (or
+    /// during VBlank), a $2007 read/write does the documented +1/+32
+    /// `vram_increment()`. But a $2007 access during rendering (on a visible
+    /// or pre-render scanline, with rendering enabled) doesn't go through the
+    /// normal increment logic at all — it triggers the same coarse-X-increment
+    /// + Y-increment pulse the background fetch pipeline itself uses,
+    /// regardless of which dot the access lands on. AccuracyCoin's "$2007
+    /// Read w/ Rendering" test pins this to exactly v += $1001 from a
+    /// no-wrap starting v (+1 coarse X, +$1000 fine Y).
+    fn advance_v_after_ppudata_access(&mut self) {
+        let is_render_scanline = self.scanline <= 239 || self.scanline == PRERENDER_SCANLINE;
+        if self.rendering_enabled() && is_render_scanline {
+            self.increment_coarse_x();
+            self.increment_y();
+        } else {
+            self.v = self.v.wrapping_add(self.vram_increment());
+        }
+    }
+
     /// Copy horizontal bits (coarse X + horizontal nametable) from t to v.
     fn copy_t_to_v_horizontal(&mut self) {
         self.v = (self.v & !0x041F) | (self.t & 0x041F);
@@ -886,6 +905,11 @@ impl Ppu {
         self.oam_addr
     }
 
+    /// Current VRAM address (the Loopy `v` register), for tests.
+    pub(crate) fn v(&self) -> u16 {
+        self.v
+    }
+
     /// Read a raw OAM byte by index (0-255), for tests.
     pub(crate) fn oam_byte(&self, i: usize) -> u8 {
         self.oam[i]
@@ -1026,7 +1050,7 @@ impl Ppu {
             // with bits 7-6 coming from the decay register unrefreshed.
             7 => {
                 let addr = self.v;
-                self.v = self.v.wrapping_add(self.vram_increment());
+                self.advance_v_after_ppudata_access();
                 // The access itself puts v on the PPU bus (an A12 rise the
                 // MMC3 observes), then the bus follows the incremented v.
                 self.notify_ppu_bus(cart.as_deref_mut(), addr & 0x3FFF);
@@ -1113,7 +1137,7 @@ impl Ppu {
                 let addr = self.v;
                 self.notify_ppu_bus(cart.as_deref_mut(), addr & 0x3FFF);
                 self.ppu_write(addr, data, cart.as_deref_mut());
-                self.v = self.v.wrapping_add(self.vram_increment());
+                self.advance_v_after_ppudata_access();
                 // Post-increment bus value, as for $2007 reads.
                 self.notify_ppu_bus(cart, self.v & 0x3FFF);
             }
