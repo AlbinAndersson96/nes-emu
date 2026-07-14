@@ -1,10 +1,135 @@
 # AccuracyCoin results
 
-**Status (2026-07-13, branch `worktree-dmc-dma-cycle-accurate` @ `3acd17b`): 100 of the
-141 tests pass** (96 plain passes + 4 pass-with-variant), up from 91 on `develop`.
-`cargo test` remains fully green (312 passed / 0 failed) at every commit in between.
+**Status (2026-07-14, branch `worktree-dmc-dma-cycle-accurate` @ `868b98a` + the
+JSR/RTS silent-cycle fix): 100 of the 141 tests pass**, same raw count as the prior
+session, but the composition shifted — see "Session 2" below before assuming "100" means
+"unchanged". `cargo test` remains fully green (318 passed / 0 failed; +6 over the prior
+session's 312 from the new cycle-accuracy unit tests in `src/tests/cpu.rs`).
 (Page 15, "Power On State", is all `DRAW` tests with no pass/fail verdict and is excluded
 from the 141.)
+
+## Session 2 (2026-07-14): JSR/RTS/RTI/PLA/PLP silent-cycle fix
+
+The prior session identified (but didn't fix) the root cause of most remaining DMA-cluster
+failures: `Apu::dmc_tick_realtime` ticks once per `Bus::read`/`write` call, but JSR, RTS,
+RTI, PLA, and PLP each have 1-2 CPU cycles that previously performed **no** bus access at
+all (silent cycles), so the realtime DMC clock under-counted elapsed time during
+JSR/RTS-heavy code.
+
+**Fix** (TDD: new tests in `src/tests/cpu.rs` — `jsr_bus_access_sequence`,
+`rts_bus_access_sequence`, `rti_bus_access_sequence`, `pla_bus_access_sequence`,
+`plp_bus_access_sequence`, `pha_bus_access_sequence` — assert the exact
+`(address, is_write)` sequence each instruction performs against a new `TestBus.trace`
+log; watched RED, then made GREEN in `src/cpu/instructions.rs`):
+
+- **JSR** reordered to match hardware's real cycle table: fetch ADL, dummy read of
+  `$0100|SP` (hardware's "predecrement S" cycle), push PCH, push PCL, *then* fetch ADH
+  (previously both operand bytes were fetched up front, before the pushes — which also
+  left the wrong byte on open bus after JSR completed).
+- **RTS** gained two dummy reads: `$0100|SP` before the first pop (hardware's "increment
+  S" cycle), and a read of the popped target address itself before the final `+1`
+  (hardware's cycle 6 — distinct from the next instruction's own opcode fetch at target+1).
+- **RTI** gained the same `$0100|SP` dummy read before its first pop.
+- **PLA**/**PLP** gained the same `$0100|SP` dummy read before their pop.
+- **PHA**/**PHP** needed no change — already exactly cycle-accurate (verified by a
+  regression test, `pha_bus_access_sequence`).
+- **BRK** needed no change — its interrupt-sequence micro-ops (`PushPcHi`, `PushPcLo`,
+  `PushP`, `VectorFetch`, `VectorFetchHi`, `src/cpu/mod.rs`) already perform one real bus
+  access per cycle.
+
+Full `cargo test` stayed green throughout (318/0). AccuracyCoin's own README independently
+confirms the JSR reordering was required: "Implied Dummy Reads" error code 4 says *"Or if
+your emulator crashes here, the cycles of JSR are in the wrong order"*, and "JSR Edge
+Cases" error code 2 says *"JSR should push the return address to the stack between reading
+the first and second operand"* — exactly what was fixed.
+
+### Re-swept `DMC_DMA_ALIGNED_PARITY` / `DMC_LOAD_DMA_DELAY`: unchanged
+
+Per the prior session's plan, both constants were re-swept (`DMC_DMA_ALIGNED_PARITY` ∈
+{true, false}, `DMC_LOAD_DMA_DELAY` ∈ {1..5}) against the full AccuracyCoin suite now that
+the realtime clock no longer drifts on JSR/RTS-heavy code. **Neither constant changed**:
+`aligned=false` is decisively worse across the whole sweep (pass count collapses from
+~100 to ~77, since it flips the 3-vs-4-cycle stall choice); `aligned=true` with
+`delay` ∈ {1,2,3,4} all score identically, and `delay=5` ties the best score but by passing
+DMA + $2002 Read's *uncommon* variant ("Load DMA after 3 APU cycles") instead of `delay=3`'s
+*common* NES variant ("Load DMA after 2 APU cycles") — so `delay=3` remains the right
+choice on hardware-accuracy grounds, not just the score. (The fact that the sweep found no
+improvement is itself informative: the silent-cycle fix didn't need recalibration because
+it doesn't change any instruction's *total* cycle count, only which of those cycles are
+real bus accesses — so it shouldn't have shifted DMA alignment for most code, and indeed it
+didn't.)
+
+### Net effect: pass count unchanged (100/141), but composition shifted
+
+Diffing the full results table before/after (same calibration, `aligned=true`/`delay=3`)
+against the prior session's baseline:
+
+**Fixed** (as predicted):
+- `DMA + $4015 Read`: FAIL code 2 → **pass**.
+
+**Newly broken** — a real regression:
+- `DMA + $2007 Write`: pass → **FAIL code 1** ("DMA + $2007 Read did not pass" — a
+  prerequisite-check wording; `DMA + $2007 Read` itself still passes standalone, so this is
+  the same class of issue as `APU Register Activation`'s known *inline rerun* sensitivity
+  below, not a broken prerequisite).
+
+**Newly hanging** — the most significant finding, detailed below:
+- `Implied Dummy Reads`: FAIL code 3 → **NOT-RUN** (never completes; the harness times out
+  at `MAX_CYCLES` = 1.073B).
+- `Branch Dummy Reads`, `JSR Edge Cases`, `Internal Data Bus`: FAIL → **NOT-RUN**, purely as
+  collateral — these run *after* `Implied Dummy Reads` in the ROM's fixed test order
+  (`Suite_CPUBehavior2`: Instruction Timing, Implied Dummy Reads, Branch Dummy Reads, JSR
+  Edge Cases, Internal Data Bus) and the hang prevents the harness from ever reaching them.
+  Their own correctness is simply unknown, not regressed.
+
+**Changed but still failing** (different sub-check reached, netural): `Open Bus` (code 4→7),
+`APU Register Activation` (code 1→4), `Instruction Timing` (code 2→6), `DMC DMA Bus
+Conflicts` (code 2→1, deliberately out of scope), `Implicit`/`Explicit DMA Abort` (code
+1→2, deliberately out of scope).
+
+Net: +1 fixed, -1 regressed (2007W), -4 downgraded from clean-fail to hang (1 direct + 3
+collateral) = same 100/141 raw score as before, worse composition. **The fix itself is
+still correct** — verified independently by the new cycle-exact unit tests, the unchanged
+full blargg regression, and AccuracyCoin's own error-code text (quoted above) confirming
+the old JSR cycle order was wrong. The hang is a *separate*, deeper, unresolved issue in
+how DMC DMA interacts with JSR's now-correct timing during one specific, extraordinarily
+exotic test.
+
+### The `Implied Dummy Reads` hang, investigated (not resolved)
+
+`TEST_ImpliedDummyRead`'s "Test 5" (`AccuracyCoin.asm` ~line 11967, the ROM author's own
+comment: *"Abandon hope all ye who enter here... the most insane assembly code I have ever
+written"*) verifies implied-addressing dummy reads by **executing from open bus**: it
+JSRs to an APU register address (e.g. `$4011`/`$4012`), times a DMC DMA to land exactly so
+the DMA's fetched sample byte ends up as the "opcode" fetched from that open-bus address,
+runs the real opcode under test, whose own T2 dummy-read of `$4015` clears the frame IRQ
+flag, then fetches *another* fake opcode from `$4015` — expected to be `$00`(BRK) or
+`$40`(RTI) depending on which of 11 opcodes is under test, redirecting through a
+`JMP $0600` "software IRQ vector" the test sets up (`$600`=`$4C`,
+`$601`/`$602`=target-lo/hi) to a pass/fail handler.
+
+Instrumented debug runs (temporary prints of `cpu.pc`/`sp`/DMC-channel state, removed
+before committing) show: once stuck, the DMC channel is legitimately idle
+(`loop_flag=false, bytes_remaining=0, sample_buffer=None` — waiting to be re-armed by the
+*next* test iteration's `DMASyncWith48`/`WithA5`, which never comes) while the stack
+pointer **decreases continuously, wrapping around the 256-byte stack repeatedly**, with
+`PC` oscillating through `$0600-$0602` (the `JMP` "vector") for 30M+ cycles before hitting
+the cycle cap. This is consistent with the open-bus-fetched "opcode" landing on something
+*other* than the expected BRK/RTI — most plausibly another JSR — triggering unbounded
+recursion instead of the test's own designed pass/fail path (the ROM author's own
+comment on this exact code path: *"if we fail the test, it will probably crash or
+something. I don't know."*).
+
+This means the DMA-during-JSR interaction still has *some* residual cycle-level
+inaccuracy relative to real hardware, precise enough to matter only in this one
+sub-cycle-exact open-bus trick (no other test — including the two DMA-cluster tests that
+now newly pass — is sensitive enough to catch it). Not root-caused this session; a
+faithful fix likely needs a real-hardware or visual6502-style reference trace of exactly
+which read cycle of a JSR that straddles a DMC DMA request gets intercepted, to confirm
+whether the new dummy-stack-read cycle (JSR's T3) is a valid DMA-halt point at all, or
+whether some other subtlety (open-bus value composition across the halt, DMA-during-a
+push-adjacent-cycle) is off by one. Runs that reach this test now take the full ~70s
+`MAX_CYCLES` timeout instead of finishing in ~5s.
 
 ## How to regenerate these results (no manual runs needed)
 
@@ -70,56 +195,50 @@ DMA + $2007 Read, DMA + $2007 Write, DMA + $4016 Read (variant 2 = Famicom), Int
 Flag Latency, INC $4014** — plus PPU Read Buffer and Scanline-0 Sprites turned out to be
 pass-with-variant all along (the old harness displayed variant bytes as failures).
 
-## Known root cause of most remaining DMA-cluster failures: JSR/RTS silent cycles
+## JSR/RTS silent cycles: FIXED in Session 2 (see above)
 
-The realtime DMC clock (`Apu::dmc_tick_realtime`) is ticked once per `Bus::read`/`write`
-call, on the assumption that every CPU cycle performs a bus access. That assumption is
-false in `src/cpu/instructions.rs`: **JSR performs 5 bus accesses over 6 cycles and RTS
-only 3 over 6** (PHA/PLA/PHP/PLP/RTI/BRK are likely similarly short). Real hardware
-performs a bus read on those cycles too (stack peeks / dummy fetches), and RDY can halt
-the CPU on them.
+This section documented the root-cause analysis before the fix landed; kept for history.
+The realtime DMC clock (`Apu::dmc_tick_realtime`) ticks once per `Bus::read`/`write` call,
+which assumes every CPU cycle performs a bus access. That assumption was false for JSR (5
+bus accesses over 6 cycles), RTS (3 over 6), RTI, PLA, and PLP — all fixed in Session 2.
+Proof of the drift this caused: the tick-stamped trace showed the *same* test
+(DMA + $2007 Read) locking sync→target in 392 ticks when run standalone (passed) but 393
+ticks when re-run inline inside APU Register Activation (failed its pre-check) — identical
+instruction stream, one cycle of drift from the different JSR/RTS history. Fixing it
+resolved exactly one test cleanly (DMA + $4015 Read) and surfaced a deeper, still-unresolved
+DMA-during-JSR timing issue (the `Implied Dummy Reads` hang) — see "Session 2" above.
 
-Consequences: during JSR/RTS-heavy code (AccuracyCoin's clockslides are nested JSR/RTS,
-~40 silent cycles per 432-cycle DMA period) the DMC timer is caught up post-hoc at
-instruction boundaries, so a DMA request that should surface mid-JSR surfaces late and
-the halt drifts ±1 cycle depending on the surrounding code mix. Proof: the tick-stamped
-trace shows the *same* test (DMA + $2007 Read) locking sync→target in 392 ticks when run
-standalone (passes) but 393 ticks when re-run inline inside APU Register Activation
-(fails its pre-check) — identical instruction stream, one cycle of drift from the
-different JSR/RTS history.
+## Remaining failures (37 failing + 4 hung = 41 non-passing), by cluster
 
-**Fix direction for a later session:** model the missing cycles as the real reads
-hardware performs (JSR's internal stack cycle, RTS's dummy fetch / stack increment /
-PC-increment reads, etc.), so every CPU cycle ticks the realtime clock — then re-sweep
-`DMC_DMA_ALIGNED_PARITY` and `DMC_LOAD_DMA_DELAY`, which were calibrated under the
-current drift and may shift. Expect this to fix (at least): APU Register Activation,
-DMA + $4015 Read, Instruction Timing, Implied Dummy Reads, Internal Data Bus, and
-possibly the controller-port tests.
+Codes are the ROM's on-screen error codes; meanings from `README.md`. Table regenerated
+2026-07-14 at the post-Session-2 state (`aligned=true`, `delay=3`).
 
-## Remaining failures (41), by cluster
-
-Codes are the ROM's on-screen error codes; meanings from `README.md`.
-
-### DMC DMA cluster — expected to move with the JSR/RTS silent-cycle fix
+### DMC DMA cluster
 | Test | Code | Meaning |
 |---|---|---|
-| APU Register Activation | 1 | Prerequisite check failed — specifically its *inline rerun* of DMA + $2007 Read (`$50`=1 at failure), the proven ±1-cycle drift case. |
-| DMA + $4015 Read | 2 | Wrong cycle, or halt cycles didn't read $4015 (should clear frame IRQ flag). |
-| Instruction Timing | 2 | Cycle counts / DMA data-bus interaction. |
-| Implied Dummy Reads | 3 | Data bus not updated on DMC DMA, or DMA timing off. |
-| Internal Data Bus | 2 | Open-bus reads across page boundary / DMC DMA timing. |
+| APU Register Activation | 4 | Controllers were clocked by the bus conflict with OAM DMA when they shouldn't have been (or vice versa — see README's success-code table for this test). |
+| Instruction Timing | 6 | Cycle counts / DMA data-bus interaction; progressed past the prior session's code-2 failure. |
 | Delta Modulation Channel | L | Writing $4015 when the DMC timer has 2 cycles until clocked shouldn't trigger the DMA until after the write's 3-4 cycle delay — the load-delay vs timer-edge interaction, finer than the fixed 3-cycle `DMC_LOAD_DMA_DELAY`. |
 | Controller Strobing | 4 | Controllers should not be strobed on put→get transitions (needs cycle-accurate $4016 write phase). |
 | Controller Clocking | 2 | Reading a strobed controller port shouldn't affect shift register contents. |
 | Frame Counter IRQ | 7 | IRQ flag shouldn't clear yet on a get→put transition (frame-counter/$4015-read edge, adjacent to but not the same as the DMA work). |
+| DMA + $2007 Write | 1 | New regression this session — see "Newly broken" above; likely the same inline-rerun sensitivity as APU Register Activation. |
+
+### Hung (never reach a verdict) — the `Implied Dummy Reads` chain, see investigation above
+| Test |
+|---|
+| Implied Dummy Reads |
+| Branch Dummy Reads (collateral — never reached) |
+| JSR Edge Cases (collateral — never reached) |
+| Internal Data Bus (collateral — never reached) |
 
 ### Deliberately out of scope of the DMC-DMA plan (log-only; see plan Global Constraints)
 | Test | Code | Meaning |
 |---|---|---|
-| DMC DMA Bus Conflicts | 2 | APU-register address mirroring during the DMA fetch not modeled. |
+| DMC DMA Bus Conflicts | 1 | APU-register address mirroring during the DMA fetch not modeled. |
 | DMC DMA + OAM DMA | 1 | Overlapping-DMA interleaving not modeled (guarded against instead). |
-| Explicit DMA Abort | 1 | Mid-stall DMA cancellation not modeled. |
-| Implicit DMA Abort | 1 | Mid-stall DMA cancellation not modeled. |
+| Explicit DMA Abort | 2 | Mid-stall DMA cancellation not modeled. |
+| Implicit DMA Abort | 2 | Mid-stall DMA cancellation not modeled. |
 
 ### Sprite Zero Hit cluster (pre-existing; likely one bug cascading into ~11 failures)
 All code 1, and several messages literally read "Sprite Zero Hits should be working":
@@ -129,14 +248,12 @@ ALE + Read, Hybrid Addresses, $2002 flag timing (code 1), OAM Corruption (code 1
 "failed to sync CPU to VBlank at boot"; also the test where manual vs automated runs
 disagreed on `develop`).
 
-### Independent smaller items (pre-existing, unchanged by this branch)
+### Independent smaller items (pre-existing, unrelated to the DMC-DMA/JSR work)
 | Test | Code | Meaning |
 |---|---|---|
-| Open Bus (page 1) | 4 | PC in open bus should execute from floating data bus values; write cycles should update the bus. |
+| Open Bus (page 1) | 7 | PC in open bus should execute from floating data bus values; write cycles should update the bus. |
 | SHA $93/$9F, SHS $9B, SHY $9C, SHX $9E | 1 | Target address of the instruction was not correct (see also `blargg_nes_cpu_test5` SHY/SHX note in CLAUDE.md). |
 | All NOP instructions | 2 | Opcode $0C (NOP Absolute) malfunctioned. |
-| JSR Edge Cases | 2 | JSR should push the return address between reading operand 1 and operand 2 — directly related to the JSR silent-cycle work above. |
-| Branch Dummy Reads | 4 | Cycle 3 of branches should dummy-read the byte after the operand. |
 | Palette RAM Quirks | 6 | Greyscale mode should zero the low 4 bits of reads. |
 | Rendering Flag Behavior | 2 | BG shift registers should clock when only sprites render. |
 | Attributes As Tiles | 1 | Attribute bytes as tile data (scanlines 0-15). |
@@ -145,12 +262,16 @@ disagreed on `develop`).
 | $2004 Stress / $2007 Stress | 2 / 2 | OAMADDR-overflow reads / read-buffer fill timing. |
 | 2002 Flag Clear Timing | 1 | Flags weren't cleared on the correct PPU cycle. |
 
-## Calibration constants (all in code, all swept — re-sweep after the silent-cycle fix)
+## Calibration constants (all in code; re-swept in Session 2, unchanged)
 
 - `DMC_DMA_ALIGNED_PARITY = true` (`src/bus.rs`) — which live parity gets the 3-cycle
-  (vs 4-cycle) stall.
+  (vs 4-cycle) stall. `false` was re-confirmed decisively worse (pass count collapses by
+  ~23 tests).
 - `DMC_LOAD_DMA_DELAY = 3` (`src/bus.rs`) — CPU cycles from a fresh-start $4015 write to
-  the first halt-eligible cycle.
+  the first halt-eligible cycle. Re-swept 1-5; only 3 reproduces DMA + $2002 Read's
+  documented *common* NES variant ("Load DMA after 2 APU cycles") — `delay=5` ties on raw
+  score but only by passing the *uncommon* variant instead, so 3 remains correct on
+  hardware-accuracy grounds.
 - The realtime reseed anchor (`Apu::dmc_tick_realtime`, `cycle_count & 1 == 1`) — must
   stay consistent with `tick_one`'s channel-clock condition (`cycle_count & 1 == 0`
   post-increment).
