@@ -1,9 +1,63 @@
 # AccuracyCoin results
 
-**Status (2026-07-14, branch `worktree-dmc-dma-cycle-accurate`): 108 of the 141 tests
-pass**, up from 105 (Session 4) / 100 (Session 2) / 91 (develop baseline). `cargo test`
-remains fully green (331 passed / 0 failed). (Page 15, "Power On State", is all `DRAW`
-tests with no pass/fail verdict and is excluded from the 141.)
+**Status (2026-07-14, branch `worktree-dmc-dma-cycle-accurate`): 109 of the 141 tests
+pass**, up from 108 (Session 5) / 105 (Session 4) / 100 (Session 2) / 91 (develop
+baseline). `cargo test` remains fully green (332 passed / 0 failed). (Page 15, "Power On
+State", is all `DRAW` tests with no pass/fail verdict and is excluded from the 141.)
+
+## Session 6 (2026-07-14): DMC DMA cluster — one clean win, one reverted attempt
+
+Worked through the DMC DMA cluster (`Controller Strobing`, `Controller Clocking`, `Frame
+Counter IRQ`, and re-confirmed `Delta Modulation Channel`/`APU Register Activation`/
+`Instruction Timing`/`DMA + $2007 Write` as out of scope this session).
+
+**Fixed: `Controller Clocking`.** Real hardware continuously reloads a controller's shift
+register from the live button state while `$4016` bit 0 is held high — a read during that
+window returns the current A-button state directly and never advances (nothing has been
+shifted out yet). `Bus`'s `$4016`/`$4017` read arms always shifted unconditionally. Fixed
+with a new `controller_strobe: bool` field: while set, reads return
+`controller_latch[port] & 1` directly, bypassing the shift register; the shift register is
+reloaded on both the strobe-on write (as before) and the strobe-off write (new — captures
+whichever value was most recently live during the strobed window, not the stale value from
+when strobe first went high). TDD: new `src/tests/bus.rs` test. `cargo test` 331→332/0,
+zero regressions. This one was a genuinely clean win — nothing else in the results table
+moved.
+
+**Attempted and reverted: `Frame Counter IRQ`'s test G (code 7).** The ROM's own
+walkthrough (and suggested implementation) is explicit: reading `$4015` does not clear the
+frame IRQ flag synchronously on the read — the clear is deferred to the next "get" cycle
+strictly after the read cycle (a put-cycle read defers 1 cycle, a get-cycle read defers 2).
+Implemented via a `frame_irq_clear_pending` flag consumed in `Apu::tick_one`, with a
+`FRAME_IRQ_CLEAR_GET_PARITY` constant for the untested "which parity is get" question — and
+confirmed via temporary unit tests that the deferred-clear mechanism itself was correctly
+distinguishable from the old synchronous clear (2 of 3 new tests were meaningful RED/GREEN
+differentiators). **But swept both possible values of the parity constant, and both broke
+`cpu_interrupts_v2/3-nmi_and_irq`** — one of the most precisely hard-won pieces of this
+whole codebase (see `docs/cpu_interrupts.md` and the investigation log it links). Since the
+same test failed identically under both parities, this isn't a wrong-constant problem — the
+deferred-clear model as implemented has a real interaction with the existing
+`APU_READ_PREADVANCE`/interrupt-delivery machinery that I don't understand yet (working
+hypothesis: the 4-cycle pre-advance's debt-repayment accounting may not leave enough
+*subsequent* ticks within the same instruction for the pending clear to fire before
+something else observes stale state — not confirmed). Given the regression risk to
+already-blargg-verified interrupt timing, **reverted entirely** rather than force it
+through by trial and error. Left for a future session with more room to trace the
+interaction properly; not worth attempting without first understanding *why* it breaks,
+not just tuning around the symptom.
+
+**Not attempted this session (assessed, deliberately skipped):**
+- **`Controller Strobing`** (code 4): requires get/put-cycle-parity awareness for `$4016`
+  *writes* specifically — a `DEC $4016` (read-modify-write) performs two writes to the
+  register one cycle apart, and whether the resulting 1-cycle strobe pulse "counts" depends
+  on which CPU/PPU clock phase the final write lands on. The ROM's own cycle-by-cycle
+  walkthrough is detailed but the exact get/put semantics were ambiguous enough on a first
+  read that I didn't trust deriving the parity mapping without either a cleaner reference or
+  the kind of careful sweep-and-verify process that just went wrong on Frame Counter IRQ.
+- **`Delta Modulation Channel`** (code L) and the rest of the remaining DMC DMA cluster
+  (`APU Register Activation`, `Instruction Timing`, `DMA + $2007 Write`): all sit in the
+  same DMC-DMA-precision territory that's repeatedly shown itself entangled with the
+  unresolved `Implied Dummy Reads` chaos across every prior session — not touched this
+  session given the fresh caution from the Frame Counter IRQ revert.
 
 ## Session 5 (2026-07-14): sprite evaluation seeded from OAMADDR; $2004-during-clear
 
@@ -339,20 +393,19 @@ instruction stream, one cycle of drift from the different JSR/RTS history. Fixin
 resolved exactly one test cleanly (DMA + $4015 Read) and surfaced a deeper, still-unresolved
 DMA-during-JSR timing issue (the `Implied Dummy Reads` hang) — see "Session 2" above.
 
-## Remaining failures (29 failing + 4 hung = 33 non-passing), by cluster
+## Remaining failures (28 failing + 4 hung = 32 non-passing), by cluster
 
 Codes are the ROM's on-screen error codes; meanings from `README.md`. Table regenerated
-2026-07-14 at the post-Session-5 state.
+2026-07-14 at the post-Session-6 state.
 
 ### DMC DMA cluster
 | Test | Code | Meaning |
 |---|---|---|
 | APU Register Activation | 4 | Controllers were clocked by the bus conflict with OAM DMA when they shouldn't have been (or vice versa — see README's success-code table for this test). |
 | Instruction Timing | 6 | Cycle counts / DMA data-bus interaction — downstream `Implied Dummy Reads` noise, code has bounced between 2 and 6 across sessions without any change to this cluster's own code. |
-| Delta Modulation Channel | L | Writing $4015 when the DMC timer has 2 cycles until clocked shouldn't trigger the DMA until after the write's 3-4 cycle delay — the load-delay vs timer-edge interaction, finer than the fixed 3-cycle `DMC_LOAD_DMA_DELAY`. |
-| Controller Strobing | 4 | Controllers should not be strobed on put→get transitions (needs cycle-accurate $4016 write phase). |
-| Controller Clocking | 2 | Reading a strobed controller port shouldn't affect shift register contents. |
-| Frame Counter IRQ | 7 | IRQ flag shouldn't clear yet on a get→put transition (frame-counter/$4015-read edge, adjacent to but not the same as the DMA work). |
+| Delta Modulation Channel | L | Writing $4015 when the DMC timer has 2 cycles until clocked shouldn't trigger the DMA until after the write's 3-4 cycle delay — the load-delay vs timer-edge interaction, finer than the fixed 3-cycle `DMC_LOAD_DMA_DELAY`. Not attempted (Session 6) — same territory as the reverted Frame Counter IRQ fix. |
+| Controller Strobing | 4 | Controllers should not be strobed on put→get transitions — needs get/put-cycle-parity awareness for `$4016` *writes* specifically (a `DEC $4016` RMW's two same-cycle-adjacent writes, only one of which "counts" depending on clock phase). Assessed but not attempted (Session 6) — see its note above. |
+| Frame Counter IRQ | 7 | IRQ flag shouldn't clear yet on a get→put transition. Attempted and reverted (Session 6) — both possible parity values broke `cpu_interrupts_v2/3-nmi_and_irq`; needs the interaction with `APU_READ_PREADVANCE` understood before retrying, not just the constant swept. |
 | DMA + $2007 Write | 1 | Session 2 regression — see its "Newly broken" note; likely the same inline-rerun sensitivity as APU Register Activation. |
 
 ### Hung (never reach a verdict) — the `Implied Dummy Reads` chain, unresolved, see Session 2
