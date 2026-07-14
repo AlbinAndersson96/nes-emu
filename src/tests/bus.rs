@@ -20,6 +20,32 @@ fn controller_1_shifts_out_bits_lsb_first_then_returns_open_bus_ones() {
 }
 
 #[test]
+fn controller_read_while_strobed_returns_latch_bit0_continuously() {
+    let mut bus = Bus::new();
+    bus.set_controller_state(0, 0b1011_0100); // bit0 (A) = 0
+    bus.write(0x4016, 1); // strobe high: continuously reload, never shifts
+
+    // Repeated reads while still strobed must all return the same bit,
+    // never advancing through the latched pattern.
+    for _ in 0..5 {
+        assert_eq!(bus.read(0x4016) & 1, 0);
+    }
+
+    // Hardware continuously reloads from the live button state while
+    // strobed, so a change mid-strobe must be reflected on the very next
+    // read (no serial shifting has consumed anything yet).
+    bus.set_controller_state(0, 0b0000_0001); // bit0 (A) = 1
+    assert_eq!(bus.read(0x4016) & 1, 1);
+    assert_eq!(bus.read(0x4016) & 1, 1);
+
+    // Releasing strobe freezes the register at the current latch and
+    // starts serial shifting from there.
+    bus.write(0x4016, 0);
+    assert_eq!(bus.read(0x4016) & 1, 1); // A
+    assert_eq!(bus.read(0x4016) & 1, 0); // B
+}
+
+#[test]
 fn controller_2_reads_from_4017_independently_of_controller_1() {
     let mut bus = Bus::new();
     bus.set_controller_state(0, 0xFF);

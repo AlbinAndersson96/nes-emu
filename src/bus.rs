@@ -38,6 +38,10 @@ pub struct Bus {
     pub apu: Apu,
     controller_latch: [u8; 2],
     controller_shift: [u8; 2],
+    /// True while $4016 bit 0 is held high: both controllers' shift
+    /// registers are continuously reloaded from the live button state, so
+    /// reads return bit 0 of the latch directly and never advance.
+    controller_strobe: bool,
     /// OAM DMA state: set when a write to $4014 triggers a 513/514-cycle DMA.
     oam_dma_active: bool,
     oam_dma_cycles_left: u16,
@@ -84,6 +88,7 @@ impl Bus {
             apu: Apu::new(),
             controller_latch: [0u8; 2],
             controller_shift: [0u8; 2],
+            controller_strobe: false,
             oam_dma_active: false,
             oam_dma_cycles_left: 0,
             oam_dma_len: 0,
@@ -297,13 +302,23 @@ impl Bus {
             // Controllers drive the low bits; bits 5-7 stay at open bus
             // (classically $40 — the operand high byte of the LDA $4016).
             0x4016 => {
-                let bit = self.controller_shift[0] & 0x01;
-                self.controller_shift[0] = (self.controller_shift[0] >> 1) | 0x80;
+                let bit = if self.controller_strobe {
+                    self.controller_latch[0] & 0x01
+                } else {
+                    let bit = self.controller_shift[0] & 0x01;
+                    self.controller_shift[0] = (self.controller_shift[0] >> 1) | 0x80;
+                    bit
+                };
                 (self.cpu_open_bus & 0xE0) | bit
             }
             0x4017 => {
-                let bit = self.controller_shift[1] & 0x01;
-                self.controller_shift[1] = (self.controller_shift[1] >> 1) | 0x80;
+                let bit = if self.controller_strobe {
+                    self.controller_latch[1] & 0x01
+                } else {
+                    let bit = self.controller_shift[1] & 0x01;
+                    self.controller_shift[1] = (self.controller_shift[1] >> 1) | 0x80;
+                    bit
+                };
                 (self.cpu_open_bus & 0xE0) | bit
             }
 
@@ -495,8 +510,15 @@ impl CpuBus for Bus {
             }
 
             0x4016 => {
-                // Controller strobe: reload shift registers while bit 0 is set
-                if data & 0x01 != 0 {
+                // Controller strobe: while bit 0 is held high, the shift
+                // registers are continuously reloaded from the live button
+                // state (reads bypass them entirely — see the 0x4016/0x4017
+                // read arms). Reload once more right as strobe is released,
+                // capturing whichever value was most recently live, then
+                // freeze: subsequent reads shift out from there.
+                let was_strobed = self.controller_strobe;
+                self.controller_strobe = data & 0x01 != 0;
+                if self.controller_strobe || (was_strobed && !self.controller_strobe) {
                     self.controller_shift = self.controller_latch;
                 }
             }
