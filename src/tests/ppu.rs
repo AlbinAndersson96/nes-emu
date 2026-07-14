@@ -601,3 +601,62 @@ fn odd_frame_skip_reduces_dot_count_when_rendering_enabled() {
     tick(&mut ppu, 1);
     assert!(ppu.frame_ready);
 }
+
+// ── OAMADDR reset during sprite fetch (dots 257-320) ──────────────────────────
+//
+// Documented hardware quirk (nesdev "PPU sprite evaluation"): OAMADDR is
+// forced to 0 during ticks 257-320 of every visible and pre-render scanline,
+// while rendering is enabled. Without this, a stale OAMADDR left over from an
+// earlier $2003/$2004 access (e.g. by a previous frame's game code) makes the
+// next $4014 OAM DMA start copying at the wrong OAM slot — the whole 256-byte
+// DMA still runs, but wrapped, so "sprite 0" (OAM bytes 0-3) ends up holding
+// whatever wrapped around to that slot instead of the DMA source's first 4
+// bytes. AccuracyCoin's Sprite0Hit_Behavior test (and several others that
+// share its "Sprite Zero Hits should be working" prerequisite) fail exactly
+// this way when OAMADDR isn't reset.
+
+#[test]
+fn oam_addr_resets_to_zero_during_sprite_fetch_when_rendering() {
+    let mut ppu = Ppu::new();
+    ppu.write_register(3, 5, None); // OAMADDR = 5
+    ppu.write_register(1, 0x18, None); // enable BG + sprite rendering
+    tick_to(&mut ppu, 0, 257); // start of the sprite-fetch window
+    assert_eq!(ppu.oam_addr(), 0);
+}
+
+#[test]
+fn oam_addr_untouched_by_sprite_fetch_window_when_rendering_disabled() {
+    let mut ppu = Ppu::new();
+    ppu.write_register(3, 5, None); // OAMADDR = 5, rendering left disabled
+    tick_to(&mut ppu, 0, 257);
+    assert_eq!(ppu.oam_addr(), 5);
+}
+
+#[test]
+fn oam_dma_after_sprite_fetch_reset_lands_sprite_zero_at_oam_zero() {
+    // Reproduces AccuracyCoin's Sprite0Hit_Behavior setup: OAMADDR left
+    // nonzero by earlier register writes, then a full frame of rendering
+    // passes (forcing OAMADDR back to 0 at dot 257), then the CPU does an
+    // OAM DMA — sprite 0's bytes must land at OAM[0..4], not wrapped
+    // elsewhere.
+    let mut ppu = Ppu::new();
+    ppu.write_register(3, 5, None); // stale OAMADDR from earlier CPU code
+    ppu.write_register(1, 0x18, None); // enable rendering
+    tick_to(&mut ppu, 0, 257); // OAMADDR forced back to 0 here
+    assert_eq!(ppu.oam_addr(), 0);
+    // Simulate the $4014 OAM DMA: 256 bytes, sprite 0 = [Y, CHR, Attr, X].
+    let mut page = [0xFFu8; 256];
+    page[0..4].copy_from_slice(&[0x00, 0xFC, 0x00, 0x08]);
+    for (i, &b) in page.iter().enumerate() {
+        ppu.oam_dma_write(i as u8, b);
+    }
+    assert_eq!(
+        [
+            ppu.oam_byte(0),
+            ppu.oam_byte(1),
+            ppu.oam_byte(2),
+            ppu.oam_byte(3)
+        ],
+        [0x00, 0xFC, 0x00, 0x08]
+    );
+}

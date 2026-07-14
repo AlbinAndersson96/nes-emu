@@ -737,6 +737,14 @@ impl Ppu {
         if self.dot == 257 {
             self.sprite_count = self.sprite_eval_count;
             self.sprite0_in_secondary = self.sprite0_eval;
+            // Hardware quirk: OAMADDR is forced to 0 during ticks 257-320 of
+            // every visible/pre-render scanline while rendering. A CPU write
+            // to $2003 that sets OAMADDR nonzero and is never followed by
+            // another $2003 write before the next rendered frame's sprite
+            // fetch will observe OAMADDR back at 0 — most importantly, a
+            // later $4014 OAM DMA then starts copying at OAM byte 0 instead
+            // of wrapping mid-array.
+            self.oam_addr = 0;
         }
         let idx = ((self.dot - 257) / 8) as usize;
         match (self.dot - 257) % 8 {
@@ -871,6 +879,16 @@ impl Ppu {
     /// Read a raw byte from nametable 0 by tile coordinates (row 0–29, col 0–31).
     pub(crate) fn nt0_tile(&self, row: usize, col: usize) -> u8 {
         self.vram[row * 32 + col]
+    }
+
+    /// Current OAMADDR ($2003), for tests.
+    pub(crate) fn oam_addr(&self) -> u8 {
+        self.oam_addr
+    }
+
+    /// Read a raw OAM byte by index (0-255), for tests.
+    pub(crate) fn oam_byte(&self, i: usize) -> u8 {
+        self.oam[i]
     }
 
     pub fn take_nmi(&mut self) -> bool {
