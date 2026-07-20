@@ -10,6 +10,29 @@ pass**, up from 119 (Session 10) / 118 (Session 9) / 115 (Session 8) / 100 (Sess
 15, "Power On State", is all `DRAW` tests with no pass/fail verdict and is excluded from
 the 141.)
 
+## Stress tests: assessed and decoded (next dedicated sessions)
+
+Both remaining scoped singles were fully decoded from the ROM source; each is a
+dedicated-session effort with a precise oracle:
+
+- **`$2004 Stress` (code 2):** the ROM reads $2004 on EVERY dot of a target scanline
+  (17 stepped reads x 21 frames, tabulated at $500-$654) and compares against two
+  341-byte answer keys (`Test_2004_Stress_AnswerKey1/2`). Needs (a) a per-dot internal
+  "OAM buffer" model: $FF during the clear window (done), the evaluation walk's byte
+  held 2 dots per step (our per-dot eval machine already produces this cadence), the
+  overflow-phase alternation (even dots read secondary OAM back once it's full — the
+  $80 alternation in key 2), the post-eval idle walk (key 1's $03/$XX alternation), the
+  sprite-fetch window's per-slot secondary-OAM reads (Y/tile/attr then X repeated), and
+  secondary[0] during the prefetch tail; and (b) $2004 reads getting the $2002-style
+  8+1-dot pre-advance so the sample lands on the read cycle (watch oam_read/oam_stress).
+  Debugging oracle: dump $500+dot from the harness and diff against the key directly.
+- **`$2007 Stress` (code 2):** the read buffer must be refilled 2 PPU cycles after the
+  CPU read ends, and with rendering enabled it captures whatever the RENDER PIPELINE
+  fetched on that cycle (nametable/pattern/sprite-dummy/end-of-line-dummy fetches) —
+  not an independent VRAM read. Requires reworking the $2007 refill to ride the
+  pipeline's bus activity (adjacent to, but much smaller than, the ALE/octal-latch
+  model), plus the same read-cycle sampling care.
+
 ## Session 11 (2026-07-20): $2002 Flag Timing — split VBL/sprite sampling + set latches
 
 **Fixed: `$2002 Flag Timing` (code 1, then code 2).** Two hardware facts from the ROM's
