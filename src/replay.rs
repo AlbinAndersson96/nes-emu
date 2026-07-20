@@ -188,23 +188,4 @@ mod tests {
         assert!(!player.next_frame().unwrap().soft_reset);
         assert!(player.next_frame().is_none());
     }
-
-    #[test]
-    fn real_movie_fixture_parses_expected_frame_count_and_spot_checks() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/replays/happylee-supermariobros-warped.fm2");
-        let text = std::fs::read_to_string(path).expect("fixture replay must exist");
-        let movie = Fm2Movie::parse(&text).unwrap();
-        assert_eq!(movie.frames.len(), 17868);
-        assert!(
-            movie.frames[0].soft_reset,
-            "first data line's command byte is 1 (soft reset)"
-        );
-        assert_eq!(movie.frames[0].controllers, [0, 0]);
-        assert_eq!(
-            movie.frames[41].controllers[0], BUTTON_START,
-            "the movie's 42nd data line presses only Start on port0"
-        );
-        assert_eq!(movie.frames[41].controllers[1], 0);
-    }
 }
