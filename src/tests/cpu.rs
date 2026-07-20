@@ -888,12 +888,12 @@ fn jsr_bus_access_sequence() {
     assert_eq!(
         bus.trace,
         vec![
-            (0x0200, false),                        // T1 opcode fetch
-            (0x0201, false),                        // T2 fetch ADL
-            (0x0100 | sp as u16, false),             // T3 dummy internal stack read
-            (0x0100 | sp as u16, true),              // T4 push PCH
+            (0x0200, false),                            // T1 opcode fetch
+            (0x0201, false),                            // T2 fetch ADL
+            (0x0100 | sp as u16, false),                // T3 dummy internal stack read
+            (0x0100 | sp as u16, true),                 // T4 push PCH
             (0x0100 | sp.wrapping_sub(1) as u16, true), // T5 push PCL
-            (0x0202, false),                         // T6 fetch ADH
+            (0x0202, false),                            // T6 fetch ADH
         ]
     );
     assert_eq!(cpu.pc, 0x0400);
@@ -911,12 +911,12 @@ fn rts_bus_access_sequence() {
     assert_eq!(
         bus.trace,
         vec![
-            (0x0400, false),                            // T1 opcode fetch
+            (0x0400, false),                             // T1 opcode fetch
             (0x0401, false),                             // T2 dummy fetch of next byte
-            (0x0100 | sp as u16, false),                  // T3 dummy internal S++ read
-            (0x0100 | sp.wrapping_add(1) as u16, false),  // T4 pop PCL
-            (0x0100 | sp.wrapping_add(2) as u16, false),  // T5 pop PCH
-            (0x0202, false),                              // T6 dummy read at popped PC (pre-increment)
+            (0x0100 | sp as u16, false),                 // T3 dummy internal S++ read
+            (0x0100 | sp.wrapping_add(1) as u16, false), // T4 pop PCL
+            (0x0100 | sp.wrapping_add(2) as u16, false), // T5 pop PCH
+            (0x0202, false), // T6 dummy read at popped PC (pre-increment)
         ]
     );
     assert_eq!(cpu.pc, 0x0203);
@@ -995,10 +995,10 @@ fn pla_bus_access_sequence() {
     assert_eq!(
         bus.trace,
         vec![
-            (0x0200, false),                            // T1 opcode fetch
+            (0x0200, false),                             // T1 opcode fetch
             (0x0201, false),                             // T2 dummy fetch of next byte
-            (0x0100 | sp as u16, false),                  // T3 dummy internal S++ read
-            (0x0100 | sp.wrapping_add(1) as u16, false),  // T4 pop A
+            (0x0100 | sp as u16, false),                 // T3 dummy internal S++ read
+            (0x0100 | sp.wrapping_add(1) as u16, false), // T4 pop A
         ]
     );
     assert_eq!(cpu.a, 0x42);
@@ -1084,11 +1084,11 @@ fn rti_bus_access_sequence() {
         bus.trace,
         vec![
             (0x0200, false),                             // T1 opcode fetch
-            (0x0201, false),                              // T2 dummy fetch of next byte
-            (0x0100 | sp as u16, false),                   // T3 dummy internal S++ read
-            (0x0100 | sp.wrapping_add(1) as u16, false),   // T4 pop P
-            (0x0100 | sp.wrapping_add(2) as u16, false),   // T5 pop PCL
-            (0x0100 | sp.wrapping_add(3) as u16, false),   // T6 pop PCH
+            (0x0201, false),                             // T2 dummy fetch of next byte
+            (0x0100 | sp as u16, false),                 // T3 dummy internal S++ read
+            (0x0100 | sp.wrapping_add(1) as u16, false), // T4 pop P
+            (0x0100 | sp.wrapping_add(2) as u16, false), // T5 pop PCL
+            (0x0100 | sp.wrapping_add(3) as u16, false), // T6 pop PCH
         ]
     );
     assert_eq!(cpu.pc, 0x0302);
@@ -1553,4 +1553,235 @@ fn no_stall_leaves_cycle_count_unchanged() {
     bus.mem[0x0201] = 0x42;
     let cycles = cpu.step(&mut bus);
     assert_eq!(cycles, 2);
+}
+
+// ---------------------------------------------------------------------------
+// SHA / SHS(TAS) / SHY / SHX — unstable high-byte stores
+// (AccuracyCoin "behavior 1", the common NES CPU: value = reg & (H+1); on a
+// page cross the write address's high byte BECOMES that value; a DMC DMA
+// halting the dummy-read cycle right before the write drops the & (H+1).)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn shy_no_cross_stores_y_and_h_plus_1_at_effective_addr() {
+    let (mut cpu, mut bus) = make();
+    // SHY $15BB,X with X=0: no cross. Value = Y & ($15+1) = $FF & $16 = $16.
+    w(&mut bus, 0x0200, &[0x9C, 0xBB, 0x15]);
+    cpu.x = 0x00;
+    cpu.y = 0xFF;
+    let cycles = cpu.step(&mut bus);
+    assert_eq!(bus.mem[0x15BB], 0x16);
+    assert_eq!(cycles, 5);
+}
+
+#[test]
+fn shy_page_cross_high_byte_becomes_value() {
+    let (mut cpu, mut bus) = make();
+    // SHY $1E90,X with X=$80 → crosses into $1F10. Value = Y & $1F = $05.
+    // Corrupted address = (value << 8) | lo = $0510 — NOT $1F10, NOT $1E10.
+    w(&mut bus, 0x0200, &[0x9C, 0x90, 0x1E]);
+    cpu.x = 0x80;
+    cpu.y = 0x05;
+    cpu.step(&mut bus);
+    assert_eq!(bus.mem[0x0510], 0x05, "write goes to (value<<8)|lo");
+    assert_eq!(bus.mem[0x1F10], 0x00, "carried effective address untouched");
+    assert_eq!(bus.mem[0x1E10], 0x00, "pre-carry address untouched");
+}
+
+#[test]
+fn shx_page_cross_high_byte_becomes_value() {
+    let (mut cpu, mut bus) = make();
+    // SHX $1E90,Y with Y=$80 → crosses. Value = X & $1F = $05 → addr $0510.
+    w(&mut bus, 0x0200, &[0x9E, 0x90, 0x1E]);
+    cpu.y = 0x80;
+    cpu.x = 0x05;
+    cpu.step(&mut bus);
+    assert_eq!(bus.mem[0x0510], 0x05);
+    assert_eq!(bus.mem[0x1F10], 0x00);
+    assert_eq!(bus.mem[0x1E10], 0x00);
+}
+
+#[test]
+fn sha_abs_y_page_cross_high_byte_becomes_value() {
+    let (mut cpu, mut bus) = make();
+    // SHA $1E90,Y with Y=$80, A=$0D, X=$FF. Value = A & X & $1F = $0D.
+    // Corrupted address = $0D10.
+    w(&mut bus, 0x0200, &[0x9F, 0x90, 0x1E]);
+    cpu.a = 0x0D;
+    cpu.x = 0xFF;
+    cpu.y = 0x80;
+    cpu.step(&mut bus);
+    assert_eq!(bus.mem[0x0D10], 0x0D);
+    assert_eq!(bus.mem[0x1F10], 0x00);
+}
+
+#[test]
+fn sha_ind_y_page_cross_high_byte_becomes_value() {
+    let (mut cpu, mut bus) = make();
+    // SHA ($60),Y — pointer at $60/$61 → base $1EF0; Y=$10 crosses to $1F00.
+    // A=$55, X=$AA: value = $55 & $AA & $1F = $00 → write lands at $0000.
+    w(&mut bus, 0x0200, &[0x93, 0x60]);
+    bus.mem[0x0060] = 0xF0;
+    bus.mem[0x0061] = 0x1E;
+    bus.mem[0x0000] = 0xFF;
+    cpu.a = 0x55;
+    cpu.x = 0xAA;
+    cpu.y = 0x10;
+    let cycles = cpu.step(&mut bus);
+    assert_eq!(
+        bus.mem[0x0000], 0x00,
+        "write goes to $0000 (value $00 as hi)"
+    );
+    assert_eq!(bus.mem[0x1F00], 0x00);
+    assert_eq!(cycles, 6);
+}
+
+#[test]
+fn tas_sets_sp_and_page_cross_high_byte_becomes_value() {
+    let (mut cpu, mut bus) = make();
+    // SHS $1E90,Y with Y=$80, A=$0D, X=$FF: SP = A & X = $0D;
+    // value = SP & $1F = $0D → addr $0D10.
+    w(&mut bus, 0x0200, &[0x9B, 0x90, 0x1E]);
+    cpu.a = 0x0D;
+    cpu.x = 0xFF;
+    cpu.y = 0x80;
+    cpu.step(&mut bus);
+    assert_eq!(cpu.sp, 0x0D);
+    assert_eq!(bus.mem[0x0D10], 0x0D);
+    assert_eq!(bus.mem[0x1F10], 0x00);
+}
+
+#[test]
+fn sh_stores_always_perform_precarry_dummy_read_before_write() {
+    let (mut cpu, mut bus) = make();
+    // SHY $15BB,X with X=0 — no cross, but hardware still performs the cycle-4
+    // dummy read of the (pre-carry == effective) address before the write.
+    w(&mut bus, 0x0200, &[0x9C, 0xBB, 0x15]);
+    cpu.x = 0x00;
+    cpu.y = 0xFF;
+    bus.trace.clear();
+    cpu.step(&mut bus);
+    let expected: Vec<(u16, bool)> = vec![
+        (0x0200, false), // opcode
+        (0x0201, false), // operand lo
+        (0x0202, false), // operand hi
+        (0x15BB, false), // dummy read
+        (0x15BB, true),  // write
+    ];
+    assert_eq!(bus.trace, expected);
+}
+
+/// Bus that pretends a DMC DMA halts the CPU when a chosen address is read
+/// (bumping `dmc_dma_count` the way `Bus::maybe_dmc_dma` does), and/or that
+/// a DMC request rises during a chosen read and stays pending (RDY low,
+/// `dmc_dma_pending` true) afterwards.
+struct DmaOnReadBus {
+    mem: Box<[u8; 65536]>,
+    dma_on_read_of: u16,
+    pending_after_read_of: u16,
+    dma_count: u64,
+    pending: bool,
+}
+
+impl DmaOnReadBus {
+    fn new(dma_on_read_of: u16) -> Self {
+        Self {
+            mem: Box::new([0u8; 65536]),
+            dma_on_read_of,
+            pending_after_read_of: 0xFFFF,
+            dma_count: 0,
+            pending: false,
+        }
+    }
+}
+
+impl crate::cpu::Bus for DmaOnReadBus {
+    fn read(&mut self, addr: u16) -> u8 {
+        if addr == self.dma_on_read_of {
+            self.dma_count += 1;
+        }
+        if addr == self.pending_after_read_of {
+            self.pending = true;
+        }
+        self.mem[addr as usize]
+    }
+    fn write(&mut self, addr: u16, data: u8) {
+        self.mem[addr as usize] = data;
+    }
+    fn dmc_dma_count(&self) -> u64 {
+        self.dma_count
+    }
+    fn dmc_dma_pending(&self) -> bool {
+        self.pending
+    }
+}
+
+#[test]
+fn shy_with_dma_on_dummy_read_becomes_sty() {
+    // AccuracyCoin: "SHY just becomes STY if a DMA occurs on the right cpu
+    // cycle" — a DMC DMA halting the dummy-read cycle immediately before the
+    // write drops the & (H+1); the raw register is stored.
+    let mut cpu = Cpu::new();
+    cpu.pc = 0x0200;
+    let mut bus = DmaOnReadBus::new(0x0500); // halt lands on the dummy read
+    bus.mem[0x0200] = 0x9C; // SHY $0500,X
+    bus.mem[0x0201] = 0x00;
+    bus.mem[0x0202] = 0x05;
+    cpu.x = 0x00;
+    cpu.y = 0xA5;
+    cpu.step(&mut bus);
+    assert_eq!(
+        bus.mem[0x0500], 0xA5,
+        "H isn't part of the equation anymore"
+    );
+}
+
+#[test]
+fn shy_without_dma_masks_with_h_plus_1() {
+    let mut cpu = Cpu::new();
+    cpu.pc = 0x0200;
+    let mut bus = DmaOnReadBus::new(0xFFFF); // DMA never fires
+    bus.mem[0x0200] = 0x9C; // SHY $0500,X
+    bus.mem[0x0201] = 0x00;
+    bus.mem[0x0202] = 0x05;
+    cpu.x = 0x00;
+    cpu.y = 0xA5;
+    cpu.step(&mut bus);
+    assert_eq!(bus.mem[0x0500], 0xA5 & 0x06, "value = Y & (H+1)");
+}
+
+#[test]
+fn shy_with_dma_request_rising_during_dummy_read_also_becomes_sty() {
+    // The request can rise DURING the dummy read itself: the CPU won't halt
+    // until its next read (after the write — writes never halt), but RDY is
+    // already low at the write, which is what corrupts the value on
+    // hardware. Detected via dmc_dma_pending after the dummy read.
+    let mut cpu = Cpu::new();
+    cpu.pc = 0x0200;
+    let mut bus = DmaOnReadBus::new(0xFFFF); // no halt is ever serviced
+    bus.pending_after_read_of = 0x0500; // request rises during the dummy read
+    bus.mem[0x0200] = 0x9C; // SHY $0500,X
+    bus.mem[0x0201] = 0x00;
+    bus.mem[0x0202] = 0x05;
+    cpu.x = 0x00;
+    cpu.y = 0xA5;
+    cpu.step(&mut bus);
+    assert_eq!(bus.mem[0x0500], 0xA5);
+}
+
+#[test]
+fn shy_with_dma_on_operand_hi_fetch_keeps_mask() {
+    // A halt serviced ON the operand-high fetch means the request rose even
+    // earlier — the DMA completes and RDY is high again by the dummy read,
+    // so the value is still masked with (H+1).
+    let mut cpu = Cpu::new();
+    cpu.pc = 0x0200;
+    let mut bus = DmaOnReadBus::new(0x0202); // halt lands on operand-hi fetch
+    bus.mem[0x0200] = 0x9C; // SHY $0500,X
+    bus.mem[0x0201] = 0x00;
+    bus.mem[0x0202] = 0x05;
+    cpu.x = 0x00;
+    cpu.y = 0xA5;
+    cpu.step(&mut bus);
+    assert_eq!(bus.mem[0x0500], 0xA5 & 0x06);
 }

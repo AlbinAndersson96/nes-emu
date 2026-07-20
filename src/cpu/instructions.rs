@@ -1206,83 +1206,92 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, opcode: u8) -> u8 {
             4 + p as u8
         }
 
-        // --- Unstable high-byte store opcodes ---
-        // On the real 6502, when a page cross would occur, these instructions
-        // write to the PRE-CARRY address (addr_hi, lo+index) rather than the
-        // corrected effective address. Value stored is reg & (addr_hi + 1).
+        // --- Unstable high-byte store opcodes (SHA/SHX/SHY/TAS) ---
+        // AccuracyCoin "behavior 1", the common NES CPU (verified against its
+        // UnOp_SHA/SHS/SHY/SHX tests, which distinguish the manufacturer
+        // variants): value = reg & (base_hi + 1); when the index crosses a
+        // page, the write address's high byte BECOMES that value (not the
+        // pre-carry high byte, not the carried one). A DMC DMA halting the
+        // dummy-read cycle right before the write drops the & (base_hi + 1)
+        // entirely — see sh_store.
 
-        // SHA (ind),Y — value = A & X & (base_hi + 1), write to effective addr
+        // SHA (ind),Y — value = A & X & (base_hi + 1)
         0x93 => {
-            let (a, p) = cpu.addr_indirect_y(bus);
-            let addr_hi = if p {
-                (a >> 8) as u8 - 1
-            } else {
-                (a >> 8) as u8
-            };
-            let v = cpu.a & cpu.x & addr_hi.wrapping_add(1);
-            cpu.write(bus, a, v);
+            let ptr = cpu.fetch(bus) as u16;
+            let lo = bus.read(ptr) as u16;
+            let hi = bus.read(ptr.wrapping_add(1) & 0x00FF) as u16;
+            let base = (hi << 8) | lo;
+            let mask = cpu.a & cpu.x;
+            sh_store(cpu, bus, base, cpu.y, mask);
             6
         }
-        // SHY abs,X — value = Y & (operand_hi + 1); on page cross write to pre-carry addr
+        // SHY abs,X — value = Y & (base_hi + 1)
         0x9C => {
-            let (a, p) = cpu.addr_absolute_x(bus);
-            let operand_hi = if p {
-                (a >> 8) as u8 - 1
-            } else {
-                (a >> 8) as u8
-            };
-            let v = cpu.y & operand_hi.wrapping_add(1);
-            let write_addr = if p {
-                ((operand_hi as u16) << 8) | (a & 0x00FF)
-            } else {
-                a
-            };
-            cpu.write(bus, write_addr, v);
+            let base = cpu.fetch_u16(bus);
+            sh_store(cpu, bus, base, cpu.x, cpu.y);
             5
         }
-        // SHX abs,Y — value = X & (operand_hi + 1); on page cross write to pre-carry addr
+        // SHX abs,Y — value = X & (base_hi + 1)
         0x9E => {
-            let (a, p) = cpu.addr_absolute_y(bus);
-            let operand_hi = if p {
-                (a >> 8) as u8 - 1
-            } else {
-                (a >> 8) as u8
-            };
-            let v = cpu.x & operand_hi.wrapping_add(1);
-            let write_addr = if p {
-                ((operand_hi as u16) << 8) | (a & 0x00FF)
-            } else {
-                a
-            };
-            cpu.write(bus, write_addr, v);
+            let base = cpu.fetch_u16(bus);
+            sh_store(cpu, bus, base, cpu.y, cpu.x);
             5
         }
-        // SHA abs,Y — write to effective addr
+        // SHA abs,Y — value = A & X & (base_hi + 1)
         0x9F => {
-            let (a, p) = cpu.addr_absolute_y(bus);
-            let addr_hi = if p {
-                (a >> 8) as u8 - 1
-            } else {
-                (a >> 8) as u8
-            };
-            let v = cpu.a & cpu.x & addr_hi.wrapping_add(1);
-            cpu.write(bus, a, v);
+            let base = cpu.fetch_u16(bus);
+            let mask = cpu.a & cpu.x;
+            sh_store(cpu, bus, base, cpu.y, mask);
             5
         }
-        // TAS abs,Y — SP = A & X; write to effective addr
+        // TAS (SHS) abs,Y — SP = A & X; value = SP & (base_hi + 1)
         0x9B => {
-            let (a, p) = cpu.addr_absolute_y(bus);
-            let addr_hi = if p {
-                (a >> 8) as u8 - 1
-            } else {
-                (a >> 8) as u8
-            };
+            let base = cpu.fetch_u16(bus);
             cpu.sp = cpu.a & cpu.x;
-            let v = cpu.sp & addr_hi.wrapping_add(1);
-            cpu.write(bus, a, v);
+            let mask = cpu.sp;
+            sh_store(cpu, bus, base, cpu.y, mask);
             5
         }
     }
+}
+
+/// Shared tail of the unstable high-byte stores (SHA/SHX/SHY/TAS): the
+/// unconditional pre-carry dummy read (these are fixed 5/6-cycle stores — the
+/// cycle-4 read happens whether or not a page is crossed, like every indexed
+/// store), the value computation, and the corrupted-high-byte write.
+///
+/// `reg_mask` is the register part of the value (A&X for SHA/TAS, X for SHX,
+/// Y for SHY). The stored value is `reg_mask & (base_hi + 1)` — unless RDY
+/// was low during the dummy-read cycle immediately before the write, in
+/// which case the & is dropped and the raw register is stored (AccuracyCoin:
+/// "SHY just becomes STY if a DMA occurs on the right cpu cycle"; its
+/// sub-tests time RDY to go low 2 cycles before the write, so it is low
+/// through the dummy read). RDY-low during that cycle shows up in one of two
+/// ways: a DMC DMA was serviced ON the dummy read itself (`dmc_dma_count`
+/// bumped — the request rose one cycle earlier), or the request rose DURING
+/// the dummy read and is still pending afterwards (`dmc_dma_pending` — the
+/// CPU won't halt until its next read, after the write, but RDY is already
+/// low at the write and corrupts the value on hardware). On a page cross the
+/// write address's high byte is replaced by the stored value.
+fn sh_store(cpu: &mut Cpu, bus: &mut dyn Bus, base: u16, index: u8, reg_mask: u8) {
+    let addr = base.wrapping_add(index as u16);
+    let lo = addr & 0x00FF;
+    let crossed = (base & 0xFF00) != (addr & 0xFF00);
+    let precarry = (base & 0xFF00) | lo;
+    let dma_before = bus.dmc_dma_count();
+    let _ = bus.read(precarry);
+    let rdy_low = bus.dmc_dma_count() != dma_before || bus.dmc_dma_pending();
+    let value = if rdy_low {
+        reg_mask
+    } else {
+        reg_mask & ((base >> 8) as u8).wrapping_add(1)
+    };
+    let write_addr = if crossed {
+        (u16::from(value) << 8) | lo
+    } else {
+        addr
+    };
+    cpu.write(bus, write_addr, value);
 }
 
 // ---------------------------------------------------------------------------

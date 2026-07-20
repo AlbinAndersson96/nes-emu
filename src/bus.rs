@@ -55,6 +55,9 @@ pub struct Bus {
     /// Guards against the DMC-DMA halt/fetch sequence's own nested `read`
     /// calls re-triggering DMA arming.
     dmc_dma_in_progress: bool,
+    /// Monotonic count of DMC DMAs serviced in-line (see
+    /// `CpuBus::dmc_dma_count` — the SH* opcodes' halt-on-dummy-read quirk).
+    dmc_dma_serviced: u64,
     /// Countdown (in CPU cycles) before an enable-started DMC load DMA may
     /// halt the CPU; see DMC_LOAD_DMA_DELAY.
     dmc_load_delay: u8,
@@ -96,6 +99,7 @@ impl Bus {
             oam_dma_byte_idx: 0,
             dma_stall_extra_cycles: 0,
             dmc_dma_in_progress: false,
+            dmc_dma_serviced: 0,
             dmc_load_delay: 0,
             ppu_preadvance_cycles: 0,
             ppu_preadvance_nmi: false,
@@ -415,6 +419,7 @@ impl Bus {
             return;
         }
         self.dmc_dma_in_progress = true;
+        self.dmc_dma_serviced += 1;
         let aligned = self.apu.dmc_realtime_current_parity() == DMC_DMA_ALIGNED_PARITY;
         let halt_cycles = if aligned { 2 } else { 3 };
         if std::env::var_os("TRACE_DMC_DMA").is_some() {
@@ -552,5 +557,19 @@ impl CpuBus for Bus {
         let n = self.dma_stall_extra_cycles;
         self.dma_stall_extra_cycles = 0;
         n
+    }
+
+    fn dmc_dma_count(&self) -> u64 {
+        self.dmc_dma_serviced
+    }
+
+    fn dmc_dma_pending(&self) -> bool {
+        // Mirrors maybe_dmc_dma's halt-eligibility gates: an asserted DMC
+        // fetch request that the next CPU read WILL halt for (RDY is already
+        // low), just not serviced yet.
+        !self.dmc_dma_in_progress
+            && !self.oam_dma_active
+            && self.dmc_load_delay == 0
+            && self.apu.dmc_needs_dma()
     }
 }

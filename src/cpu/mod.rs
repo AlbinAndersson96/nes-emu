@@ -639,6 +639,27 @@ pub trait Bus {
     fn take_dma_stall_cycles(&mut self) -> u32 {
         0
     }
+
+    /// Monotonic count of DMC DMAs serviced in-line by reads so far. The
+    /// unstable SH* store opcodes (SHA/SHX/SHY/TAS) snapshot this around
+    /// their dummy-read cycle: a DMA halting that exact cycle (right before
+    /// the write) drops the & (H+1) from the stored value on real hardware
+    /// (AccuracyCoin: "SHY just becomes STY if a DMA occurs on the right cpu
+    /// cycle"). Buses without in-line DMA use the default of 0 (never fires).
+    fn dmc_dma_count(&self) -> u64 {
+        0
+    }
+
+    /// True when a DMC DMA request is currently asserted and halt-eligible
+    /// (RDY is low) but hasn't been serviced yet — because the request rose
+    /// on this very cycle, or the CPU is mid-write run where no read can
+    /// halt. The SH* stores check this right after their dummy read: RDY
+    /// going low during that cycle corrupts the value written on the next
+    /// cycle even though the CPU itself only halts at its next read, after
+    /// the write. Default: never pending.
+    fn dmc_dma_pending(&self) -> bool {
+        false
+    }
 }
 
 fn page_crossed(a: u16, b: u16) -> bool {
