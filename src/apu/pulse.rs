@@ -43,7 +43,7 @@ impl PulseChannel {
         match reg {
             0 => {
                 self.duty = (data >> 6) & 0x03;
-                self.length.halt = data & 0x20 != 0;
+                self.length.schedule_halt(data & 0x20 != 0);
                 self.envelope.write(data);
             }
             1 => self.sweep.write(data),
@@ -52,9 +52,7 @@ impl PulseChannel {
             }
             3 => {
                 self.timer_period = (self.timer_period & 0x00FF) | (u16::from(data & 0x07) << 8);
-                if self.enabled {
-                    self.length.load(data >> 3);
-                }
+                self.length.schedule_load(data >> 3);
                 self.envelope.restart();
                 self.duty_pos = 0;
             }
@@ -88,6 +86,12 @@ impl PulseChannel {
     pub fn clock_length_and_sweep(&mut self) {
         self.length.clock();
         self.sweep.clock(&mut self.timer_period);
+    }
+
+    /// Per-CPU-cycle tick (after frame-counter events): applies pending
+    /// halt/reload writes on their real write cycle.
+    pub fn end_cycle(&mut self) {
+        self.length.end_cycle(self.enabled);
     }
 
     pub fn length_active(&self) -> bool {

@@ -1,4 +1,5 @@
 mod accuracycoin;
+mod apu_2005_roms;
 mod bus;
 mod cartridge;
 mod cpu;

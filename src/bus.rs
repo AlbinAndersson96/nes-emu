@@ -168,6 +168,18 @@ impl Bus {
         self.cartridge = Some(cartridge);
     }
 
+    /// Warm reset (Reset button) side effects outside the CPU itself.
+    /// Call alongside `Cpu::warm_reset`. Currently only the APU has
+    /// documented reset behavior we model (see `Apu::warm_reset`); RAM,
+    /// the PPU, and controllers are untouched, as on hardware.
+    ///
+    /// Like `Cpu::warm_reset`, only exercised by the `$81`-status handling
+    /// in the ROM test harness — no in-app Reset-button UI exists yet.
+    #[allow(dead_code)]
+    pub fn warm_reset(&mut self) {
+        self.apu.warm_reset();
+    }
+
     /// Consume pre-advanced PPU cycles and any NMI that fired during a $2002 read.
     /// Returns `(cycles_already_advanced, nmi_pending)`. The run loop must subtract
     /// `cycles_already_advanced` from its post-tick `tick_ppu` call and deliver the

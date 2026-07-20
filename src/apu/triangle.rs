@@ -44,18 +44,21 @@ impl TriangleChannel {
     pub fn write_reg(&mut self, reg: u8, data: u8) {
         match reg {
             0 => {
+                // The length-halt aspect of the control bit is deferred to the
+                // real write cycle like the other channels' halt bits; the
+                // linear-counter aspect (and reload value) stays immediate —
+                // nothing currently pins its sub-cycle timing, and deferring it
+                // would entangle the quarter-frame reload path.
                 self.control_flag = data & 0x80 != 0;
                 self.linear_reload_value = data & 0x7F;
-                self.length.halt = self.control_flag;
+                self.length.schedule_halt(self.control_flag);
             }
             2 => {
                 self.timer_period = (self.timer_period & 0xFF00) | u16::from(data);
             }
             3 => {
                 self.timer_period = (self.timer_period & 0x00FF) | (u16::from(data & 0x07) << 8);
-                if self.enabled {
-                    self.length.load(data >> 3);
-                }
+                self.length.schedule_load(data >> 3);
                 self.linear_reload_flag = true;
             }
             _ => {}
@@ -96,6 +99,12 @@ impl TriangleChannel {
     /// Half-frame clock (120 Hz) — clocks the length counter.
     pub fn clock_length(&mut self) {
         self.length.clock();
+    }
+
+    /// Per-CPU-cycle tick (after frame-counter events): applies pending
+    /// halt/reload writes on their real write cycle.
+    pub fn end_cycle(&mut self) {
+        self.length.end_cycle(self.enabled);
     }
 
     pub fn length_active(&self) -> bool {
