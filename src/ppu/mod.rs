@@ -25,6 +25,13 @@ const PRERENDER_SCANLINE: u16 = 261;
 /// original investigation.)
 const SPRITE0_HIT_LATCH_DOTS: u8 = 1;
 
+/// The SET path's visibility latch is one dot longer than the clear's:
+/// AccuracyCoin's "$2002 Flag Timing" set-timing sub-test (bracketing the
+/// hit/overflow set moment with consecutive-dot reads) needs the flags one
+/// dot later than the clear-timing sub-test allows for the pre-render clear
+/// — still inside blargg sprite_hit_tests' 0-2 valid window.
+const SPRITE0_HIT_SET_LATCH_DOTS: u8 = 2;
+
 /// Dots between the Bus applying a $2001 write (which its pre-advance lands
 /// at the write cycle) and the mask value actually taking effect. Hardware
 /// applies rendering toggles 2-5 dots after the write cycle depending on PPU
@@ -71,6 +78,13 @@ pub struct Ppu {
     // value and remaining countdown; the flag flips when it expires. See
     // docs/investigations/sprite_hit_timing_debug_log.md.
     sprite0_hit_pending: Option<(bool, u8)>,
+    /// Same visibility latch for the sprite-overflow flag's SET path (the
+    /// pre-render clear stays immediate): the evaluation state machine finds
+    /// the 9th in-range sprite mid-dot, but the flag reaches $2002 one dot
+    /// later — AccuracyCoin's "$2002 Flag Timing" set-timing sub-test pins
+    /// the order: a straddling read may see the sprite-0 hit without the
+    /// overflow flag, never the reverse.
+    sprite_overflow_set_pending: Option<u8>,
 
     // ── NMI line + CPU-side edge detector ────────────────────────────────────
     // The NMI line is a LEVEL: `vblank && (ctrl & 0x80)`. The CPU's edge
@@ -226,6 +240,7 @@ impl Ppu {
             vblank: false,
             sprite0_hit: false,
             sprite0_hit_pending: None,
+            sprite_overflow_set_pending: None,
             sprite_overflow: false,
             nmi_pending: false,
             prev_nmi_line: false,
@@ -331,6 +346,7 @@ impl Ppu {
                 self.vblank = false;
                 self.sprite0_hit_pending = Some((false, SPRITE0_HIT_LATCH_DOTS));
                 self.sprite_overflow = false;
+                self.sprite_overflow_set_pending = None;
             }
             _ => {}
         }
@@ -344,6 +360,14 @@ impl Ppu {
                 self.sprite0_hit_pending = None;
             } else {
                 self.sprite0_hit_pending = Some((target, n - 1));
+            }
+        }
+        if let Some(n) = self.sprite_overflow_set_pending {
+            if n <= 1 {
+                self.sprite_overflow = true;
+                self.sprite_overflow_set_pending = None;
+            } else {
+                self.sprite_overflow_set_pending = Some(n - 1);
             }
         }
 
@@ -820,7 +844,7 @@ impl Ppu {
             // Buggy overflow scan: OAM[n][m] is treated as a Y coordinate.
             let y = self.oam[self.eval_n * 4 + self.eval_m];
             if in_range(y) {
-                self.sprite_overflow = true;
+                self.sprite_overflow_set_pending = Some(2);
                 self.eval_overflow_reads = 3;
             } else {
                 self.eval_n += 1;
@@ -996,7 +1020,7 @@ impl Ppu {
             && !self.sprite0_hit
             && self.sprite0_hit_pending.is_none()
         {
-            self.sprite0_hit_pending = Some((true, SPRITE0_HIT_LATCH_DOTS));
+            self.sprite0_hit_pending = Some((true, SPRITE0_HIT_SET_LATCH_DOTS));
         }
 
         // Priority multiplexer
@@ -1042,6 +1066,24 @@ impl Ppu {
     /// Background pattern shift registers, for tests (lo plane, hi plane).
     pub(crate) fn bg_shifters(&self) -> (u16, u16) {
         (self.bg_shift_lo, self.bg_shift_hi)
+    }
+
+    /// Recompute bits 6-5 (sprite-0 hit, sprite overflow) of a just-read
+    /// $2002 value from the CURRENT flag state, refreshing those open-bus
+    /// bits. The Bus calls this one dot after the register read proper:
+    /// hardware samples the sprite flags at the end of the read cycle,
+    /// ~2 dots after the VBL flag's start-of-cycle latch (AccuracyCoin
+    /// "$2002 Flag Timing").
+    pub fn resample_sprite_flags(&mut self, value: u8) -> u8 {
+        let mut v = value & !0x60;
+        if self.sprite0_hit {
+            v |= 0x40;
+        }
+        if self.sprite_overflow {
+            v |= 0x20;
+        }
+        self.refresh_open_bus(v, 0x60);
+        v
     }
 
     /// Current VRAM address (the Loopy `v` register), for tests.

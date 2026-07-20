@@ -9,7 +9,7 @@
 //! (`RunningAllTests` at $35 goes 0 -> 1 -> 0), and dumps every result.
 //!
 //! `#[ignore]`d because it takes minutes of emulated time and its verdicts
-//! are tracked in `tests/roms/AccuracyCoin/outcome.md` rather than asserted:
+//! are tracked in `docs/accuracycoin_outcome.md` rather than asserted:
 //! run with `cargo test accuracycoin -- --ignored --nocapture`.
 
 use std::path::PathBuf;
