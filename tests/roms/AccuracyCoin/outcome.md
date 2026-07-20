@@ -1,10 +1,22 @@
 # AccuracyCoin results
 
-**Status (2026-07-20, branch `claude/standout-issues-next-jplv6h`): 118 of the 141 tests
-pass**, up from 115 (Session 8) / 113 (Session 7) / 109 (Session 6) / 100 (Session 2) /
-91 (develop baseline). `cargo test` remains fully green (376 passed / 0 failed). (Page
+**Status (2026-07-20, branch `claude/standout-issues-next-jplv6h`): 119 of the 141 tests
+pass**, up from 118 (Session 9) / 115 (Session 8) / 113 (Session 7) / 100 (Session 2) /
+91 (develop baseline). `cargo test` remains fully green (378 passed / 0 failed). (Page
 15, "Power On State", is all `DRAW` tests with no pass/fail verdict and is excluded from
 the 141.)
+
+## Session 10 (2026-07-20): Open Bus — $4015 reads don't drive the external data bus
+
+**Fixed: `Open Bus` (code 7).** The `$4015` status byte is internal to the 2A03; a read
+never touches the external data bus, so the CPU open-bus latch keeps its previous value
+(the ROM's test 7: `LDA $40FF,X` with X=$16 dummy-reads `$4015` on the page cross, and
+the following read of unmapped `$4115` must still return the `$40` operand byte). Both
+`Bus` read paths (`CpuBus::read` and the DMC-DMA `read_live`) now skip the latch update
+for `$4015`; writes to `$4015` still drive the bus (test 8), and bit 5 of a `$4015`
+read remains open bus (test 9) — both already correct. 2 new bus unit tests. Zero
+movement anywhere else in the table; `cpu_exec_space_apu` (executing from open bus)
+stayed green.
 
 ## Session 9 (2026-07-20): sprite counter/shifter pipeline + the $2001 two-tap delay
 
@@ -527,10 +539,10 @@ instruction stream, one cycle of drift from the different JSR/RTS history. Fixin
 resolved exactly one test cleanly (DMA + $4015 Read) and surfaced a deeper, still-unresolved
 DMA-during-JSR timing issue (the `Implied Dummy Reads` hang) — see "Session 2" above.
 
-## Remaining failures (19 failing + 4 hung = 23 non-passing), by cluster
+## Remaining failures (18 failing + 4 hung = 22 non-passing), by cluster
 
 Codes are the ROM's on-screen error codes; meanings from `README.md`. Table regenerated
-2026-07-20 at the post-Session-9 state.
+2026-07-20 at the post-Session-10 state.
 
 ### DMC DMA cluster
 | Test | Code | Meaning |
@@ -586,12 +598,11 @@ bus model, comparable effort/risk to `OAM Corruption` above).
 ### Independent smaller items (pre-existing, unrelated to the DMC-DMA/JSR/OAMADDR/$2007 work)
 | Test | Code | Meaning |
 |---|---|---|
-| Open Bus (page 1) | 7 | PC in open bus should execute from floating data bus values; write cycles should update the bus. |
 | $2004 Stress / $2007 Stress | 2 / 2 | OAMADDR-overflow reads / read-buffer fill timing. |
 | 2002 Flag Clear Timing | 1 | Flags weren't cleared on the correct PPU cycle. |
 
 (`All NOP instructions` and `Palette RAM Quirks` fixed in Session 8; `Stale BG/Sprite
-Shift Registers` and `BG Serial In` fixed in Session 9.)
+Shift Registers` and `BG Serial In` fixed in Session 9; `Open Bus` fixed in Session 10.)
 
 ## Calibration constants (all in code; re-swept in Session 2, unchanged)
 
