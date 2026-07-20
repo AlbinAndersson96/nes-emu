@@ -540,9 +540,15 @@ impl Ppu {
     }
 
     /// Shift the background shift registers left by one bit.
+    ///
+    /// Serial input (AccuracyCoin "BG Serial In", confirmed by its own
+    /// walkthrough): the LOW bit plane shifts in 0, the HIGH bit plane
+    /// shifts in 1 — observable by skipping the dot%8==1 reload with a
+    /// precisely timed rendering disable/re-enable, which then draws the
+    /// shifted-in bits as solid color %10 pixels.
     fn shift_bg_shifters(&mut self) {
         self.bg_shift_lo <<= 1;
-        self.bg_shift_hi <<= 1;
+        self.bg_shift_hi = (self.bg_shift_hi << 1) | 1;
         self.bg_shift_attr_lo <<= 1;
         self.bg_shift_attr_hi <<= 1;
     }
@@ -933,6 +939,11 @@ impl Ppu {
         self.oam_addr
     }
 
+    /// Background pattern shift registers, for tests (lo plane, hi plane).
+    pub(crate) fn bg_shifters(&self) -> (u16, u16) {
+        (self.bg_shift_lo, self.bg_shift_hi)
+    }
+
     /// Current VRAM address (the Loopy `v` register), for tests.
     pub(crate) fn v(&self) -> u16 {
         self.v
@@ -1104,10 +1115,14 @@ impl Ppu {
                 // MMC3 observes), then the bus follows the incremented v.
                 self.notify_ppu_bus(cart.as_deref_mut(), addr & 0x3FFF);
                 let value = if addr & 0x3FFF >= 0x3F00 {
-                    // Palette: return immediately; refresh buffer from nametable behind palette
+                    // Palette: return immediately; refresh buffer from nametable behind palette.
+                    // Greyscale mode (PPUMASK bit 0) zeroes the low 4 bits of
+                    // palette READS — storage is unaffected, writes land
+                    // unmasked (AccuracyCoin "Palette RAM Quirks" codes 6-7).
                     self.read_buf = self.ppu_read(addr & 0x2FFF, cart.as_deref_mut());
+                    let palette_mask = if self.mask & 0x01 != 0 { 0x30 } else { 0x3F };
                     let value = (self.open_bus() & 0xC0)
-                        | (self.ppu_read(addr, cart.as_deref_mut()) & 0x3F);
+                        | (self.ppu_read(addr, cart.as_deref_mut()) & palette_mask);
                     self.refresh_open_bus(value, 0x3F);
                     value
                 } else {

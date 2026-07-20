@@ -848,21 +848,27 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, opcode: u8) -> u8 {
             2
         }
 
-        // DOP — 2-byte NOPs (zero page)
+        // DOP — 2-byte NOPs (zero page) — the target read is real (1 bus
+        // access per cycle; observable side effects on I/O addresses)
         0x04 | 0x44 | 0x64 => {
-            cpu.addr_zero_page(bus);
+            let (a, _) = cpu.addr_zero_page(bus);
+            let _ = cpu.read(bus, a);
             3
         }
 
         // DOP — 2-byte NOPs (zero page,X)
         0x14 | 0x34 | 0x54 | 0x74 | 0xD4 | 0xF4 => {
-            cpu.addr_zero_page_x(bus);
+            let (a, _) = cpu.addr_zero_page_x(bus);
+            let _ = cpu.read(bus, a);
             4
         }
 
-        // TOP — 3-byte NOP (absolute)
+        // TOP — 3-byte NOP (absolute) — the target read is real: AccuracyCoin
+        // "All NOPs" executes NOP $3AEA (a $2002 mirror) and requires the
+        // VBlank flag to be cleared by it
         0x0C => {
-            cpu.addr_absolute(bus);
+            let (a, _) = cpu.addr_absolute(bus);
+            let _ = cpu.read(bus, a);
             4
         }
 

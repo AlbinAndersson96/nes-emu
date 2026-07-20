@@ -842,3 +842,94 @@ fn oamdata_read_during_dots_1_64_with_rendering_disabled_returns_real_oam_value(
     tick_to(&mut ppu, 0, 30);
     assert_eq!(ppu.read_register(4, None), 0x5A);
 }
+
+#[test]
+fn greyscale_mode_masks_ppudata_palette_reads() {
+    // AccuracyCoin "Palette RAM Quirks" code 6: with greyscale enabled, the
+    // low 4 bits of a $2007 palette READ are zero (writes stay unaffected —
+    // the mask is applied on the read path, not in storage).
+    let mut ppu = Ppu::new();
+    ppu.write_register(1, 0x01, None); // greyscale only — no rendering
+    ppu.write_register(6, 0x3F, None);
+    ppu.write_register(6, 0x01, None);
+    ppu.write_register(7, 0x2A, None); // palette $3F01 = $2A
+
+    // Point v back at $3F01 and read it with greyscale on.
+    ppu.write_register(6, 0x3F, None);
+    ppu.write_register(6, 0x01, None);
+    let read = ppu.read_register(7, None);
+    assert_eq!(read & 0x3F, 0x20, "$2A & $30 = $20 with greyscale on");
+
+    // Greyscale off: same read returns the full 6-bit value.
+    ppu.write_register(1, 0x00, None);
+    ppu.write_register(6, 0x3F, None);
+    ppu.write_register(6, 0x01, None);
+    let read = ppu.read_register(7, None);
+    assert_eq!(read & 0x3F, 0x2A, "stored value was never masked");
+}
+
+// ── Background shift register serial input ──────────────────────────────────
+
+#[test]
+fn bg_shifters_shift_in_zero_low_plane_one_high_plane() {
+    // AccuracyCoin "BG Serial In": when the background shift registers shift,
+    // the low bit plane brings in a 0 and the high bit plane brings in a 1.
+    let mut ppu = Ppu::new();
+    ppu.write_register(1, 0x08, None); // enable background rendering
+
+    // Land mid-tile on a visible scanline: the dot%8==1 reload replaced the
+    // low byte a few dots ago, and every shift since brought in the serial
+    // bits (pattern fetches read 0 with no cartridge).
+    tick_to(&mut ppu, 10, 12);
+    let (lo, hi) = ppu.bg_shifters();
+    assert_eq!(lo & 0x07, 0x00, "low plane shifts in 0s");
+    assert_eq!(hi & 0x07, 0x07, "high plane shifts in 1s");
+}
+
+#[test]
+fn bg_reload_skip_via_rendering_disable_draws_serial_ones() {
+    // End-to-end version of AccuracyCoin "BG Serial In" test 2's mechanism:
+    // an empty nametable draws only backdrop, but disabling rendering for
+    // exactly the dot%8==1 reload dot lets the hi-plane serial 1s (shifted
+    // in over the previous 7 dots) escape past bit 7 before the next reload
+    // clobbers the low byte — drawing solid color-%10 pixels.
+    let mut ppu = Ppu::new();
+    // Palette: backdrop $0F, color %10 of palette %00 = $2A (marker).
+    ppu.write_register(6, 0x3F, None);
+    ppu.write_register(6, 0x00, None);
+    ppu.write_register(7, 0x0F, None);
+    ppu.write_register(7, 0x00, None);
+    ppu.write_register(7, 0x2A, None);
+    // Point v back at $2000 so rendering scrolls from a sane origin.
+    ppu.write_register(6, 0x20, None);
+    ppu.write_register(6, 0x00, None);
+    ppu.write_register(1, 0x08, None); // BG on
+    ppu.tick_dots(20 * 341 + 65, None); // dots 0-64 of scanline 20 processed; dot 65 (a reload dot) is next
+    ppu.write_register(1, 0x00, None); // rendering off…
+    ppu.tick_dots(1, None); //            …exactly across dot 65, skipping its reload
+    ppu.write_register(1, 0x08, None); // back on
+    ppu.tick_dots(200, None); // let the escaped 1s reach the output mux
+
+    let row = &ppu.frame[20 * 256..21 * 256];
+    let marker_pixels: Vec<usize> = (0..256).filter(|&x| row[x] == 0x2A).collect();
+    assert!(
+        !marker_pixels.is_empty(),
+        "skipped reload should draw the shifted-in hi-plane 1s as color %10 pixels"
+    );
+    // And a control: without any disable window, the same setup draws none.
+    let mut control = Ppu::new();
+    control.write_register(6, 0x3F, None);
+    control.write_register(6, 0x00, None);
+    control.write_register(7, 0x0F, None);
+    control.write_register(7, 0x00, None);
+    control.write_register(7, 0x2A, None);
+    control.write_register(6, 0x20, None);
+    control.write_register(6, 0x00, None);
+    control.write_register(1, 0x08, None);
+    control.tick_dots(21 * 341, None);
+    let row = &control.frame[20 * 256..21 * 256];
+    assert!(
+        (0..256).all(|x| row[x] != 0x2A),
+        "continuous rendering must never expose the serial-in bits"
+    );
+}

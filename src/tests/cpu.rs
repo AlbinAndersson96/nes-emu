@@ -1785,3 +1785,48 @@ fn shy_with_dma_on_operand_hi_fetch_keeps_mask() {
     cpu.step(&mut bus);
     assert_eq!(bus.mem[0x0500], 0xA5 & 0x06);
 }
+
+// ---------------------------------------------------------------------------
+// Unofficial NOPs perform their target read (AccuracyCoin "All NOPs": NOP
+// $3AEA — a $2002 mirror — must clear the PPU VBlank flag, so the read is a
+// real, side-effecting bus access; also keeps 1 bus access per CPU cycle for
+// the realtime DMC clock)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn nop_absolute_0c_reads_target_address() {
+    let (mut cpu, mut bus) = make();
+    w(&mut bus, 0x0200, &[0x0C, 0xEA, 0x3A]); // NOP $3AEA
+    bus.trace.clear();
+    let cycles = cpu.step(&mut bus);
+    let expected: Vec<(u16, bool)> = vec![
+        (0x0200, false), // opcode
+        (0x0201, false), // operand lo
+        (0x0202, false), // operand hi
+        (0x3AEA, false), // target read (observable — e.g. a $2002 mirror)
+    ];
+    assert_eq!(bus.trace, expected);
+    assert_eq!(cycles, 4);
+}
+
+#[test]
+fn nop_zero_page_reads_target_address() {
+    let (mut cpu, mut bus) = make();
+    w(&mut bus, 0x0200, &[0x04, 0xCA]); // NOP $CA
+    bus.trace.clear();
+    let cycles = cpu.step(&mut bus);
+    let expected: Vec<(u16, bool)> = vec![(0x0200, false), (0x0201, false), (0x00CA, false)];
+    assert_eq!(bus.trace, expected);
+    assert_eq!(cycles, 3);
+}
+
+#[test]
+fn nop_zero_page_x_reads_effective_address() {
+    let (mut cpu, mut bus) = make();
+    w(&mut bus, 0x0200, &[0x14, 0xC0]); // NOP $C0,X
+    cpu.x = 0x0A;
+    bus.trace.clear();
+    let cycles = cpu.step(&mut bus);
+    assert_eq!(bus.trace.last(), Some(&(0x00CA, false)));
+    assert_eq!(cycles, 4);
+}
