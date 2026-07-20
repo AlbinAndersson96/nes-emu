@@ -35,6 +35,19 @@ const MODE1: [(u32, bool, bool, bool, bool); 6] = [
     (37_282, false, false, false, true), // sequence restart
 ];
 
+/// Power-up (and warm-reset) frame-counter start delay, in CPU cycles.
+///
+/// Hardware acts as if $00 were written to $4017 and then 9-12 clocks elapsed
+/// before execution starts at the reset vector (apu_reset/4017_timing prints
+/// the effective delay and accepts 6-12; a real NES usually shows 9). With no
+/// delay our effective value lands at 13 — one clock outside the window —
+/// because the harness pre-advances the APU 8 cycles for the hardware reset
+/// sequence. This constant delays the frame sequence start to pull the
+/// effective delay into range (calibrated by sweeping against
+/// apu_reset/4017_timing + 4017_written; only shifts frame_cycles phase,
+/// never cycle_count, so DMA/get-put parity is unaffected).
+const POWER_FRAME_DELAY: u8 = 4;
+
 pub struct Apu {
     pub pulse1: PulseChannel,
     pub pulse2: PulseChannel,
@@ -46,6 +59,10 @@ pub struct Apu {
     frame_mode: bool, // false = 4-step (mode 0), true = 5-step (mode 1)
     irq_inhibit: bool,
     frame_irq_flag: bool,
+    /// Last value written to $4017 — re-applied on warm reset (hardware
+    /// rewrites the register with its previous value at reset, unlike power
+    /// where it acts as if $00 were written).
+    last_4017: u8,
     /// CPU cycles elapsed since the last frame counter reset.
     frame_cycles: u32,
     /// Cycles remaining until a $4017-triggered frame counter reset takes effect.
@@ -86,14 +103,39 @@ impl Apu {
             frame_mode: false,
             irq_inhibit: false,
             frame_irq_flag: false,
+            last_4017: 0,
             frame_cycles: 0,
-            frame_reset_delay: 0,
+            frame_reset_delay: POWER_FRAME_DELAY,
             cycle_count: 0,
             dmc_debt: 0,
             dmc_realtime_needs_reseed: true,
             dmc_realtime_parity: false,
             dmc_ticks: 0,
         }
+    }
+
+    /// Warm reset (the console's Reset button; power-up state is `Apu::new`).
+    /// Per nesdev and blargg's apu_reset suite: $4015 is cleared (all five
+    /// channels disabled, which also zeroes their length counters / DMC bytes
+    /// remaining), both IRQ flags are cleared, and $4017 is rewritten with
+    /// the last value it was written with — after the same short start delay
+    /// as power-up. Everything else (triangle phase, envelopes, the
+    /// free-running cycle_count) is deliberately untouched.
+    ///
+    /// Only reached via `Bus::warm_reset` (test harness only for now, like
+    /// `Cpu::warm_reset`), hence the allow.
+    #[allow(dead_code)]
+    pub fn warm_reset(&mut self) {
+        self.pulse1.set_enabled(false);
+        self.pulse2.set_enabled(false);
+        self.triangle.set_enabled(false);
+        self.noise.set_enabled(false);
+        self.dmc.set_enabled(false);
+        self.dmc.irq_flag = false;
+        self.frame_irq_flag = false;
+        self.frame_mode = self.last_4017 & 0x80 != 0;
+        self.irq_inhibit = self.last_4017 & 0x40 != 0;
+        self.frame_reset_delay = POWER_FRAME_DELAY;
     }
 
     /// Advance the APU by `cpu_cycles`. Returns true if an IRQ line should be
@@ -139,6 +181,14 @@ impl Apu {
                 break;
             }
         }
+
+        // Apply pending halt/length-reload register writes AFTER the frame
+        // counter events, so a write landing on a length-clock cycle takes
+        // effect just after that clock, never before (see length.rs).
+        self.pulse1.end_cycle();
+        self.pulse2.end_cycle();
+        self.triangle.end_cycle();
+        self.noise.end_cycle();
 
         // Channel timers.
         // Pulse and noise timers count at APU rate (every 2 CPU cycles).
@@ -323,6 +373,7 @@ impl Apu {
                 self.dmc.irq_flag = false; // writing $4015 clears the DMC IRQ flag
             }
             0x4017 => {
+                self.last_4017 = data;
                 self.frame_mode = data & 0x80 != 0;
                 self.irq_inhibit = data & 0x40 != 0;
                 if self.irq_inhibit {

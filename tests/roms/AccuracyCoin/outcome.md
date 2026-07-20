@@ -1,9 +1,143 @@
 # AccuracyCoin results
 
-**Status (2026-07-14, branch `worktree-dmc-dma-cycle-accurate`): 109 of the 141 tests
-pass**, up from 108 (Session 5) / 105 (Session 4) / 100 (Session 2) / 91 (develop
-baseline). `cargo test` remains fully green (332 passed / 0 failed). (Page 15, "Power On
-State", is all `DRAW` tests with no pass/fail verdict and is excluded from the 141.)
+**Status (2026-07-20, branch `claude/standout-issues-next-jplv6h`): 118 of the 141 tests
+pass**, up from 115 (Session 8) / 113 (Session 7) / 109 (Session 6) / 100 (Session 2) /
+91 (develop baseline). `cargo test` remains fully green (376 passed / 0 failed). (Page
+15, "Power On State", is all `DRAW` tests with no pass/fail verdict and is excluded from
+the 141.)
+
+## Session 9 (2026-07-20): sprite counter/shifter pipeline + the $2001 two-tap delay
+
+**Fixed: `Stale BG Shift Registers`, `Stale Sprite Shift Registers`, and `BG Serial In`
+(all three), via two coupled changes — with a surgically clean result: the full blargg
+suite stayed green throughout, and the final AccuracyCoin table diff shows ONLY the
+target tests flipping (no DMC-cluster shuffle at all this time).**
+
+1. **Sprite output reworked from a static X-compare to the real hardware pipeline**
+   (see the new "Sprite units are real down-counter + shifter pipelines" design note in
+   CLAUDE.md): per-unit X down-counters with counting/halted modes, counting
+   unconditional during visible dots (StaleSprite test 2: F-Blank does not stop the
+   counters), shifters clocking only while rendering is enabled (tests 3/6), and the
+   dot-339 re-arm gated on rendering being enabled at that dot (test 5, StaleBG test 4:
+   stale halted units draw immediately on re-enable, "treated as X=0"). This alone
+   fixed `Stale BG Shift Registers` outright and — notably — flipped the DMASync
+   pre-test diagnostic (`$12`) to `$01` (the ROM's precise open-bus DMA sync working)
+   for the first time, though it settled back to `$00` after the mask-delay change
+   (it is alignment-sensitive and bounces; the DMA tests themselves were unaffected).
+
+2. **$2001 mask writes split into two taps** (see the "$2001 mask writes have two
+   taps" design note): the rendering pipeline now sees mask changes
+   `MASK_WRITE_DELAY_DOTS` (= 3) dots after the write cycle — hardware's 2-5-dot band,
+   which StaleSprite test 3 and BG Serial In's sprite-scanline iteration both require —
+   while the odd-frame skipped-dot decision taps the raw register at write-cycle
+   timing, exactly what blargg's `10-even_odd_timing` pinned (it failed under a naive
+   single-tap delay, and the raw-register tap restored it at every swept D). Sweep:
+   D ∈ {3,4} passes everything; 2 and 5 lose BG Serial In; 3 chosen (nearest
+   hardware's common minimum).
+
+Sessions 8's two "assessed, not attempted / remaining gap" items are thereby closed;
+the Independent-smaller-items cluster is down to Open Bus, the two Stress tests, and
+2002 Flag Clear Timing.
+
+## Session 8 (2026-07-20): small-quirk sweep (All NOPs, Palette RAM, BG Serial In)
+
+**Fixed: `All NOPs` (code 2).** The unofficial NOPs ($04/$44/$64, $14/$34/…, $0C) never
+performed their target-address read — $0C fetched its operand and stopped, so
+`NOP $3AEA` (a $2002 mirror) failed to clear the VBlank flag, which is exactly what the
+ROM's Test 2 checks. All three families now do the real read (also closing their silent
+cycles — the same 1-bus-access-per-cycle invariant the realtime DMC clock depends on).
+The abs,X NOPs already read. TDD: 3 bus-trace tests in `src/tests/cpu.rs`.
+
+**Fixed: `Palette RAM Quirks` (code 6).** Greyscale (PPUMASK bit 0) masked rendered
+pixels but not `$2007` palette *reads*; the read arm now masks to $30 when greyscale is
+on. Storage and writes stay unmasked (the ROM's code 7 checks that side). TDD:
+`greyscale_mode_masks_ppudata_palette_reads`.
+
+**Implemented but test still fails: `BG Serial In` (code 2).** The hardware behavior —
+the BG pattern shifters shift 0 into the LOW plane and 1 into the HIGH plane (per the
+ROM's own walkthrough; the escaped bits draw as color %10) — is now modeled, and the
+full skip-a-reload-via-rendering-disable mechanism is verified end-to-end by a new
+regression test (`bg_reload_skip_via_rendering_disable_draws_serial_ones`: skipping the
+dot%8==1 reload draws the serial 1s; continuous rendering never exposes them; watching
+it fail first also caught that `tick_dots(N)` leaves dot N unprocessed). The remaining
+gap is the `$2001` write-apply latency: the ROM's one meaningful iteration (the sprite-0
+scanline) assumes hardware's +2-to-+5-dot post-write-cycle delay band, and our apply
+lands a few dots earlier. That constant is pinned by `ppu_vbl_nmi/10-even_odd_timing`,
+so moving it needs a compensated recalibration of both — deliberately not blind-swept.
+
+**Assessed, not attempted: `Stale BG/Sprite Shift Registers` (both code 3).** The
+sprite sub-tests (counters keep clocking during F-Blank, shifters don't; dot-339
+counter activation; H-Blank reload suppression) probe a real per-dot down-counter +
+shifter sprite pipeline; ours is a static X-compare model (`output_pixel`). Converting
+it is a contained but genuine rework of sprite output touching the whole
+blargg-verified sprite-hit/overflow surface — a dedicated-session item, and the
+prerequisite for both Stale tests (Stale BG's code-3 check also rides on sprite
+behavior).
+
+**Downstream shuffle — favorable this time.** The NOP dummy reads shift the realtime
+DMC clock phase for everything after the NOP tests, and the DMC-phase-sensitive set
+reshuffled: `DMA + Open Bus` (Session-7 collateral) and `DMA + $2007 Write` (a
+regression tracked since Session 2) both flipped back to **pass**; `INC $4014` and
+`DMA + $4016 Read` are the new victims (plus error-code churn on 4 still-failing DMC
+tests: APURegActivation 1→4, DMABusConflict 1→2, DMCDMA+OAMDMA 1→2, ImplicitDMAAbort
+2→1). Net +4 −2 = 113 → 115. Same entangled-chaos class as Sessions 4/5/7; the fix
+itself (real reads that hardware performs) is unambiguously correct.
+
+## Session 7 (2026-07-20): the unstable-store cluster (SHA/SHS/SHY/SHX)
+
+All five `UnOp_SH*` tests (SHA $93/$9F, SHS $9B, SHY $9C, SHX $9E — shared error code 1,
+"target address of the instruction was not correct") fixed by replacing the two wrong
+target-address models with the one the ROM's own behavior-detection identifies as
+"behavior 1" (the common NES CPU; the ROM distinguishes four manufacturer variants and
+we now report success-code "variant 1" on SHA/SHS):
+
+- **Value stored** = `reg & (base_hi + 1)` (reg = A&X for SHA/SHS, X for SHX, Y for SHY;
+  SHS also sets SP = A&X). This part was already right.
+- **On a page cross, the write address's high byte BECOMES the stored value.** We
+  previously wrote to the carried effective address (SHA/SHS) or the pre-carry address
+  (SHY/SHX) — neither matches any of the ROM's four known hardware behaviors. The ROM's
+  own sub-tests pin this three ways ($1F10-target case → write lands at $0D10/$0510 via
+  RAM mirroring, distinguishable from both old models). Note the old pre-carry model had
+  been calibrated against `instr_test-v5/07-abs_xy` — which the corrected model passes
+  too; that ROM just can't tell the two apart.
+- **Unconditional pre-carry dummy read**: these are fixed 5/6-cycle stores; the old code
+  used the load-variant addressing helpers, silently skipping the cycle-4 dummy read when
+  no page was crossed (a "silent cycle" of exactly the class the Session-2 JSR/RTS fix
+  eliminated — one bus access short per execution, which also skews the realtime DMC
+  clock).
+- **RDY quirk** ("SHY just becomes STY if a DMA occurs on the right cpu cycle", README
+  error codes 7-C): if RDY is low during the dummy-read cycle immediately before the
+  write, the `& (base_hi + 1)` is dropped and the raw register is stored. Two detection
+  legs, both needed: a DMC DMA *serviced on* the dummy read itself (request rose one
+  cycle earlier), or a request that *rose during* the dummy read and is still pending
+  after it (`Bus::dmc_dma_pending`, new) — in the latter case the CPU doesn't halt until
+  its next read, which is *after* the write (writes never halt), but RDY is already low
+  at the write and that is what corrupts the value on hardware. The second leg was found
+  via `TRACE_DMC_DMA=1`: SHY's sub-test halt landed on the *post-write* instruction fetch
+  ($0596 = the RAM function's PHA) while the other four landed on the dummy read —
+  same intended RDY timing, ±1-cycle assert phase. A first attempt that instead widened
+  the window to include halts on the operand-high fetch was wrong (RDY is high again by
+  the write in that case) and did nothing; the pending-check is the faithful model.
+
+TDD: 11 new `src/tests/cpu.rs` tests (page-cross address corruption per opcode, value
+formula, the unconditional dummy-read bus trace, and the RDY quirk's three boundary
+cases via a purpose-built `DmaOnReadBus`). `cargo test` 358→370/0.
+
+**Bonus: `blargg_nes_cpu_test5/cpu.nes` fixed and un-`#[ignore]`d.** Its long-tracked
+"Error 1 on 9C/9E" *and* its supposed "hangs forever on a JAM/KIL opcode" (previously
+believed unrunnable-by-design, "on real hardware too") were both symptoms of this same
+bug — the wrong-address unstable-store writes smashed the test's own state mid-sweep.
+With the fix the full 11-test sweep completes and passes; the Known-gaps entry is
+removed.
+
+**Downstream shuffle (same entangled-chaos class as Sessions 4-5):** `DMA + Open Bus`
+flipped pass → FAIL code 2 ("DMC DMA on the wrong cycle"), and `APU Register
+Activation` moved code 4 → code 1 — which is literally "prerequisite DMA + Open Bus
+failed", i.e. one root, its inline rerun of the same test. Nothing in the SH change
+touches those code paths; the SH tests now execute far longer in-ROM code paths (the
+full behavior-1 suites + their own DMC-arming DMA sub-tests) instead of failing out
+early, shifting the cycle phase of everything that runs after them. Net +5 fixed,
+-1 shuffled = 109 → 113.
 
 ## Session 6 (2026-07-14): DMC DMA cluster — one clean win, one reverted attempt
 
@@ -393,20 +527,23 @@ instruction stream, one cycle of drift from the different JSR/RTS history. Fixin
 resolved exactly one test cleanly (DMA + $4015 Read) and surfaced a deeper, still-unresolved
 DMA-during-JSR timing issue (the `Implied Dummy Reads` hang) — see "Session 2" above.
 
-## Remaining failures (28 failing + 4 hung = 32 non-passing), by cluster
+## Remaining failures (19 failing + 4 hung = 23 non-passing), by cluster
 
 Codes are the ROM's on-screen error codes; meanings from `README.md`. Table regenerated
-2026-07-14 at the post-Session-6 state.
+2026-07-20 at the post-Session-9 state.
 
 ### DMC DMA cluster
 | Test | Code | Meaning |
 |---|---|---|
-| APU Register Activation | 4 | Controllers were clocked by the bus conflict with OAM DMA when they shouldn't have been (or vice versa — see README's success-code table for this test). |
+| INC $4014 | 2 | Session 8 phase-shuffle victim (passed since Session 1; also flipped briefly in Session 4) — the same entangled-chaos class as every session's DMC-phase reshuffle. |
+| DMA + $4016 Read | 1 | Session 8 phase-shuffle victim (passed as Famicom variant 2 before). |
+| APU Register Activation | 4 | Controllers clocked (or not) by the OAM DMA bus conflict — back to its Session-6 code after Session 8's shuffle restored its DMA + Open Bus prerequisite. |
 | Instruction Timing | 6 | Cycle counts / DMA data-bus interaction — downstream `Implied Dummy Reads` noise, code has bounced between 2 and 6 across sessions without any change to this cluster's own code. |
 | Delta Modulation Channel | L | Writing $4015 when the DMC timer has 2 cycles until clocked shouldn't trigger the DMA until after the write's 3-4 cycle delay — the load-delay vs timer-edge interaction, finer than the fixed 3-cycle `DMC_LOAD_DMA_DELAY`. Not attempted (Session 6) — same territory as the reverted Frame Counter IRQ fix. |
 | Controller Strobing | 4 | Controllers should not be strobed on put→get transitions — needs get/put-cycle-parity awareness for `$4016` *writes* specifically (a `DEC $4016` RMW's two same-cycle-adjacent writes, only one of which "counts" depending on clock phase). Assessed but not attempted (Session 6) — see its note above. |
 | Frame Counter IRQ | 7 | IRQ flag shouldn't clear yet on a get→put transition. Attempted and reverted (Session 6) — both possible parity values broke `cpu_interrupts_v2/3-nmi_and_irq`; needs the interaction with `APU_READ_PREADVANCE` understood before retrying, not just the constant swept. |
-| DMA + $2007 Write | 1 | Session 2 regression — see its "Newly broken" note; likely the same inline-rerun sensitivity as APU Register Activation. |
+
+(`DMA + Open Bus` and `DMA + $2007 Write` returned to passing in Session 8's reshuffle.)
 
 ### Hung (never reach a verdict) — the `Implied Dummy Reads` chain, unresolved, see Session 2
 | Test |
@@ -419,10 +556,10 @@ Codes are the ROM's on-screen error codes; meanings from `README.md`. Table rege
 ### Deliberately out of scope of the DMC-DMA plan (log-only; see plan Global Constraints)
 | Test | Code | Meaning |
 |---|---|---|
-| DMC DMA Bus Conflicts | 1 | APU-register address mirroring during the DMA fetch not modeled. |
-| DMC DMA + OAM DMA | 1 | Overlapping-DMA interleaving not modeled (guarded against instead). |
+| DMC DMA Bus Conflicts | 2 | APU-register address mirroring during the DMA fetch not modeled. |
+| DMC DMA + OAM DMA | 2 | Overlapping-DMA interleaving not modeled (guarded against instead). |
 | Explicit DMA Abort | 2 | Mid-stall DMA cancellation not modeled. |
-| Implicit DMA Abort | 2 | Mid-stall DMA cancellation not modeled. |
+| Implicit DMA Abort | 1 | Mid-stall DMA cancellation not modeled. |
 
 ### Sprite Zero Hit cluster — FIXED in Sessions 3-5, only `OAM Corruption` remains
 The shared "Sprite Zero Hits should be working" root cause (missing OAMADDR reset during
@@ -450,15 +587,11 @@ bus model, comparable effort/risk to `OAM Corruption` above).
 | Test | Code | Meaning |
 |---|---|---|
 | Open Bus (page 1) | 7 | PC in open bus should execute from floating data bus values; write cycles should update the bus. |
-| SHA $93/$9F, SHS $9B, SHY $9C, SHX $9E | 1 | Target address of the instruction was not correct (see also `blargg_nes_cpu_test5` SHY/SHX note in CLAUDE.md). |
-| All NOP instructions | 2 | Opcode $0C (NOP Absolute) malfunctioned. |
-| Palette RAM Quirks | 6 | Greyscale mode should zero the low 4 bits of reads. |
-| Stale BG / Sprite Shift Registers | 3 / 3 | Shift registers shouldn't clock during H/F-Blank. |
-| BG Serial In | 2 | Shift registers should bring in 1s at bit 0. |
 | $2004 Stress / $2007 Stress | 2 / 2 | OAMADDR-overflow reads / read-buffer fill timing. |
 | 2002 Flag Clear Timing | 1 | Flags weren't cleared on the correct PPU cycle. |
-| 2002 Flag Clear Timing | 1 | Flags weren't cleared on the correct PPU cycle. |
-| 2002 Flag Clear Timing | 1 | Flags weren't cleared on the correct PPU cycle. |
+
+(`All NOP instructions` and `Palette RAM Quirks` fixed in Session 8; `Stale BG/Sprite
+Shift Registers` and `BG Serial In` fixed in Session 9.)
 
 ## Calibration constants (all in code; re-swept in Session 2, unchanged)
 

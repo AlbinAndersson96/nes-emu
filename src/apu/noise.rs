@@ -39,7 +39,7 @@ impl NoiseChannel {
     pub fn write_reg(&mut self, reg: u8, data: u8) {
         match reg {
             0 => {
-                self.length.halt = data & 0x20 != 0;
+                self.length.schedule_halt(data & 0x20 != 0);
                 self.envelope.write(data);
             }
             2 => {
@@ -47,9 +47,7 @@ impl NoiseChannel {
                 self.timer_period = NTSC_PERIOD[(data & 0x0F) as usize];
             }
             3 => {
-                if self.enabled {
-                    self.length.load(data >> 3);
-                }
+                self.length.schedule_load(data >> 3);
                 self.envelope.restart();
             }
             _ => {}
@@ -87,6 +85,12 @@ impl NoiseChannel {
     /// Half-frame clock (120 Hz).
     pub fn clock_length(&mut self) {
         self.length.clock();
+    }
+
+    /// Per-CPU-cycle tick (after frame-counter events): applies pending
+    /// halt/reload writes on their real write cycle.
+    pub fn end_cycle(&mut self) {
+        self.length.end_cycle(self.enabled);
     }
 
     pub fn length_active(&self) -> bool {

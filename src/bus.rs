@@ -55,6 +55,9 @@ pub struct Bus {
     /// Guards against the DMC-DMA halt/fetch sequence's own nested `read`
     /// calls re-triggering DMA arming.
     dmc_dma_in_progress: bool,
+    /// Monotonic count of DMC DMAs serviced in-line (see
+    /// `CpuBus::dmc_dma_count` — the SH* opcodes' halt-on-dummy-read quirk).
+    dmc_dma_serviced: u64,
     /// Countdown (in CPU cycles) before an enable-started DMC load DMA may
     /// halt the CPU; see DMC_LOAD_DMA_DELAY.
     dmc_load_delay: u8,
@@ -96,6 +99,7 @@ impl Bus {
             oam_dma_byte_idx: 0,
             dma_stall_extra_cycles: 0,
             dmc_dma_in_progress: false,
+            dmc_dma_serviced: 0,
             dmc_load_delay: 0,
             ppu_preadvance_cycles: 0,
             ppu_preadvance_nmi: false,
@@ -166,6 +170,18 @@ impl Bus {
     pub fn insert_cartridge(&mut self, cartridge: Cartridge) {
         self.ppu.set_mirroring(cartridge.mirroring());
         self.cartridge = Some(cartridge);
+    }
+
+    /// Warm reset (Reset button) side effects outside the CPU itself.
+    /// Call alongside `Cpu::warm_reset`. Currently only the APU has
+    /// documented reset behavior we model (see `Apu::warm_reset`); RAM,
+    /// the PPU, and controllers are untouched, as on hardware.
+    ///
+    /// Like `Cpu::warm_reset`, only exercised by the `$81`-status handling
+    /// in the ROM test harness — no in-app Reset-button UI exists yet.
+    #[allow(dead_code)]
+    pub fn warm_reset(&mut self) {
+        self.apu.warm_reset();
     }
 
     /// Consume pre-advanced PPU cycles and any NMI that fired during a $2002 read.
@@ -403,6 +419,7 @@ impl Bus {
             return;
         }
         self.dmc_dma_in_progress = true;
+        self.dmc_dma_serviced += 1;
         let aligned = self.apu.dmc_realtime_current_parity() == DMC_DMA_ALIGNED_PARITY;
         let halt_cycles = if aligned { 2 } else { 3 };
         if std::env::var_os("TRACE_DMC_DMA").is_some() {
@@ -484,7 +501,18 @@ impl CpuBus for Bus {
                         self.ppu_preadvance_nmi = true;
                     }
                     self.ppu_preadvance_cycles = self.ppu_preadvance_cycles.saturating_add(3);
-                    self.ppu.write_register(reg, data, self.cartridge.as_mut());
+                    if reg == 1 {
+                        // $2001 rendering toggles take effect a few dots
+                        // AFTER the write cycle on hardware (AccuracyCoin:
+                        // "a delay of 2 to 5 ppu cycles"). $2000 keeps the
+                        // apply-at-write-cycle placement (its NMI-window
+                        // behavior is pinned by ppu_vbl_nmi); the mask value
+                        // is deferred via a pending slot inside the PPU —
+                        // see Ppu::schedule_mask_write for the calibration.
+                        self.ppu.schedule_mask_write(data);
+                    } else {
+                        self.ppu.write_register(reg, data, self.cartridge.as_mut());
+                    }
                     self.ppu.tick_dots(1, self.cartridge.as_mut());
                     return;
                 }
@@ -540,5 +568,19 @@ impl CpuBus for Bus {
         let n = self.dma_stall_extra_cycles;
         self.dma_stall_extra_cycles = 0;
         n
+    }
+
+    fn dmc_dma_count(&self) -> u64 {
+        self.dmc_dma_serviced
+    }
+
+    fn dmc_dma_pending(&self) -> bool {
+        // Mirrors maybe_dmc_dma's halt-eligibility gates: an asserted DMC
+        // fetch request that the next CPU read WILL halt for (RDY is already
+        // low), just not serviced yet.
+        !self.dmc_dma_in_progress
+            && !self.oam_dma_active
+            && self.dmc_load_delay == 0
+            && self.apu.dmc_needs_dma()
     }
 }

@@ -468,17 +468,12 @@ fn cpu_timing_test6() {
 // screen = pass, "Failed" = generic failure, "Error <n>" = specific failure,
 // no numbered meanings table) ---
 
-// cpu.nes's opcode-value sweep deliberately walks every byte 0x00-0xFF,
-// including the 12 real JAM/KIL opcodes (0x02 0x12 0x22 0x32 0x42 0x52 0x62
-// 0x72 0x92 0xB2 0xD2 0xF2). Those permanently halt real 6502/2A03 hardware
-// too, not just this emulator — there is no recovery short of a physical
-// reset. Blargg's later test suites (e.g. cpu_timing_test6) explicitly
-// document skipping the 12 halt instructions for exactly this reason; this
-// older, pre-$6000-protocol suite predates that convention and has no such
-// skip logic, so it genuinely cannot run to completion under automation.
-// Confirmed via direct experiment: raising the frame budget from 1200 to
-// 5000 (4x) produces an identical hang, not more progress.
-#[ignore = "cpu.nes's opcode sweep hits a real JAM/KIL opcode and hangs forever, on real hardware too — see comment above"]
+// cpu.nes (unofficial-opcode suite) was previously #[ignore]d as "hangs on a
+// JAM/KIL opcode" and separately reported "Error 1" on SHY/SHX in 06-abs_xy.
+// Both turned out to be the same bug: our SHA/SHX/SHY/TAS page-cross writes
+// went to the wrong address (see the SH design note in CLAUDE.md), smashing
+// the test's own state mid-sweep — with the corrupted-high-byte behavior
+// fixed, the full sweep runs to completion and passes all 11 sub-tests.
 #[test]
 fn blargg_nes_cpu_test5_cpu() {
     report(

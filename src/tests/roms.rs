@@ -69,6 +69,13 @@ fn run_until_complete(filename: &str, bus: &mut Bus, cpu: &mut Cpu) {
     const MAX_RESETS: u32 = 8;
     let mut reset_request_since: Option<u64> = None;
     let mut reset_count: u32 = 0;
+    // $6000 still holds $81 after a warm reset until the ROM's own code gets
+    // far enough to overwrite it — and a CUSTOM_RESET handler may run for
+    // hundreds of thousands of cycles first (apu_reset/4017_timing measures
+    // the frame-counter start delay for up to ~420k cycles before reaching
+    // the shell). Treat $81 as stale after firing a reset until the status
+    // changes to something else, so the harness can't re-fire mid-handler.
+    let mut stale_81_after_reset = false;
 
     loop {
         let sig_valid =
@@ -76,7 +83,10 @@ fn run_until_complete(filename: &str, bus: &mut Bus, cpu: &mut Cpu) {
 
         if sig_valid {
             let status = bus.peek(0x6000);
-            if status == 0x81 {
+            if status != 0x81 {
+                stale_81_after_reset = false;
+            }
+            if status == 0x81 && !stale_81_after_reset {
                 let since = *reset_request_since.get_or_insert(total_cycles);
                 // Only fire the reset at an instruction boundary (empty
                 // micro-op queue) — `clock.step()` below ticks exactly one
@@ -99,11 +109,13 @@ fn run_until_complete(filename: &str, bus: &mut Bus, cpu: &mut Cpu) {
                         );
                     }
                     cpu.warm_reset(bus);
+                    bus.warm_reset();
                     let _ = bus.tick_ppu(7);
                     let _ = bus.tick_apu(7);
                     cpu.cycles += 7;
                     total_cycles += 7;
                     reset_request_since = None;
+                    stale_81_after_reset = true;
                     continue;
                 }
             } else {
@@ -427,6 +439,32 @@ rom_test!(mmc3_test_details, "mmc3_test/2-details.nes");
 rom_test!(mmc3_test_a12_clocking, "mmc3_test/3-A12_clocking.nes");
 rom_test!(mmc3_test_scanline_timing, "mmc3_test/4-scanline_timing.nes");
 rom_test!(mmc3_test_mmc3, "mmc3_test/5-MMC3.nes");
+
+// apu_test — APU length counters, frame IRQ flag, jitter, and DMC behavior
+rom_test!(apu_test_len_ctr, "apu_test/rom_singles/1-len_ctr.nes");
+rom_test!(apu_test_len_table, "apu_test/rom_singles/2-len_table.nes");
+rom_test!(apu_test_irq_flag, "apu_test/rom_singles/3-irq_flag.nes");
+rom_test!(apu_test_jitter, "apu_test/rom_singles/4-jitter.nes");
+rom_test!(apu_test_len_timing, "apu_test/rom_singles/5-len_timing.nes");
+rom_test!(
+    apu_test_irq_flag_timing,
+    "apu_test/rom_singles/6-irq_flag_timing.nes"
+);
+rom_test!(apu_test_dmc_basics, "apu_test/rom_singles/7-dmc_basics.nes");
+rom_test!(apu_test_dmc_rates, "apu_test/rom_singles/8-dmc_rates.nes");
+rom_test!(apu_test_all, "apu_test/apu_test.nes");
+
+// apu_reset — initial APU state at power and the effect of reset (uses the
+// same status-$81 delayed-warm-reset protocol as cpu_reset)
+rom_test!(apu_reset_4015_cleared, "apu_reset/4015_cleared.nes");
+rom_test!(apu_reset_4017_timing, "apu_reset/4017_timing.nes");
+rom_test!(apu_reset_4017_written, "apu_reset/4017_written.nes");
+rom_test!(apu_reset_irq_flag_cleared, "apu_reset/irq_flag_cleared.nes");
+rom_test!(apu_reset_len_ctrs_enabled, "apu_reset/len_ctrs_enabled.nes");
+rom_test!(
+    apu_reset_works_immediately,
+    "apu_reset/works_immediately.nes"
+);
 
 // mmc3_test_2 — later revision of the same suite. 6-MMC3_alt.nes is NOT
 // wired for the same reason as 6-MMC6 above (alternate/rev-A behavior,
