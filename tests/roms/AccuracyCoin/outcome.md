@@ -1,10 +1,43 @@
 # AccuracyCoin results
 
-**Status (2026-07-20, branch `claude/standout-issues-next-jplv6h`): 115 of the 141 tests
-pass**, up from 113 (Session 7) / 109 (Session 6) / 105 (Session 4) / 100 (Session 2) /
+**Status (2026-07-20, branch `claude/standout-issues-next-jplv6h`): 118 of the 141 tests
+pass**, up from 115 (Session 8) / 113 (Session 7) / 109 (Session 6) / 100 (Session 2) /
 91 (develop baseline). `cargo test` remains fully green (376 passed / 0 failed). (Page
 15, "Power On State", is all `DRAW` tests with no pass/fail verdict and is excluded from
 the 141.)
+
+## Session 9 (2026-07-20): sprite counter/shifter pipeline + the $2001 two-tap delay
+
+**Fixed: `Stale BG Shift Registers`, `Stale Sprite Shift Registers`, and `BG Serial In`
+(all three), via two coupled changes — with a surgically clean result: the full blargg
+suite stayed green throughout, and the final AccuracyCoin table diff shows ONLY the
+target tests flipping (no DMC-cluster shuffle at all this time).**
+
+1. **Sprite output reworked from a static X-compare to the real hardware pipeline**
+   (see the new "Sprite units are real down-counter + shifter pipelines" design note in
+   CLAUDE.md): per-unit X down-counters with counting/halted modes, counting
+   unconditional during visible dots (StaleSprite test 2: F-Blank does not stop the
+   counters), shifters clocking only while rendering is enabled (tests 3/6), and the
+   dot-339 re-arm gated on rendering being enabled at that dot (test 5, StaleBG test 4:
+   stale halted units draw immediately on re-enable, "treated as X=0"). This alone
+   fixed `Stale BG Shift Registers` outright and — notably — flipped the DMASync
+   pre-test diagnostic (`$12`) to `$01` (the ROM's precise open-bus DMA sync working)
+   for the first time, though it settled back to `$00` after the mask-delay change
+   (it is alignment-sensitive and bounces; the DMA tests themselves were unaffected).
+
+2. **$2001 mask writes split into two taps** (see the "$2001 mask writes have two
+   taps" design note): the rendering pipeline now sees mask changes
+   `MASK_WRITE_DELAY_DOTS` (= 3) dots after the write cycle — hardware's 2-5-dot band,
+   which StaleSprite test 3 and BG Serial In's sprite-scanline iteration both require —
+   while the odd-frame skipped-dot decision taps the raw register at write-cycle
+   timing, exactly what blargg's `10-even_odd_timing` pinned (it failed under a naive
+   single-tap delay, and the raw-register tap restored it at every swept D). Sweep:
+   D ∈ {3,4} passes everything; 2 and 5 lose BG Serial In; 3 chosen (nearest
+   hardware's common minimum).
+
+Sessions 8's two "assessed, not attempted / remaining gap" items are thereby closed;
+the Independent-smaller-items cluster is down to Open Bus, the two Stress tests, and
+2002 Flag Clear Timing.
 
 ## Session 8 (2026-07-20): small-quirk sweep (All NOPs, Palette RAM, BG Serial In)
 
@@ -494,10 +527,10 @@ instruction stream, one cycle of drift from the different JSR/RTS history. Fixin
 resolved exactly one test cleanly (DMA + $4015 Read) and surfaced a deeper, still-unresolved
 DMA-during-JSR timing issue (the `Implied Dummy Reads` hang) — see "Session 2" above.
 
-## Remaining failures (22 failing + 4 hung = 26 non-passing), by cluster
+## Remaining failures (19 failing + 4 hung = 23 non-passing), by cluster
 
 Codes are the ROM's on-screen error codes; meanings from `README.md`. Table regenerated
-2026-07-20 at the post-Session-8 state.
+2026-07-20 at the post-Session-9 state.
 
 ### DMC DMA cluster
 | Test | Code | Meaning |
@@ -554,12 +587,11 @@ bus model, comparable effort/risk to `OAM Corruption` above).
 | Test | Code | Meaning |
 |---|---|---|
 | Open Bus (page 1) | 7 | PC in open bus should execute from floating data bus values; write cycles should update the bus. |
-| Stale BG / Sprite Shift Registers | 3 / 3 | Needs a real per-dot sprite down-counter/shifter pipeline — assessed in Session 8, dedicated-session item. |
-| BG Serial In | 2 | Serial-in behavior implemented + regression-tested (Session 8); remaining gap is the $2001 apply-latency band, entangled with the 10-even_odd_timing calibration. |
 | $2004 Stress / $2007 Stress | 2 / 2 | OAMADDR-overflow reads / read-buffer fill timing. |
 | 2002 Flag Clear Timing | 1 | Flags weren't cleared on the correct PPU cycle. |
 
-(`All NOP instructions` and `Palette RAM Quirks` fixed in Session 8.)
+(`All NOP instructions` and `Palette RAM Quirks` fixed in Session 8; `Stale BG/Sprite
+Shift Registers` and `BG Serial In` fixed in Session 9.)
 
 ## Calibration constants (all in code; re-swept in Session 2, unchanged)
 

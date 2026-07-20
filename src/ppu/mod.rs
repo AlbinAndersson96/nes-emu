@@ -25,6 +25,15 @@ const PRERENDER_SCANLINE: u16 = 261;
 /// original investigation.)
 const SPRITE0_HIT_LATCH_DOTS: u8 = 1;
 
+/// Dots between the Bus applying a $2001 write (which its pre-advance lands
+/// at the write cycle) and the mask value actually taking effect. Hardware
+/// applies rendering toggles 2-5 dots after the write cycle depending on PPU
+/// revision and alignment (AccuracyCoin's BG Serial In walkthrough); blargg's
+/// ppu_vbl_nmi/10-even_odd_timing and the AccuracyCoin rendering-toggle tests
+/// (Stale Sprite Shift Registers test 3, BG Serial In) bracket the value —
+/// calibrated by sweeping: {3,4} is the passing window (2 and 5 lose BG Serial In), 3 chosen as the edge nearest hardware's common minimum.
+const MASK_WRITE_DELAY_DOTS: u8 = 3;
+
 /// PPU open-bus decay time: a decay-register bit that hasn't been refreshed
 /// with a 1 decays to 0 after about 600 ms (blargg's `ppu_open_bus` readme;
 /// the exact time varies with the console and temperature). 600 ms at the
@@ -95,6 +104,23 @@ pub struct Ppu {
     /// sample at the start of dot 338).
     render_prev_dot: bool,
 
+    /// In-flight $2001 (PPUMASK) write from the Bus path: (dots remaining,
+    /// value). Applied to `mask` (the rendering pipeline's tap) at the start
+    /// of a dot's processing once the countdown expires — see
+    /// schedule_mask_write and MASK_WRITE_DELAY_DOTS.
+    pending_mask: Option<(u8, u8)>,
+    /// The $2001 REGISTER value, updated at the write cycle itself (no
+    /// pipeline delay). Hardware taps this signal at different depths: the
+    /// rendering pipeline sees mask changes MASK_WRITE_DELAY_DOTS later
+    /// (`mask`), but the odd-frame skipped-dot decision observes the
+    /// register with the write-cycle timing blargg's
+    /// ppu_vbl_nmi/10-even_odd_timing pinned — via `render_raw_prev_dot`.
+    mask_raw: u8,
+    /// `(mask_raw & 0x18) != 0` as sampled at the start of the previous
+    /// dot's processing; the odd-frame skip decision's tap (see
+    /// render_prev_dot for the one-dot-early derivation).
+    render_raw_prev_dot: bool,
+
     // ── Open-bus decay register ──────────────────────────────────────────────
     // The PPU's CPU-facing data bus keeps the last value driven onto it (the
     // "decay register"). Writing any PPU register refreshes all 8 bits with
@@ -129,12 +155,24 @@ pub struct Ppu {
     bg_shift_attr_hi: u16, // attribute bit 1, replicated to 8 bits per reload
 
     // ── Sprite pipeline ──────────────────────────────────────────────────────
+    // Hardware model (AccuracyCoin "Stale Sprite Shift Registers" walkthrough):
+    // each of the 8 sprite units has an X down-counter with two modes.
+    // "Counting": the counter decrements once per visible dot — even during
+    // forced blank (rendering disabled) — and the unit switches to "halted"
+    // on the dot it's checked at 0. "Halted": the unit outputs its shifter's
+    // front bit (bit 7; h-flip is pre-applied at load) and the shifter clocks
+    // once per dot, but ONLY while rendering is enabled — F-Blank and H-Blank
+    // freeze the shifters, never the counting. All units are put back into
+    // "counting" mode at dot 339 IF rendering is enabled on that dot;
+    // otherwise they keep their state (usually halted), which makes stale
+    // sprites draw immediately when rendering is re-enabled.
     secondary_oam: [u8; 32],    // up to 8 sprites for next scanline
     sprite_count: usize,        // sprites loaded for the scanline THIS DOT is rendering
-    sprite_shift_lo: [u8; 8],   // pattern plane 0 shift registers
-    sprite_shift_hi: [u8; 8],   // pattern plane 1 shift registers
+    sprite_shift_lo: [u8; 8],   // pattern plane 0 shift registers (bit 7 = next pixel)
+    sprite_shift_hi: [u8; 8],   // pattern plane 1 shift registers (bit 7 = next pixel)
     sprite_attr: [u8; 8],       // attribute bytes for active sprites
-    sprite_x: [u8; 8],          // X counters for active sprites
+    sprite_counter: [u8; 8],    // X down-counters, loaded from sprite X at fetch
+    sprite_counting: [bool; 8], // mode: true = counting, false = halted (drawing)
     sprite0_in_secondary: bool, // sprite 0 is among the sprites THIS DOT is rendering
     // Evaluation (dots 65–256) writes into these instead of the render-facing
     // fields above, which output_pixel() is still reading for dots 65–256 of
@@ -194,6 +232,9 @@ impl Ppu {
             dot_phase: 0,
             suppress_vbl: false,
             render_prev_dot: false,
+            pending_mask: None,
+            mask_raw: 0,
+            render_raw_prev_dot: false,
             io_bus: 0,
             io_bus_stamp: [0; 8],
             dots: 0,
@@ -214,7 +255,8 @@ impl Ppu {
             sprite_shift_lo: [0; 8],
             sprite_shift_hi: [0; 8],
             sprite_attr: [0; 8],
-            sprite_x: [0; 8],
+            sprite_counter: [0; 8],
+            sprite_counting: [true; 8],
             sprite0_in_secondary: false,
             sprite_eval_count: 0,
             sprite0_eval: false,
@@ -259,6 +301,16 @@ impl Ppu {
 
     /// Clock one PPU dot: run events for (scanline, dot), then advance counters.
     fn clock_dot(&mut self, mut cart: Option<&mut Cartridge>) {
+        // Apply an in-flight $2001 write once its delay expires — before the
+        // render sample below, so the new mask governs this dot.
+        if let Some((dots_left, value)) = self.pending_mask {
+            if dots_left == 0 {
+                self.mask = value;
+                self.pending_mask = None;
+            } else {
+                self.pending_mask = Some((dots_left - 1, value));
+            }
+        }
         let render = self.rendering_enabled();
         let visible = self.scanline <= 239;
         let is_render_scanline = visible || self.scanline == PRERENDER_SCANLINE;
@@ -308,9 +360,49 @@ impl Ppu {
             }
         }
 
+        // ── Sprite unit clocking (visible scanlines, dots 1–256) ─────────────
+        // Counters clock UNCONDITIONALLY — disabling rendering does not stop
+        // them (AccuracyCoin StaleSprite test 2). A counting unit checked at
+        // 0 halts and starts drawing this same dot; otherwise it decrements.
+        if visible && self.dot >= 1 && self.dot <= 256 {
+            for i in 0..8 {
+                if self.sprite_counting[i] {
+                    if self.sprite_counter[i] == 0 {
+                        self.sprite_counting[i] = false;
+                    } else {
+                        self.sprite_counter[i] -= 1;
+                    }
+                }
+            }
+        }
+
         // ── Pixel output (visible scanlines, dots 1–256) ─────────────────────
         if visible && self.dot >= 1 && self.dot <= 256 {
             self.output_pixel();
+        }
+
+        // ── Sprite shifter clocking (after output: front bit was this dot's
+        // pixel). Unlike the counters, the shifters clock only while
+        // rendering is enabled — F-Blank and H-Blank freeze them mid-pattern
+        // (StaleSprite tests 3/6), which is what lets stale sprite data draw
+        // when rendering is re-enabled.
+        if render && visible && self.dot >= 1 && self.dot <= 256 {
+            for i in 0..8 {
+                if !self.sprite_counting[i] {
+                    self.sprite_shift_lo[i] <<= 1;
+                    self.sprite_shift_hi[i] <<= 1;
+                }
+            }
+        }
+
+        // ── Sprite unit re-arm (dot 339) ─────────────────────────────────────
+        // All units return to "counting" mode at dot 339, but only if the
+        // PPU is rendering on that dot; during F-Blank they keep their state
+        // (usually halted → stale sprites are treated as X=0 and draw as
+        // soon as rendering is re-enabled — StaleSprite test 5, StaleBG
+        // test 4).
+        if render && is_render_scanline && self.dot == 339 {
+            self.sprite_counting = [true; 8];
         }
 
         // ── Background tile fetch (visible + pre-render, dots 1–256, 321–336) ─
@@ -401,8 +493,14 @@ impl Ppu {
 
         // ── Advance dot counter ──────────────────────────────────────────────
         self.dot += 1;
-        let skip_render = self.render_prev_dot;
+        // The odd-frame skip decision taps the RAW $2001 register (updated
+        // at the write cycle), not the delayed rendering-pipeline mask —
+        // blargg's 10-even_odd_timing pinned the decision to write-cycle
+        // timing, while AccuracyCoin's rendering-toggle tests pin the
+        // pipeline's extra MASK_WRITE_DELAY_DOTS.
+        let skip_render = self.render_raw_prev_dot;
         self.render_prev_dot = render;
+        self.render_raw_prev_dot = self.mask_raw & 0x18 != 0;
         let scanline_len = if self.scanline == PRERENDER_SCANLINE && self.odd_frame && skip_render {
             340
         } else {
@@ -826,7 +924,10 @@ impl Ppu {
                 self.sprite_shift_lo[idx] = lo;
                 self.sprite_shift_hi[idx] = hi;
                 self.sprite_attr[idx] = attr;
-                self.sprite_x[idx] = x_pos;
+                // The unit's mode is NOT touched here — units go back to
+                // "counting" only at dot 339, and only if rendering is
+                // enabled on that dot.
+                self.sprite_counter[idx] = x_pos;
             }
             _ => {}
         }
@@ -859,20 +960,19 @@ impl Ppu {
             (0, 0)
         };
 
-        // Sprite pixel (first non-transparent sprite wins)
+        // Sprite pixel (first non-transparent HALTED unit wins). A unit
+        // contributes only while halted (its down-counter reached 0); the
+        // pixel is its shifter's front bit. The shifters themselves clock in
+        // clock_dot after this returns, so a rendering disable freezes each
+        // unit mid-pattern and it resumes from the same bit on re-enable.
         let (sp_pal, sp_col, sp_priority, sp_is_zero) = if sp_enabled && !sp_left_clip {
             let mut result = (0u8, 0u8, false, false);
             for i in 0..self.sprite_count {
-                // Plain (non-wrapping) distance: a sprite at X close to 255
-                // is clipped by the right edge of the screen, not wrapped
-                // around to reappear at x=0 — wrapping_sub would do that.
-                let x_dist = x as i32 - self.sprite_x[i] as i32;
-                if !(0..8).contains(&x_dist) {
-                    continue;
+                if self.sprite_counting[i] {
+                    continue; // still counting down to its X position
                 }
-                let bit = 7 - x_dist as u8;
-                let lo = (self.sprite_shift_lo[i] >> bit) & 1;
-                let hi = (self.sprite_shift_hi[i] >> bit) & 1;
+                let lo = (self.sprite_shift_lo[i] >> 7) & 1;
+                let hi = (self.sprite_shift_hi[i] >> 7) & 1;
                 let col = (hi << 1) | lo;
                 if col == 0 {
                     continue; // transparent
@@ -1144,6 +1244,22 @@ impl Ppu {
         }
     }
 
+    /// Schedule a $2001 (PPUMASK) write to take effect MASK_WRITE_DELAY_DOTS
+    /// dots from now (counted down in clock_dot, applied at the start of a
+    /// dot's processing). Hardware applies rendering toggles a few dots
+    /// after the write cycle; the Bus's $2001 path calls this instead of
+    /// write_register so the delay rides on top of its pre-advance (which
+    /// lands at the write cycle). The open-bus refresh is NOT deferred — the
+    /// CPU-PPU bus transfer happens at the write itself. Direct
+    /// write_register(1, ..) calls (unit tests) keep immediate semantics.
+    pub fn schedule_mask_write(&mut self, data: u8) {
+        self.refresh_open_bus(data, 0xFF);
+        // The register itself updates now (write-cycle timing) — only the
+        // rendering pipeline's tap (`mask`) is deferred.
+        self.mask_raw = data;
+        self.pending_mask = Some((MASK_WRITE_DELAY_DOTS, data));
+    }
+
     /// Write a PPU register. `reg` is the 3-bit register select (addr & 7).
     /// Every write drives all 8 bits of the CPU-PPU bus, refreshing the
     /// whole open-bus decay register with the written value.
@@ -1161,8 +1277,12 @@ impl Ppu {
                 // Nametable select → t bits 10–11
                 self.t = (self.t & 0xF3FF) | ((data as u16 & 0x03) << 10);
             }
-            // $2001 PPUMASK
-            1 => self.mask = data,
+            // $2001 PPUMASK (immediate path — Bus writes go through
+            // schedule_mask_write instead, which defers the pipeline tap)
+            1 => {
+                self.mask = data;
+                self.mask_raw = data;
+            }
             // $2003 OAMADDR
             3 => self.oam_addr = data,
             // $2004 OAMDATA

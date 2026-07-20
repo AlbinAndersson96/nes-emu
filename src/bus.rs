@@ -501,7 +501,18 @@ impl CpuBus for Bus {
                         self.ppu_preadvance_nmi = true;
                     }
                     self.ppu_preadvance_cycles = self.ppu_preadvance_cycles.saturating_add(3);
-                    self.ppu.write_register(reg, data, self.cartridge.as_mut());
+                    if reg == 1 {
+                        // $2001 rendering toggles take effect a few dots
+                        // AFTER the write cycle on hardware (AccuracyCoin:
+                        // "a delay of 2 to 5 ppu cycles"). $2000 keeps the
+                        // apply-at-write-cycle placement (its NMI-window
+                        // behavior is pinned by ppu_vbl_nmi); the mask value
+                        // is deferred via a pending slot inside the PPU —
+                        // see Ppu::schedule_mask_write for the calibration.
+                        self.ppu.schedule_mask_write(data);
+                    } else {
+                        self.ppu.write_register(reg, data, self.cartridge.as_mut());
+                    }
                     self.ppu.tick_dots(1, self.cartridge.as_mut());
                     return;
                 }
