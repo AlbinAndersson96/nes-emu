@@ -25,7 +25,7 @@ fn print_raw(msg: &str) {
 
 fn load_rom(dir: &str, filename: &str) -> Vec<u8> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/roms")
+        .join("tests/roms/nes-test-roms")
         .join(dir)
         .join(filename);
     std::fs::read(&path).unwrap_or_else(|_| panic!("ROM not found: {}", path.display()))
