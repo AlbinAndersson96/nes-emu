@@ -121,3 +121,29 @@ fn dmc_dma_stall_reports_three_or_four_extra_cycles() {
         "expected a 3- or 4-cycle DMC DMA stall, got {total_stall}"
     );
 }
+
+#[test]
+fn reading_4015_does_not_update_cpu_open_bus_latch() {
+    // $4015 is internal to the 2A03 — the status byte never drives the
+    // external data bus (AccuracyCoin "Open Bus" test 7: LDA $40FF,X with
+    // X=$16 dummy-reads $4015 on the page cross, and the following read of
+    // unmapped $4115 must still return $40, the operand high byte).
+    let mut bus = Bus::new();
+    let _ = bus.read(0x0040); // RAM read puts $00 on the bus…
+    bus.write(0x0040, 0x40);
+    let _ = bus.read(0x0040); // …now the latch holds $40
+    let _ = bus.read(0x4015); // status read must NOT disturb it
+    assert_eq!(
+        bus.read(0x5000),
+        0x40,
+        "unmapped read returns the pre-$4015 open-bus value"
+    );
+}
+
+#[test]
+fn writing_4015_does_update_cpu_open_bus_latch() {
+    // Writes always drive the bus, even to $4015 (Open Bus test 8).
+    let mut bus = Bus::new();
+    bus.write(0x4015, 0x60);
+    assert_eq!(bus.read(0x5000), 0x60);
+}

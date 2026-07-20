@@ -383,7 +383,10 @@ impl Bus {
     fn read_live(&mut self, addr: u16) -> u8 {
         self.dmc_realtime_advance();
         let value = self.read_decoded_live(addr);
-        self.cpu_open_bus = value;
+        // See CpuBus::read: $4015 never drives the external data bus.
+        if addr != 0x4015 {
+            self.cpu_open_bus = value;
+        }
         value
     }
 
@@ -448,7 +451,14 @@ impl CpuBus for Bus {
     fn read(&mut self, addr: u16) -> u8 {
         self.maybe_dmc_dma(addr);
         let value = self.read_decoded(addr);
-        self.cpu_open_bus = value;
+        // $4015 is internal to the 2A03: the status byte never touches the
+        // external data bus, so a read leaves the open-bus latch unchanged
+        // (AccuracyCoin "Open Bus" test 7 — its page-cross dummy read of
+        // $4015 must not disturb the latch the following unmapped read
+        // returns). Writes to $4015 DO drive the bus like any other write.
+        if addr != 0x4015 {
+            self.cpu_open_bus = value;
+        }
         value
     }
 
