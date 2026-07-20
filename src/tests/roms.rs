@@ -26,7 +26,7 @@ fn print_raw(msg: &str) {
 
 fn load_rom(name: &str) -> Vec<u8> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/roms")
+        .join("tests/roms/nes-test-roms")
         .join(name);
     std::fs::read(&path).unwrap_or_else(|_| {
         panic!(

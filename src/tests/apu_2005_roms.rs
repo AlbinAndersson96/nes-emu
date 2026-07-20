@@ -17,7 +17,7 @@ use crate::system::SystemClock;
 // well within it.
 const FRAMES: u32 = 300;
 
-const ROM_DIR: &str = "tests/roms/blargg_apu_2005.07.30";
+const ROM_DIR: &str = "tests/roms/nes-test-roms/blargg_apu_2005.07.30";
 
 fn run_apu_rom(filename: &str) -> u8 {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
