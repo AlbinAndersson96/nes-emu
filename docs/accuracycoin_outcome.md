@@ -14,6 +14,45 @@ Cases` (level-sensed IRQ; the run no longer hangs).
 remains fully green (377 passed / 0 failed). (Page 15, "Power On State", is all `DRAW` tests
 with no pass/fail verdict and is excluded from the 141.)
 
+## Session 16 (2026-07-21): DMC-phase cluster surveyed; Delta Modulation Channel (L) attempted — deeper than the load delay
+
+Surveyed the "DMC-phase cluster" and attempted its most tractable-looking member. Key
+result: **there is no single "DMC-phase" root** — the cluster is four *distinct* problems,
+and the load-delay hypothesis for `Delta Modulation Channel` was correct-in-principle but
+not the actual blocker (attempt reverted; nothing committed, still 125/141, 379/0 blargg).
+
+**Cluster map (for whoever resumes this):**
+- `Delta Modulation Channel` (code **L**, passes 1–K): `$4015`-write-starting-a-sample
+  timing vs the DMC timer edge — see below.
+- `Frame Counter IRQ` (code 7): get→put-aware `$4015`-read frame-IRQ-clear deferral —
+  **Session 6 attempted & reverted** (broke `cpu_interrupts_v2/3` via `APU_READ_PREADVANCE`).
+- `I Flag Latency` (code A): branch-poll vs **DMC-IRQ-assert** cycle alignment — the
+  Session-15 phase-shuffle collateral; pure knife-edge DMC real-time-clock phase.
+- `APU Register Activation` (code 4): a **bus-conflict feature** (OAM DMA reading APU
+  registers under a `$4016`-strobe/address condition), not DMC timing.
+The remaining code-2 failures (`DMA Bus Conflict`, `DMC DMA + OAM DMA`, `Implicit/Explicit
+DMA Abort`, `Internal Data Bus`, `ALE`/`Hybrid`, `OAM Corruption`) are the deliberately
+out-of-scope feature-scale bus models.
+
+**Delta Modulation Channel code L attempt (reverted):** Test L disables a playing DMC,
+reconfigures it (loop, fastest rate, 1-byte sample), and re-enables via `$4015` *while the
+previous sample's last byte is still in the buffer* (`needs_dma` still false), with the DMC
+timer 2 cycles from clocking; the DMA must stay gated by the load delay from the write, not
+fire on the timer edge. Our `$4015` path armed `dmc_load_delay` only when `needs_dma` went
+false→true, missing this restart-with-full-buffer case. Fix tried: arm the delay whenever a
+`$4015` write *restarts* the sample (`dmc_active()` false→true) regardless of buffer state.
+**Verified with instrumentation that this fires in 46 real restart-with-full-buffer cases
+(correctly, matching the ROM's "load DMA from the write, not a reload DMA from the timer
+edge" model) — yet the AccuracyCoin result was byte-identical: L still fails at code 21.**
+So the load-delay *arming* is not L's blocker. What remains is the DMA's **stall length /
+exact occurrence cycle** for the enable-during-timer-edge case (the ROM: "delayed by 1
+alignment cycle, this DMA is 3 CPU cycles long instead of 4"), i.e. the
+`DMC_DMA_ALIGNED_PARITY` stall-length decision under the shifted phase — the deeply
+calibrated DMC real-time-clock territory that trades tests 1-for-1. Reverted rather than
+ship an unvalidated no-op. Next attempt should start from the DMA stall length (3 vs 4) at
+the L/M/N timer edges, not the load-delay condition (that part is understood and, if
+pursued, the `dmc_active()`-restart arming is the right form).
+
 ## Session 15 (2026-07-21): Branch Dummy Reads — taken-branch T3/T4 dummy reads (+ DMC-phase collateral)
 
 Fixed `Branch Dummy Reads` (123→125 net). A taken branch's third cycle must dummy-read the
