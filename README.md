@@ -1,6 +1,6 @@
 # nes-emu
 
-A NES emulator written in Rust.
+A cycle-accurate NES emulator written in Rust.
 
 ## Status
 
@@ -10,18 +10,44 @@ A NES emulator written in Rust.
 | CPU — unofficial/illegal opcodes | Complete |
 | PPU — registers, scrolling, NMI | Complete |
 | PPU — background + sprite rendering | Complete |
-| APU — all 5 channels + frame counter | Complete |
-| Cartridge — NROM (mapper 0) | Complete |
-| Cartridge — MMC1 (mapper 1) | Complete |
-| Controllers | Partial (serial shift register wired, no input source) |
+| APU — all 5 channels + frame counter | Complete (sample generation; no audio device wired yet) |
+| Cartridge — NROM (0), MMC1 (1), UxROM (2), CNROM (3), MMC3 (4), AxROM (7) | Complete |
+| Controllers — configurable keyboard input | Complete |
 | Display output | Complete (winit + egui/egui-wgpu, WSL2-compatible) |
 
-All 159 blargg CPU ROM tests pass: all 17 `instr_test-v5` tests, `instr_timing`,
-all 5 `instr_misc` tests, and all of `cpu_interrupts_v2` (tests 1-5 plus the
-combined suite). 4 of 5 blargg PPU tests pass; see CLAUDE.md "Known gaps" for
-the remaining PPU test failures.
+### Test conformance
+
+`cargo test` is fully green. Highlights:
+
+- **All 159 blargg CPU ROM tests** pass: all 17 `instr_test-v5` tests, `instr_timing`,
+  all 5 `instr_misc` tests, all of `cpu_interrupts_v2` (tests 1-5 plus the combined
+  suite), plus `instr_test-v3`, `nes_instr_test`, `cpu_dummy_writes`, `cpu_dummy_reads`,
+  `cpu_exec_space`, `cpu_reset`, `cpu_timing_test6`, `branch_timing_tests`, and both
+  `blargg_nes_cpu_test5` ROMs.
+- **All 26 wired blargg APU ROM tests** pass: `apu_test` (9), `apu_reset` (6), and
+  `blargg_apu_2005.07.30` (11).
+- **PPU ROM tests** pass: `ppu_vbl_nmi`, `oam_read`, `oam_stress`, `ppu_open_bus`,
+  `ppu_read_buffer`, `sprite_hit_tests`, `sprite_overflow_tests`, `vbl_nmi_timing`,
+  and the 2005 PPU suite (with golden-screenshot comparison).
+- **Mapper 3/4 ROM tests** pass: `mmc3_test`, `mmc3_test_2`, `mmc3_irq_tests`
+  (minus the mutually-exclusive rev-A/MMC6 ROMs).
+- **AccuracyCoin** (the 141-test all-in-one accuracy ROM): 121/141, run via an
+  `#[ignore]`d harness. See [`docs/accuracycoin_outcome.md`](docs/accuracycoin_outcome.md)
+  for the per-test breakdown and remaining-failure analysis.
+
+See [CLAUDE.md](CLAUDE.md) "Known gaps" for what remains (the listen-only `apu_mixer`
+suite, mappers beyond 0/1/2/3/4/7, and the deepest AccuracyCoin PPU/DMA bus-timing quirks).
 
 ## Building and running
+
+### Test ROMs are git submodules
+
+The ROM test suites live in submodules under `tests/roms/`. Fetch them before running
+the tests (not needed just to build or run the emulator):
+
+```bash
+git submodule update --init --recursive
+```
 
 ### System dependencies (Ubuntu/Debian)
 
@@ -36,53 +62,77 @@ sudo apt install pkg-config libgtk-3-dev libxkbcommon-x11-0
 ### Commands
 
 ```bash
-cargo build
-cargo run <rom.nes>
-cargo test
-cargo clippy
-cargo fmt
+cargo build            # compile
+cargo run <rom.nes>    # run a ROM (or run with no argument and use the File menu)
+cargo test             # run all tests (includes the blargg ROM suites)
+cargo clippy           # lint
+cargo fmt              # format
 ```
+
+### Controls
+
+Key bindings are loaded from a `keybindings.toml` file placed next to the compiled
+binary — `build.rs` seeds it from [`assets/keybindings.toml`](assets/keybindings.toml)
+on first build and never overwrites an existing copy, so your edits survive rebuilds.
+If the file is missing, a hardcoded default mapping is used. See
+[`docs/input.md`](docs/input.md) for the format and default bindings.
 
 ## Project layout
 
 ```
+build.rs             — seeds keybindings.toml next to the binary on first build
+assets/
+  keybindings.toml   — default controller key bindings (copied by build.rs)
+  fonts/             — UI fonts
 src/
-  main.rs            — entry point, event loop, WSL2 GPU setup
-  app.rs             — App state machine (ROM loading, per-frame stepping)
-  system.rs          — SystemClock: shared per-cycle stepping + interrupt delivery rules
+  main.rs            — entry point, event loop, keyboard→controller input, WSL2 GPU setup
+  app.rs             — App state machine (ROM loading, per-frame stepping, replay)
+  menu.rs            — egui File menu interaction
+  input.rs           — KeyMap: keyboard KeyCode → (controller port, button) from TOML
+  replay.rs          — input recording / playback
+  system.rs          — SystemClock: shared per-cycle stepping + interrupt-delivery rules
   bus.rs             — system bus: RAM, PPU, APU, controllers, cartridge; OAM/DMC DMA
   renderer.rs        — winit window + egui/egui-wgpu renderer; NES palette → RGBA
-  cartridge.rs       — iNES parser; mapper 0 (NROM) and mapper 1 (MMC1)
+  cartridge.rs       — iNES parser; mappers 0, 1, 2, 3, 4, 7
   cpu/
     mod.rs           — Cpu struct, micro-op queue, tick(), Bus trait
     instructions.rs  — opcode dispatcher (all official + unofficial opcodes)
   ppu/
-    mod.rs           — full PPU: scanline timing, bg/sprite pipeline, OAM, NMI
+    mod.rs           — full PPU: dot/scanline timing, bg/sprite pipeline, OAM, NMI
   apu/
     mod.rs           — APU orchestration, frame counter, mixer
     pulse.rs         — pulse channels (duty, envelope, sweep)
     triangle.rs      — triangle channel
     noise.rs         — noise channel (15-bit LFSR)
-    dmc.rs           — delta-modulation channel
+    dmc.rs           — delta-modulation channel + DMA
     envelope.rs      — shared envelope generator
-    length.rs        — length counter table
+    length.rs        — length counter (write-cycle-exact halt/reload timing)
     sweep.rs         — sweep unit
   tests/
     mod.rs           — TestBus used by unit tests
     bus.rs           — bus unit tests
     cpu.rs           — CPU unit tests
     ppu.rs           — PPU unit tests
-    roms.rs          — blargg CPU ROM test harness
-    ppu_roms.rs      — blargg PPU ROM test harness (screenshot comparison)
-    sprite_hit_roms.rs — blargg sprite-0-hit ROM test harness
+    cartridge.rs     — mapper unit tests (synthetic iNES images)
+    roms.rs          — $6000-protocol blargg ROM harness (CPU, APU, MMC3)
+    text_console_roms.rs — on-screen-text blargg ROM harness
+    ppu_roms.rs      — blargg PPU ROM harness (golden-screenshot comparison)
+    apu_2005_roms.rs — blargg 2005 APU frame-counter ROM harness
+    sprite_hit_roms.rs — blargg sprite-0-hit ROM harness
+    accuracycoin.rs  — headless AccuracyCoin all-in-one runner (#[ignore]d)
 docs/
   bus.md             — address map and bus design notes
   cpu_instructions.md — 6502 instruction reference
   cpu_interrupts.md  — NMI/IRQ/BRK dispatch, hijacking, and polling rules
   apu.md             — APU register reference and implementation notes
   ppu.md             — PPU implementation reference and checklist
+  input.md           — controller keybinding config format and defaults
+  accuracycoin_outcome.md — AccuracyCoin per-test results and analysis
   investigations/    — chronological debugging logs (reference, not maintained docs)
-tests/roms/          — blargg ROM files (cpu/ and ppu/ suites)
+tests/roms/          — git submodules (see "Test ROMs are git submodules" above)
+  nes-test-roms/     — christopherpow/nes-test-roms: all blargg suites
+  AccuracyCoin/      — 100thCoin/AccuracyCoin: the all-in-one accuracy ROM
+tests/screenshots/   — golden PPU screenshots for the 2005 PPU suite
 ```
 
 ## Docs
@@ -92,20 +142,22 @@ tests/roms/          — blargg ROM files (cpu/ and ppu/ suites)
 - [`docs/cpu_interrupts.md`](docs/cpu_interrupts.md) — interrupt dispatch, hijacking, and polling rules
 - [`docs/apu.md`](docs/apu.md) — APU channel registers and frame counter
 - [`docs/ppu.md`](docs/ppu.md) — PPU implementation reference
+- [`docs/input.md`](docs/input.md) — controller keybinding config format and defaults
+- [`docs/accuracycoin_outcome.md`](docs/accuracycoin_outcome.md) — AccuracyCoin per-test results and analysis
 
 ## Credits
 
-The ROM test files in `tests/roms/` are from two suites, both written by
-**Shay Green** (gblargg@gmail.com):
+The ROM test files under `tests/roms/` are consumed as git submodules of two
+upstream repositories:
 
-- [`instr_test-v5`](https://github.com/christopherpow/nes-test-roms/tree/master/instr_test-v5) — instruction correctness (official + unofficial opcodes)
-- [`cpu_interrupts_v2`](https://github.com/christopherpow/nes-test-roms/tree/master/cpu_interrupts_v2) — IRQ/NMI interrupt timing
-- [`instr_misc`](https://github.com/christopherpow/nes-test-roms/tree/master/instr_misc) — instruction edge cases (address wrap, dummy reads)
-- [`instr_timing`](https://github.com/christopherpow/nes-test-roms/tree/master/instr_timing) — cycle-accurate instruction timing
+- [christopherpow/nes-test-roms](https://github.com/christopherpow/nes-test-roms) —
+  the blargg CPU/PPU/APU/mapper test suites, written by **Shay Green** (gblargg@gmail.com).
+- [100thCoin/AccuracyCoin](https://github.com/100thCoin/AccuracyCoin) —
+  the all-in-one accuracy ROM.
 
 ## What's next
 
-- Remaining PPU test failures (sprite-0-hit timing; see CLAUDE.md "Known gaps")
-- APU audio output (sample generation is implemented; audio device / SDL output not yet wired)
-- Additional mappers (UxROM, CNxROM, MMC3, …)
-- Controller input (keyboard / gamepad mapping)
+- APU audio output (sample generation is implemented; an audio device / sink is not yet wired)
+- Battery-backed save (PRG-RAM) persistence
+- Additional mappers
+- Remaining AccuracyCoin accuracy quirks (see [`docs/accuracycoin_outcome.md`](docs/accuracycoin_outcome.md))

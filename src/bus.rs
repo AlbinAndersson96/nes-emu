@@ -290,7 +290,15 @@ impl Bus {
                     if self.ppu.take_nmi() {
                         self.ppu_preadvance_nmi = true;
                     }
-                    return value;
+                    // The VBL flag is latched at the START of the read cycle
+                    // (M2 rise), but the sprite-0/overflow bits are sampled
+                    // at its END, ~1.9 PPU cycles later (AccuracyCoin "$2002
+                    // Flag Timing"): a read straddling the pre-render-dot-1
+                    // clear sees VBL still set with the sprite flags already
+                    // cleared. Re-sample bits 6-5 after the trailing dot —
+                    // one dot later than the (race-calibrated, untouchable)
+                    // VBL sample point, inside the same 9-dot budget.
+                    return self.ppu.resample_sprite_flags(value);
                 }
                 self.ppu.read_register(reg, self.cartridge.as_mut())
             }
