@@ -114,6 +114,13 @@ impl SystemClock {
                 } else {
                     cpu.irq();
                 }
+            } else {
+                // Level-sensed IRQ: the line is low this cycle, so withdraw any
+                // latched-but-unserviced IRQ. Matches the 6502 sampling the IRQ
+                // level at each poll — a source cleared mid-instruction (e.g. an
+                // implied op's $4015 dummy read clearing the frame-IRQ flag) is
+                // not pending at the next dispatch.
+                cpu.irq_deassert();
             }
         }
 

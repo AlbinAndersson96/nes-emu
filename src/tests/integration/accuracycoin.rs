@@ -243,6 +243,15 @@ fn accuracycoin_run_all() {
     let mut started = false;
     let mut last_tally = 0xFFu8;
     let mut apureg_seen = false;
+    // `RunningAllTests` ($35) is a zero-page byte the ROM sets to 1 at run-all
+    // start and clears only at true completion. But the `Implied Dummy Reads`
+    // test legitimately zeroes ALL of zero page ($00-$FF via `STA $00,X`) as
+    // scratch, transiently clearing $35 mid-run before restoring ZP from
+    // $0700-$07FF. Breaking on the first $35==0 would end the run early inside
+    // that test; require $35 to stay 0 for a sustained window to tell true
+    // completion from the transient clobber.
+    let mut zero_since: Option<u64> = None;
+    const RUNNING_ZERO_STABLE_CYCLES: u64 = 4_000_000;
 
     loop {
         clock.step(&mut cpu, &mut bus);
@@ -281,10 +290,17 @@ fn accuracycoin_run_all() {
                 ));
             }
             if running == 0 {
-                print_raw(&format!(
-                    "[accuracycoin] run-all finished at cycle {cycles}"
-                ));
-                break;
+                if zero_since.is_none() {
+                    zero_since = Some(cycles);
+                }
+                if cycles - zero_since.unwrap() >= RUNNING_ZERO_STABLE_CYCLES {
+                    print_raw(&format!(
+                        "[accuracycoin] run-all finished at cycle {cycles}"
+                    ));
+                    break;
+                }
+            } else {
+                zero_since = None;
             }
         }
 
