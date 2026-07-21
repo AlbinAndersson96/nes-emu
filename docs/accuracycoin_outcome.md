@@ -4,18 +4,73 @@
 git submodule of the upstream AccuracyCoin repo, so per-emulator notes can't
 live next to it anymore.)
 
-**Status (2026-07-20, branch `claude/standout-issues-next-jplv6h`): 121 of the 141 tests
-pass**, up from 119 (Session 10) / 118 (Session 9) / 115 (Session 8) / 100 (Session 2) /
-91 (develop baseline). `cargo test` remains fully green (378 passed / 0 failed). (Page
+**Status (2026-07-21, branch `claude/standout-issues-next-jplv6h`): 121 of the 141 tests
+pass**, unchanged after Session 12's `$2004 Stress` attempt (see below) —
+119 (Session 10) / 118 (Session 9) / 115 (Session 8) / 100 (Session 2) /
+91 (develop baseline). `cargo test` remains fully green (377 passed / 0 failed). (Page
 15, "Power On State", is all `DRAW` tests with no pass/fail verdict and is excluded from
 the 141.)
+
+## Session 12 (2026-07-21): $2004 Stress — attempted, reverted (feature-scale + entangled)
+
+Built a per-dot internal **OAM data-bus latch** (`oam_buffer`) so $2004 reads during
+rendering return what the rendering machinery last transferred, plus the $2002-style
+8+1-dot read pre-advance for $2004. This is hardware-correct and got real traction:
+
+- **`$2004 Stress` test 2 (answer key 1, the <8-sprite / OAMADDR-overflow case) passed**
+  cleanly. Decoded and matched the whole 341-byte key: $FF during the clear window
+  (dots 1-64), the evaluation walk's per-step bytes (attribute positions masked to
+  bits 2-4 clear *at the primary-OAM read*, not at the secondary read), the
+  even-dot secondary-OAM write-through vs read-back distinction, the rejected-Y
+  write-through into the next open slot, the post-evaluation idle walk (n keeps
+  incrementing mod 64), the overflow-scan diagonal, the 3 post-flag dummy reads
+  (m/n incremented *before* each read), and the sprite-fetch window's per-slot
+  Y/tile/attr/X reads.
+- **`$2004 Stress` test 3 (answer key 2, the 8-sprite / overflow case)** came down to a
+  clean, uniform **+3-dot shift**: our whole $500 table matched the key at `shift +3`
+  (0 mismatches) but the ROM compares unshifted. The 3-dot (1-CPU-cycle) offset appears
+  only in the 8-in-range-sprite path, not test 2 — an eval-timing subtlety in the
+  fill→overflow transition that I did not root-cause.
+- **`Address $2004 Behavior` advanced 4 → 6** (a genuine 2-sub-test gain): it now passes
+  "reads $FF during dots 1-64 with rendering enabled" (test 4) and the rendering-disabled
+  variant (test 5). It fails at test 6, which needs a *separate, unimplemented* feature:
+  **$2004 WRITES during a visible scanline increment OAMADDR by 4 (and don't write OAM;
+  test A then `& $FC`s the address)** — not part of the read-buffer model at all.
+
+**Why it was reverted.** Enabling the buffer read reshuffled the phase-sensitive cluster:
+`Address $2004 Behavior` (execution-order #126) now runs *longer* (reaching test 6 vs
+stopping at test 4), which shifts global timing for the tests that run after it —
+`StaleSprite`(#131) and `BGSerial`(#132) both flipped pass→fail. Confirmed the mechanism
+with a tally→result-address map (execution order: APURegAct #102, Address2004 #126,
+StaleBG #130, StaleSprite #131, BGSerial #132, 2004_Stress #134) and a per-read trace
+(first buffer-path read at #125, i.e. Address2004's own reads). Every knob traded tests
+1-for-1: default (`MASK_WRITE_DELAY_DOTS=3`) → 119 (lose StaleSprite+BGSerial); `=4` →
+120 (recover both, lose one elsewhere + 2004_Stress test 2 regresses). No configuration
+reached a net gain, because a real gain needs **both** `$2004 Stress` fully passing (the
++3 fix) **and** `Address $2004 Behavior` fully passing (the $2004-write feature) **and**
+the phase dominoes to land — i.e. it is not a scoped single but a feature-scale OAM/$2004
+model, the same category as `OAM Corruption` and the `ALE + Read`/`Hybrid Addresses`
+octal-latch work already deferred. Reverted to the clean 121 baseline rather than commit
+net-negative churn; the full implementation diff is preserved for a future dedicated
+session (the buffer model was ~90% correct — only the test-3 +3-dot shift and the
+$2004-write behavior remain, plus a phase-domino recheck).
+
+Roadmap for the next attempt, in order: (1) root-cause the +3-dot shift in the
+8-sprite fill→overflow transition (dump `$500` from the harness with `TRACE_2004_STRESS`,
+diff vs `Test_2004_Stress_AnswerKey2`); (2) implement $2004-write-during-rendering
+(OAMADDR += 4, no OAM write, `& $FC`) for `Address $2004 Behavior` tests 6/7/A;
+(3) re-check the sprite-fetch-window semantics (`Address $2004 Behavior` test 9 says
+dots 256-320 read $FF, which must be reconciled with `$2004 Stress` key 2 showing
+secondary-OAM values there); (4) only then measure the net and recalibrate
+`MASK_WRITE_DELAY_DOTS` against the new phase.
 
 ## Stress tests: assessed and decoded (next dedicated sessions)
 
 Both remaining scoped singles were fully decoded from the ROM source; each is a
 dedicated-session effort with a precise oracle:
 
-- **`$2004 Stress` (code 2):** the ROM reads $2004 on EVERY dot of a target scanline
+- **`$2004 Stress` (code 2):** attempted in Session 12 (see that section — feature-scale,
+  reverted). The ROM reads $2004 on EVERY dot of a target scanline
   (17 stepped reads x 21 frames, tabulated at $500-$654) and compares against two
   341-byte answer keys (`Test_2004_Stress_AnswerKey1/2`). Needs (a) a per-dot internal
   "OAM buffer" model: $FF during the clear window (done), the evaluation walk's byte
