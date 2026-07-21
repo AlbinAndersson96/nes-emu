@@ -218,7 +218,12 @@ button bit (A, B, Select, Start, Up, Down, Left, Right).
 ## Cartridge ($4020–$FFFF)
 
 The cartridge receives all addresses not decoded by the CPU's internal logic.
-Two mappers are currently supported:
+Fifteen mappers are currently supported — NROM (0), MMC1 (1), UxROM (2),
+CNROM (3), MMC3 (4), AxROM (7), MMC2 (9), MMC4 (10), Color Dreams (11),
+BNROM/NINA-001 (34), GxROM (66), Sunsoft FME-7 (69), Camerica (71), Jaleco
+CHR (87), and Namco 118/DxROM (206). Each is a small `impl Mapper` in
+`src/cartridge.rs` with a header comment describing its register interface;
+the two oldest are detailed below for reference:
 
 ### Mapper 0 — NROM
 
