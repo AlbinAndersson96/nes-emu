@@ -5,11 +5,59 @@ git submodule of the upstream AccuracyCoin repo, so per-emulator notes can't
 live next to it anymore.)
 
 **Status (2026-07-21, branch `claude/standout-issues-next-jplv6h`): 121 of the 141 tests
-pass**, unchanged after Session 12's `$2004 Stress` attempt (see below) —
+pass**, unchanged after the Session 12 (`$2004 Stress`) and Session 13 (`$2007 Stress`)
+attempts (both feature-scale, reverted; see below) —
 119 (Session 10) / 118 (Session 9) / 115 (Session 8) / 100 (Session 2) /
 91 (develop baseline). `cargo test` remains fully green (377 passed / 0 failed). (Page
 15, "Power On State", is all `DRAW` tests with no pass/fail verdict and is excluded from
 the 141.)
+
+## Session 13 (2026-07-21): $2007 Stress — attempted, reverted (feature-scale + entangled)
+
+Implemented the core of the PPU DATA state machine for $2007-read-during-rendering: a
+per-dot internal **data-bus latch** (`ppu_data_bus`, updated by every background
+NT/attr/pattern fetch) and a **buffer-refill countdown** (`read_buf_refill`,
+`REFILL_DELAY`) so a $2007 read during rendering doesn't do its own VRAM fetch — instead
+the read buffer is refilled, a few PPU cycles after the read ends, with whatever the
+fetch pipeline read on that cycle (exactly what AccuracyCoin "$2007 Stress" checks:
+170 stable reads across a scanline vs `TEST_2007StressTest_Key`; the unstable/analog
+reads are the even indices and are skipped by the ROM's own eval).
+
+**Proven correct:** in the background region (dots 1-256) the **nametable and attribute
+bytes captured into the buffer match the answer key** (NT 34/42, attr 32/43 — the misses
+are all edge/HBlank, not body). This validates the whole model end-to-end: the data-bus
+latch, the refill timing, and the read-cycle placement all work for the fetch types whose
+address doesn't move.
+
+**Two blockers remain, both feature-scale:**
+1. **Pattern bytes are wrong** (patlo/pathi 8/42). Root cause: reading $2007 during
+   rendering triggers the coarse-X + fine-Y *glitch increment* (the documented quirk we
+   already model), so each read shifts `v`'s fine Y, and the pattern fetch the state
+   machine then captures is from a different row than the key expects. NT/attr survive
+   because they're captured on the fetch right after the read, before the glitch
+   propagates; the pattern is captured later. Getting this exact needs modeling the
+   glitch-increment/capture ordering to the dot.
+2. **The entire HBlank region (dots 257-320) is unmodeled.** Our `fetch_sprites` is
+   "compressed" (both pattern planes on one dot, no per-dot dummy NT reads); the key's
+   HBlank bytes (`00 00 FF FF` cadence) require reworking sprite fetch into the real
+   per-dot NT/NT/pattern/pattern cadence — a change to the blargg-verified sprite
+   pipeline. Plus the dot-337-340 end-of-line dummy NT reads and the dot-0 pattern setup
+   feed the bus too.
+
+The test is **all-or-nothing** (the ROM fails on the first mismatched stable byte), so
+there is no net-positive partial: NT/attr correct + pattern/HBlank wrong = still failing.
+Same category and outcome as Session 12's `$2004 Stress` — reverted to the clean 121
+baseline rather than commit a large, incomplete, entanglement-risky change (the $2007
+read path is shared with `ALE + Read`/`Hybrid Addresses` and the phase-sensitive
+cluster). The ~150-line implementation diff is preserved for a future dedicated attempt.
+
+Roadmap for the next attempt, in order: (1) rework `fetch_sprites` into the per-dot
+read cadence (NT/NT/pattern/pattern per slot) feeding `ppu_data_bus`, plus the
+337-340 / dot-0 dummy reads; (2) model the glitch-increment vs state-machine-capture
+ordering so the captured pattern row matches; (3) calibrate `REFILL_DELAY` + parity
+against `TEST_2007StressTest_Key` via the harness $500 dump (`TRACE_2007_STRESS`),
+honoring the ROM's own ±1 off-by-one rotation; (4) re-check phase dominoes and the
+`ALE`/`Hybrid Addresses` interaction before measuring net.
 
 ## Session 12 (2026-07-21): $2004 Stress — attempted, reverted (feature-scale + entangled)
 
@@ -81,12 +129,13 @@ dedicated-session effort with a precise oracle:
   secondary[0] during the prefetch tail; and (b) $2004 reads getting the $2002-style
   8+1-dot pre-advance so the sample lands on the read cycle (watch oam_read/oam_stress).
   Debugging oracle: dump $500+dot from the harness and diff against the key directly.
-- **`$2007 Stress` (code 2):** the read buffer must be refilled 2 PPU cycles after the
-  CPU read ends, and with rendering enabled it captures whatever the RENDER PIPELINE
-  fetched on that cycle (nametable/pattern/sprite-dummy/end-of-line-dummy fetches) —
-  not an independent VRAM read. Requires reworking the $2007 refill to ride the
-  pipeline's bus activity (adjacent to, but much smaller than, the ALE/octal-latch
-  model), plus the same read-cycle sampling care.
+- **`$2007 Stress` (code 2):** attempted in Session 13 (see that section — feature-scale,
+  reverted; the NT/attr half of the model is proven correct, but the pattern-fetch
+  glitch-increment interaction and the HBlank sprite-fetch cadence rework remain). The
+  read buffer must be refilled a few PPU cycles after the CPU read ends, and with
+  rendering enabled it captures whatever the RENDER PIPELINE fetched on that cycle
+  (nametable/pattern/sprite-dummy/end-of-line-dummy fetches) — not an independent VRAM
+  read.
 
 ## Session 11 (2026-07-20): $2002 Flag Timing — split VBL/sprite sampling + set latches
 
