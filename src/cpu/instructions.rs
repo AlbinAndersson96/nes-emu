@@ -1454,24 +1454,30 @@ fn ldy_m(cpu: &mut Cpu, bus: &mut dyn Bus, addr: u16) {
 }
 
 fn branch(cpu: &mut Cpu, bus: &mut dyn Bus, taken: bool) -> u8 {
-    let offset = cpu.fetch(bus) as i8 as i16; // T2: fetch offset
+    let offset = cpu.fetch(bus) as i8 as i16; // T2: fetch offset (PC now = byte after operand)
     if !taken {
         return 2; // T1 + T2
     }
     let old_pc = cpu.pc;
+    // T3: every taken branch dummy-reads the byte following the operand (the
+    // pre-branch PC) while the offset is added to PCL — AccuracyCoin's Branch
+    // Dummy Reads code 4. A real bus cycle, not a silent one: it also keeps the
+    // DMC-DMA real-time clock's one-bus-access-per-cycle assumption intact.
+    let _ = bus.read(old_pc);
     let target = old_pc.wrapping_add(offset as u16);
 
     if (old_pc & 0xFF00) != (target & 0xFF00) {
-        // Page cross: T3 spurious read at page-wrong address, then T4 (BranchPageFix).
+        // Page cross: PCL was added on T3 but PCH is still wrong, so PC holds
+        // the page-wrong address. T4 (BranchPageFix) dummy-reads that address
+        // before correcting PCH (AccuracyCoin Branch Dummy Reads code 5).
         let pcl = (old_pc as u8).wrapping_add(offset as u8) as u16;
         let page_wrong_pc = (old_pc & 0xFF00) | pcl;
-        let _ = bus.read(page_wrong_pc); // T3 spurious read
         cpu.pc = page_wrong_pc;
         cpu.branch_target_hi = (target >> 8) as u8;
         cpu.enqueue(super::MicroOp::BranchPageFix);
         3 // T1+T2+T3; T4 comes from BranchPageFix micro-op
     } else {
-        // No page cross: set correct PC immediately (T3 implicit).
+        // No page cross: PC is correct after T3.
         cpu.pc = target;
         3 // T1+T2+T3
     }

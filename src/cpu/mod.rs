@@ -121,6 +121,19 @@ impl Cpu {
         self.irq_pending = true;
     }
 
+    /// De-assert the maskable IRQ line: the level went low this cycle, so a
+    /// previously-latched (but not yet serviced) IRQ is withdrawn. The 6502
+    /// samples the IRQ *level* at each poll point, so an IRQ source cleared
+    /// mid-instruction (e.g. an implied instruction's own dummy read of $4015
+    /// clearing the APU frame-IRQ flag) must not still be pending at the next
+    /// dispatch. Without this, `irq_pending` was a set-only latch that survived
+    /// the clear and fired a spurious interrupt (AccuracyCoin Implied Dummy
+    /// Reads: an injected CLI whose $4015 dummy read clears the frame IRQ).
+    pub fn irq_deassert(&mut self) {
+        self.irq_pending = false;
+        self.irq_asserted_on_last_cycle = false;
+    }
+
     /// Signal a maskable interrupt whose line FIRST asserted on the final cycle
     /// of the instruction that just completed. Run loops that tick the APU one
     /// cycle at a time use this instead of irq() for that specific case: a
@@ -358,8 +371,11 @@ impl Cpu {
                     let p = (self.p & !FLAG_B) | FLAG_U;
                     self.queue_interrupt_sequence(0xFFFE, p);
                 } else {
-                    // Normal page fix: T4 cycle + correct high byte.
+                    // Normal page fix: T4 dummy-reads the page-wrong address
+                    // (old PCH : new PCL) before correcting the high byte —
+                    // AccuracyCoin Branch Dummy Reads code 5. A real bus cycle.
                     self.cycles += 1;
+                    let _ = bus.read(self.pc);
                     self.pc = (self.pc & 0x00FF) | ((self.branch_target_hi as u16) << 8);
                 }
             }

@@ -4,13 +4,122 @@
 git submodule of the upstream AccuracyCoin repo, so per-emulator notes can't
 live next to it anymore.)
 
-**Status (2026-07-21, branch `claude/standout-issues-next-jplv6h`): 121 of the 141 tests
-pass**, unchanged after the Session 12 (`$2004 Stress`) and Session 13 (`$2007 Stress`)
-attempts (both feature-scale, reverted; see below) —
-119 (Session 10) / 118 (Session 9) / 115 (Session 8) / 100 (Session 2) /
-91 (develop baseline). `cargo test` remains fully green (377 passed / 0 failed). (Page
-15, "Power On State", is all `DRAW` tests with no pass/fail verdict and is excluded from
-the 141.)
+**Status (2026-07-21): 125 of the 141 tests pass** — Session 15 fixed `Branch Dummy Reads`
+(the taken-branch T3/T4 dummy reads), which as a more-accurate-DMC-clock side effect also
+flipped `DMA + $4016 Read` and `Instruction Timing` to pass, at the cost of `I Flag Latency`
+(a DMC-IRQ-phase-shuffle collateral). Session 14 fixed `Implied Dummy Reads` + `JSR Edge
+Cases` (level-sensed IRQ; the run no longer hangs).
+125 (Session 15) / 123 (Session 14) / 121 (Sessions 11-13) / 119 (Session 10) /
+118 (Session 9) / 115 (Session 8) / 100 (Session 2) / 91 (develop baseline). `cargo test`
+remains fully green (377 passed / 0 failed). (Page 15, "Power On State", is all `DRAW` tests
+with no pass/fail verdict and is excluded from the 141.)
+
+## Session 16 (2026-07-21): DMC-phase cluster surveyed; Delta Modulation Channel (L) attempted — deeper than the load delay
+
+Surveyed the "DMC-phase cluster" and attempted its most tractable-looking member. Key
+result: **there is no single "DMC-phase" root** — the cluster is four *distinct* problems,
+and the load-delay hypothesis for `Delta Modulation Channel` was correct-in-principle but
+not the actual blocker (attempt reverted; nothing committed, still 125/141, 379/0 blargg).
+
+**Cluster map (for whoever resumes this):**
+- `Delta Modulation Channel` (code **L**, passes 1–K): `$4015`-write-starting-a-sample
+  timing vs the DMC timer edge — see below.
+- `Frame Counter IRQ` (code 7): get→put-aware `$4015`-read frame-IRQ-clear deferral —
+  **Session 6 attempted & reverted** (broke `cpu_interrupts_v2/3` via `APU_READ_PREADVANCE`).
+- `I Flag Latency` (code A): branch-poll vs **DMC-IRQ-assert** cycle alignment — the
+  Session-15 phase-shuffle collateral; pure knife-edge DMC real-time-clock phase.
+- `APU Register Activation` (code 4): a **bus-conflict feature** (OAM DMA reading APU
+  registers under a `$4016`-strobe/address condition), not DMC timing.
+The remaining code-2 failures (`DMA Bus Conflict`, `DMC DMA + OAM DMA`, `Implicit/Explicit
+DMA Abort`, `Internal Data Bus`, `ALE`/`Hybrid`, `OAM Corruption`) are the deliberately
+out-of-scope feature-scale bus models.
+
+**Delta Modulation Channel code L attempt (reverted):** Test L disables a playing DMC,
+reconfigures it (loop, fastest rate, 1-byte sample), and re-enables via `$4015` *while the
+previous sample's last byte is still in the buffer* (`needs_dma` still false), with the DMC
+timer 2 cycles from clocking; the DMA must stay gated by the load delay from the write, not
+fire on the timer edge. Our `$4015` path armed `dmc_load_delay` only when `needs_dma` went
+false→true, missing this restart-with-full-buffer case. Fix tried: arm the delay whenever a
+`$4015` write *restarts* the sample (`dmc_active()` false→true) regardless of buffer state.
+**Verified with instrumentation that this fires in 46 real restart-with-full-buffer cases
+(correctly, matching the ROM's "load DMA from the write, not a reload DMA from the timer
+edge" model) — yet the AccuracyCoin result was byte-identical: L still fails at code 21.**
+So the load-delay *arming* is not L's blocker. What remains is the DMA's **stall length /
+exact occurrence cycle** for the enable-during-timer-edge case (the ROM: "delayed by 1
+alignment cycle, this DMA is 3 CPU cycles long instead of 4"), i.e. the
+`DMC_DMA_ALIGNED_PARITY` stall-length decision under the shifted phase — the deeply
+calibrated DMC real-time-clock territory that trades tests 1-for-1. Reverted rather than
+ship an unvalidated no-op. Next attempt should start from the DMA stall length (3 vs 4) at
+the L/M/N timer edges, not the load-delay condition (that part is understood and, if
+pursued, the `dmc_active()`-restart arming is the right form).
+
+## Session 15 (2026-07-21): Branch Dummy Reads — taken-branch T3/T4 dummy reads (+ DMC-phase collateral)
+
+Fixed `Branch Dummy Reads` (123→125 net). A taken branch's third cycle must dummy-read the
+byte following the operand (the pre-branch PC) while the offset is added to PCL
+(AccuracyCoin code 4), and a page-crossing branch's fourth cycle must dummy-read the
+page-wrong address `(old PCH : new PCL)` before PCH is corrected (code 5). Our `branch()`
+did neither: the no-cross path set PC with no read (a silent T3), and the page-cross path
+read the page-wrong address on T3 (wrong cycle) with a silent T4. Fix: `branch()` now always
+`bus.read(old_pc)` on T3, and `MicroOp::BranchPageFix`'s normal path `bus.read`s the
+page-wrong address on T4. Two small hunks (`src/cpu/instructions.rs` + `src/cpu/mod.rs`).
+
+Removing those two silent branch cycles makes the DMC-DMA real-time clock
+(one-bus-access-per-cycle) more accurate, which reshuffled the DMC-phase-sensitive cluster:
+`DMA + $4016 Read` and `Instruction Timing` flipped **to pass** (net +2 beyond Branch Dummy
+Reads itself), while `I Flag Latency` flipped **to FAIL (code A: "branch instructions should
+not poll for interrupts before cycle 3")** — its branch-poll checks use the DMC IRQ as the
+source, so the more-accurate DMC-IRQ *assert* timing shifted under it. This is NOT a
+branch-poll-logic regression: blargg's `cpu_interrupts_v2/5-branch_delays_irq` (the
+gold-standard branch/IRQ-timing suite) stays green, so the poll timing is right; only the
+DMC-IRQ assert cycle moved. `I Flag Latency` joins the DMC-phase-victim cluster
+(`APU Register Activation`, `Delta Modulation Channel`, etc.) — a candidate for a future
+dedicated DMC-phase-calibration session, not a branch-timing bug. Full blargg suite green
+throughout (377/0), and the AccuracyCoin diff vs the 123 baseline is exactly those four
+tests.
+
+## Session 14 (2026-07-21): Implied Dummy Reads — FIXED (level-sensed IRQ line: withdraw a latched IRQ cleared mid-instruction)
+
+Fixed `Implied Dummy Reads` (121→123: ImpliedDummyRead and JSR Edge Cases both pass; the
+run no longer hangs). Two things were entangled — a harness false-completion and one real
+emulation bug — and several intermediate hypotheses were wrong before the root fell out.
+
+**The real bug (one-line cause):** `Cpu::irq_pending` was a *set-only latch*. It was set
+whenever `tick_apu` reported the IRQ line high and only cleared when consumed at a dispatch
+— it was never withdrawn when the line went *low*. The 6502 samples the IRQ *level* at each
+poll point, so a source cleared mid-instruction must not still be pending at the next
+dispatch. **Fix:** `SystemClock::step` now calls a new `Cpu::irq_deassert()` on any cycle
+`tick_apu` reports the line low, clearing `irq_pending` (and `irq_asserted_on_last_cycle`).
+Two tiny hunks: `src/cpu/mod.rs` + `src/system.rs`. `cargo test` stayed 377/0; AccuracyCoin
+121→123 with a clean diff (only `ImpliedDummyRead` NOT-RUN→pass, `JSREdgeCases`
+NOT-RUN→pass, and `BranchDummyRead`/`InternalDataBus` NOT-RUN→FAIL — they now *run* on
+their own merits instead of being blocked by the hang; zero pass→fail regressions).
+
+**Why it manifested here:** Test 5's loop-1 iteration 3 injects **CLI (`$58`)** from open
+bus. On real hardware CLI's own T2 dummy read of `$4015` clears the APU frame-IRQ flag, so
+by the poll at CLI's end the line is low and no IRQ is pending. Our latch, however, had been
+re-set high by the `tick_apu` between CLI's opcode-fetch cycle and its dummy-read cycle (the
+instruction spans two ticks); the mid-instruction clear didn't withdraw it. So at the next
+dispatch (a BRK fetched from `$4015`), `irq && irq_inhibit_next`(from CLI) queued a
+`pending_deferred_irq`, which fired a **spurious interrupt** after the BRK — pushing 3 extra
+bytes and drifting SP down by 3. That corrupted the test's own return address on the stack
+(`$01E2/$01E3`), so its final `RTS` returned into open bus (`$5CA5`→…→a `$72` KIL/JAM at
+`$4018`), which — with the APU frame-IRQ storm vectoring through the ROM's `$0600` software
+vector — is the "SP wrapping / PC oscillating" hang the doc had recorded.
+
+**Harness false-completion (fixed alongside, and now *required*).** The test zeroes ALL of
+zero page (`STA $00,X`), including `$35` (`RunningAllTests`) which the harness polls for
+completion — so it used to declare "finished" the instant the fill hit `$35`. Now that the
+test passes it *restores* ZP from `$0700-$07FF` afterward, so `$35` returns to 1 and the run
+continues to true completion; the harness must therefore require `$35==0` to persist (~4M
+cycles) to distinguish true completion from the transient clobber (`accuracycoin.rs`).
+
+**Wrong turns recorded so nobody repeats them:** (1) it is NOT the loop-2 JSR-DMA precision
+(Session-2 guess) — loops 1 & 2 both inject correctly; (2) it is NOT the frame-IRQ-clear /
+`APU_READ_PREADVANCE` timing that the Session-6 Frame Counter IRQ attempt broke blargg on —
+PLP/PLA and every stack sub-test pass in isolation; (3) the real signature was SP drifting
+from its clean `$E1`-at-each-Post value, traced back through the final RTS's clobbered return
+address to the single spurious CLI-triggered interrupt.
 
 ## Session 13 (2026-07-21): $2007 Stress — attempted, reverted (feature-scale + entangled)
 
@@ -714,13 +823,14 @@ Codes are the ROM's on-screen error codes; meanings from `README.md`. Table rege
 
 (`DMA + Open Bus` and `DMA + $2007 Write` returned to passing in Session 8's reshuffle.)
 
-### Hung (never reach a verdict) — the `Implied Dummy Reads` chain, unresolved, see Session 2
-| Test |
-|---|
-| Implied Dummy Reads |
-| Branch Dummy Reads (collateral — never reached) |
-| JSR Edge Cases (collateral — never reached) |
-| Internal Data Bus (collateral — never reached) |
+### FIXED in Session 14 — the `Implied Dummy Reads` hang (level-sensed IRQ line)
+The whole "hang chain" is resolved. `Implied Dummy Reads` and `JSR Edge Cases` now **pass**;
+`Branch Dummy Reads` (code 4) and `Internal Data Bus` (code 2) now **run** (and fail on
+their own merits — see the Independent-items and stress sections below — instead of being
+blocked). Root cause + fix under the Session 14 heading: `irq_pending` was a set-only latch
+that survived a mid-instruction frame-IRQ clear (an injected CLI's `$4015` dummy read),
+firing a spurious interrupt that corrupted the test's stack; now `SystemClock` de-asserts
+`irq_pending` on any low `tick_apu` (level-sensed).
 
 ### Deliberately out of scope of the DMC-DMA plan (log-only; see plan Global Constraints)
 | Test | Code | Meaning |
