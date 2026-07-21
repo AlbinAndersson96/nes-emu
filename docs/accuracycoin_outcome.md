@@ -4,12 +4,40 @@
 git submodule of the upstream AccuracyCoin repo, so per-emulator notes can't
 live next to it anymore.)
 
-**Status (2026-07-21): 123 of the 141 tests pass** — Session 14 fixed `Implied Dummy Reads`
-(and unblocked `JSR Edge Cases`) via a level-sensed-IRQ correction; the run no longer hangs.
-123 (Session 14) / 121 (Sessions 11-13) / 119 (Session 10) / 118 (Session 9) /
-115 (Session 8) / 100 (Session 2) / 91 (develop baseline). `cargo test` remains fully green
-(377 passed / 0 failed). (Page 15, "Power On State", is all `DRAW` tests with no pass/fail
-verdict and is excluded from the 141.)
+**Status (2026-07-21): 125 of the 141 tests pass** — Session 15 fixed `Branch Dummy Reads`
+(the taken-branch T3/T4 dummy reads), which as a more-accurate-DMC-clock side effect also
+flipped `DMA + $4016 Read` and `Instruction Timing` to pass, at the cost of `I Flag Latency`
+(a DMC-IRQ-phase-shuffle collateral). Session 14 fixed `Implied Dummy Reads` + `JSR Edge
+Cases` (level-sensed IRQ; the run no longer hangs).
+125 (Session 15) / 123 (Session 14) / 121 (Sessions 11-13) / 119 (Session 10) /
+118 (Session 9) / 115 (Session 8) / 100 (Session 2) / 91 (develop baseline). `cargo test`
+remains fully green (377 passed / 0 failed). (Page 15, "Power On State", is all `DRAW` tests
+with no pass/fail verdict and is excluded from the 141.)
+
+## Session 15 (2026-07-21): Branch Dummy Reads — taken-branch T3/T4 dummy reads (+ DMC-phase collateral)
+
+Fixed `Branch Dummy Reads` (123→125 net). A taken branch's third cycle must dummy-read the
+byte following the operand (the pre-branch PC) while the offset is added to PCL
+(AccuracyCoin code 4), and a page-crossing branch's fourth cycle must dummy-read the
+page-wrong address `(old PCH : new PCL)` before PCH is corrected (code 5). Our `branch()`
+did neither: the no-cross path set PC with no read (a silent T3), and the page-cross path
+read the page-wrong address on T3 (wrong cycle) with a silent T4. Fix: `branch()` now always
+`bus.read(old_pc)` on T3, and `MicroOp::BranchPageFix`'s normal path `bus.read`s the
+page-wrong address on T4. Two small hunks (`src/cpu/instructions.rs` + `src/cpu/mod.rs`).
+
+Removing those two silent branch cycles makes the DMC-DMA real-time clock
+(one-bus-access-per-cycle) more accurate, which reshuffled the DMC-phase-sensitive cluster:
+`DMA + $4016 Read` and `Instruction Timing` flipped **to pass** (net +2 beyond Branch Dummy
+Reads itself), while `I Flag Latency` flipped **to FAIL (code A: "branch instructions should
+not poll for interrupts before cycle 3")** — its branch-poll checks use the DMC IRQ as the
+source, so the more-accurate DMC-IRQ *assert* timing shifted under it. This is NOT a
+branch-poll-logic regression: blargg's `cpu_interrupts_v2/5-branch_delays_irq` (the
+gold-standard branch/IRQ-timing suite) stays green, so the poll timing is right; only the
+DMC-IRQ assert cycle moved. `I Flag Latency` joins the DMC-phase-victim cluster
+(`APU Register Activation`, `Delta Modulation Channel`, etc.) — a candidate for a future
+dedicated DMC-phase-calibration session, not a branch-timing bug. Full blargg suite green
+throughout (377/0), and the AccuracyCoin diff vs the 123 baseline is exactly those four
+tests.
 
 ## Session 14 (2026-07-21): Implied Dummy Reads — FIXED (level-sensed IRQ line: withdraw a latched IRQ cleared mid-instruction)
 

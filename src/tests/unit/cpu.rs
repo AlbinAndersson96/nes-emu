@@ -922,6 +922,49 @@ fn rts_bus_access_sequence() {
     assert_eq!(cpu.pc, 0x0203);
 }
 
+// A taken branch's third cycle dummy-reads the byte following the operand (the
+// pre-branch PC) while the offset is added to PCL — AccuracyCoin Branch Dummy
+// Reads code 4. Previously a silent cycle (no bus access).
+#[test]
+fn branch_taken_bus_access_sequence() {
+    let (mut cpu, mut bus) = make();
+    cpu.p = FLAG_U; // Z clear -> BNE taken
+    w(&mut bus, 0x0200, &[0xD0, 0x10]); // BNE +$10 (target $0212, same page)
+    bus.trace.clear();
+    cpu.step(&mut bus);
+    assert_eq!(
+        bus.trace,
+        vec![
+            (0x0200, false), // T1 opcode fetch
+            (0x0201, false), // T2 fetch offset
+            (0x0202, false), // T3 dummy read of the byte following the operand
+        ]
+    );
+    assert_eq!(cpu.pc, 0x0212);
+}
+
+// A page-crossing taken branch additionally dummy-reads the page-wrong address
+// (old PCH : new PCL) on its fourth cycle before PCH is corrected — code 5.
+#[test]
+fn branch_taken_pagecross_bus_access_sequence() {
+    let (mut cpu, mut bus) = make();
+    cpu.pc = 0x02F0;
+    cpu.p = FLAG_U; // Z clear -> BNE taken
+    w(&mut bus, 0x02F0, &[0xD0, 0x20]); // BNE +$20 (target $0312, crosses page)
+    bus.trace.clear();
+    cpu.step(&mut bus);
+    assert_eq!(
+        bus.trace,
+        vec![
+            (0x02F0, false), // T1 opcode fetch
+            (0x02F1, false), // T2 fetch offset
+            (0x02F2, false), // T3 dummy read of the byte following the operand
+            (0x0212, false), // T4 dummy read at the page-wrong address
+        ]
+    );
+    assert_eq!(cpu.pc, 0x0312);
+}
+
 // ---------------------------------------------------------------------------
 // Stack: PHA / PLA / PHP / PLP
 // ---------------------------------------------------------------------------

@@ -371,8 +371,11 @@ impl Cpu {
                     let p = (self.p & !FLAG_B) | FLAG_U;
                     self.queue_interrupt_sequence(0xFFFE, p);
                 } else {
-                    // Normal page fix: T4 cycle + correct high byte.
+                    // Normal page fix: T4 dummy-reads the page-wrong address
+                    // (old PCH : new PCL) before correcting the high byte —
+                    // AccuracyCoin Branch Dummy Reads code 5. A real bus cycle.
                     self.cycles += 1;
+                    let _ = bus.read(self.pc);
                     self.pc = (self.pc & 0x00FF) | ((self.branch_target_hi as u16) << 8);
                 }
             }
