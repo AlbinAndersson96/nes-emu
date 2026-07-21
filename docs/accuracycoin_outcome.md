@@ -12,6 +12,61 @@ attempts (both feature-scale, reverted; see below) —
 15, "Power On State", is all `DRAW` tests with no pass/fail verdict and is excluded from
 the 141.)
 
+## Session 14 (2026-07-21): Implied Dummy Reads — precisely diagnosed (NOT loop-2 JSR; it's Loop5 PLP/PLA)
+
+Investigated the long-standing `Implied Dummy Reads` "hang" (the `#[ignore]`d harness's
+biggest blocker). The doc's prior understanding was materially wrong. Instrumented the
+CPU opcode fetch, the `$4015` write path, the DMC state, and a full bus-access ring-buffer
+tracer (all reverted — the tree is clean, 377 tests green). Findings:
+
+**It was two issues masking each other, not one hang:**
+
+1. **A harness false-completion bug (not emulation).** The test's loop-2 and later phases
+   do `STA $00,X` for X=0..255 — zeroing ALL of zero page as scratch, including `$35`
+   (`RunningAllTests`), the exact byte the harness polls for completion. So the harness
+   declares "run-all finished" the instant that fill reaches `$35`. The ROM itself is fine
+   (its run-all loop uses X/Y, and it restores ZP from `$0700-$07FF` afterward). This is
+   why, with the current high `MAX_CYCLES`, the run "completes" in ~26s reporting
+   ImpliedDummyRead NOT-RUN — *not* a 70s timeout as previously recorded. Because
+   ImpliedDummyRead is near the end of execution order, the false-completion and the real
+   hang produce the SAME 121/141 result (the 3 "collateral" NOT-RUN tests —
+   `JSREdgeCases`, `BranchDummyRead`, `InternalDataBus` — run after it and are blocked
+   either way). Fix direction (for when the emulation is fixed): require `$35==0` to stay 0
+   for a sustained window (~4M cycles) to distinguish true completion from the transient
+   ZP clobber. NOTE: a PC-constant "jam detector" does NOT work — during the hang the JAM
+   at `$4018` is punctuated by periodic APU frame-IRQs vectoring through `$0600`, so PC
+   oscillates rather than staying constant.
+
+2. **The real emulation hang is in Loop5 (PLP/PLA) — NOT the loop-2 JSR case.** The test's
+   open-bus-execution "Test 5" has phases; traced verdict of each via the injected DMA
+   byte and the resulting BRK/JSR path:
+   - **Loop 1** (11 implied opcodes `0A,18,4A,58,88,8A,98,9A,C8,CA,D8`, `JMP $400F`,
+     DMASyncWith48/`$48`): **all pass.** The DMC-DMA-straddling open-bus injection is
+     accurate for the JMP case.
+   - **Loop 2** (11 bit-5-set opcodes `2A,38,6A,78,A8,AA,B8,BA,E8,F8,EA`, `JSR $4012`,
+     DMASyncWithA5/`$A5`): **all pass.** So the doc's "DMA-during-JSR precision" hypothesis
+     for loop 2 was wrong — the JSR-straddling injection (dummy stack read T3 + 2 pushes
+     between the DMA and the injected opcode) works correctly.
+   - **PHP, PHA** (`JMP $400F`, DMASyncWith68/`$68`): **pass.**
+   - **Loop5 (PLP/PLA, `JMP $4013`, DMASyncWith48/`$48`): DERAILS.** The first PLP
+     iteration reads the correct opcode (`$A5=$28`) and reaches the BRKed5 pass-handler,
+     but the loop fails to advance (X stays 0) and re-runs PLP forever; accumulated
+     stack/ZP corruption eventually lands the CPU on an open-bus `$72` (KIL/JAM) at
+     `$4018`, and the APU frame-IRQ storm through `$0600` is the "SP wrapping, PC
+     oscillating" signature the doc recorded.
+
+**Root-cause direction (Loop5 PLP/PLA):** PLP's cycle-2 dummy read of `$4015` is what
+clears the frame IRQ, and PLP then pulls a garbage status byte (`$28` → **I=0, interrupts
+enabled**). The pass path depends on the `$4015` dummy-read clearing the frame IRQ
+*before* an IRQ can be serviced with I=0, and on the very next `$4015` opcode-read seeing
+the flag already cleared (returning `$20`=JSR). This is the same frame-IRQ-clear-timing /
+`APU_READ_PREADVANCE` interaction the **Session 6 Frame Counter IRQ attempt hit and
+reverted** (both parity values broke `cpu_interrupts_v2/3-nmi_and_irq`). So a correct
+fix here is entangled with that unresolved, blargg-regression-risky area — it is a
+dedicated deep effort, not a targeted patch. Next session should start from the Loop5
+PLP/PLA trace and the frame-IRQ-clear model, NOT from the (accurate) JSR/JMP injection
+path.
+
 ## Session 13 (2026-07-21): $2007 Stress — attempted, reverted (feature-scale + entangled)
 
 Implemented the core of the PPU DATA state machine for $2007-read-during-rendering: a
@@ -714,7 +769,12 @@ Codes are the ROM's on-screen error codes; meanings from `README.md`. Table rege
 
 (`DMA + Open Bus` and `DMA + $2007 Write` returned to passing in Session 8's reshuffle.)
 
-### Hung (never reach a verdict) — the `Implied Dummy Reads` chain, unresolved, see Session 2
+### Hung (never reach a verdict) — the `Implied Dummy Reads` chain — RE-DIAGNOSED in Session 14
+Precisely diagnosed in Session 14 (read it first): loops 1 & 2 (22 opcodes) and PHP/PHA
+all PASS; the derail is in **Loop5 (PLP/PLA)**, entangled with the frame-IRQ-clear timing
+that the Session 6 Frame Counter IRQ attempt hit and reverted. NOT the loop-2 JSR case the
+Session-2 note guessed. The three "collateral" tests run after ImpliedDummyRead in
+execution order and are blocked by its hang.
 | Test |
 |---|
 | Implied Dummy Reads |
