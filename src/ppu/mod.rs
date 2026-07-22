@@ -206,6 +206,16 @@ pub struct Ppu {
     eval_copy_left: u8,      // bytes 1-3 still to copy for an in-range sprite
     eval_overflow_reads: u8, // the 3 dummy reads after the overflow flag sets
     eval_done: bool,         // n wrapped past 63 — evaluation idles until next line
+    // The value on the PPU's internal OAM data bus, latched by whatever OAM /
+    // secondary-OAM access the rendering machinery performs each dot. A $2004
+    // read while rendering returns THIS, not oam[oam_addr] — the sprite
+    // pipeline is driving the bus, not the CPU-visible OAMADDR (AccuracyCoin
+    // "$2004 Stress"). Updated per-dot: $FF during the secondary-OAM clear
+    // window (dots 1-64), the byte read from primary OAM during evaluation
+    // (dots 65-256, attribute bytes masked at the read), the secondary-OAM
+    // read-back in the overflow phase, and the per-slot secondary-OAM reads of
+    // the sprite-fetch window (dots 257-320).
+    oam_buffer: u8,
 
     // ── Framebuffer ──────────────────────────────────────────────────────────
     // 256 × 240 pixels, each an index into the NES master palette (0x00–0x3F).
@@ -281,6 +291,7 @@ impl Ppu {
             eval_copy_left: 0,
             eval_overflow_reads: 0,
             eval_done: false,
+            oam_buffer: 0xFF,
             frame: Box::new([0u8; 256 * 240]),
             frame_ready: false,
         }
@@ -450,6 +461,12 @@ impl Ppu {
         // whatever scanline 239 last evaluated (for the scanline that never
         // gets rendered, scanline 240) instead of scanline 0's real sprites.
         if render && is_render_scanline {
+            // Dots 1-64: secondary OAM is being cleared to $FF; the OAM data
+            // bus carries that $FF. evaluate_sprites() drives the buffer for
+            // dots 65+.
+            if (1..=64).contains(&self.dot) {
+                self.oam_buffer = 0xFF;
+            }
             self.evaluate_sprites();
         }
 
@@ -746,6 +763,19 @@ impl Ppu {
     /// The pre-render scanline does NOT evaluate (hardware): it only clears
     /// the state, so scanline 0 always starts with an empty sprite set — on
     /// real hardware sprites can never appear on scanline 0.
+    /// Read a primary-OAM byte as it appears on the OAM data bus: attribute
+    /// bytes (every 4th, offset 2) have no storage for bits 2-4, so those read
+    /// back as 0. This is the value latched into oam_buffer during evaluation
+    /// (AccuracyCoin "$2004 Stress" key: e.g. attr $7D reads as $61).
+    fn oam_read_bus(&self, addr: u8) -> u8 {
+        let v = self.oam[addr as usize];
+        if addr & 3 == 2 {
+            v & 0xE3
+        } else {
+            v
+        }
+    }
+
     fn evaluate_sprites(&mut self) {
         // Clear/init at dot 65 (after the secondary-OAM clearing cycles
         // 1-64). Note this must NOT touch sprite_count/sprite0_in_secondary —
@@ -791,6 +821,7 @@ impl Ppu {
                 // a misaligned start makes these bytes span what would
                 // otherwise be two different OAM objects.
                 let byte = 4 - self.eval_copy_left as usize;
+                self.oam_buffer = self.oam_read_bus(self.eval_addr);
                 self.secondary_oam[self.sprite_eval_count * 4 + byte] =
                     self.oam[self.eval_addr as usize];
                 self.eval_addr = self.eval_addr.wrapping_add(1);
@@ -809,6 +840,7 @@ impl Ppu {
                 }
             } else {
                 let y = self.oam[self.eval_addr as usize];
+                self.oam_buffer = self.oam_read_bus(self.eval_addr);
                 if in_range(y) {
                     self.secondary_oam[self.sprite_eval_count * 4] = y;
                     // "Sprite zero" isn't literally OAM index 0 — it's
@@ -842,7 +874,9 @@ impl Ppu {
             }
         } else {
             // Buggy overflow scan: OAM[n][m] is treated as a Y coordinate.
-            let y = self.oam[self.eval_n * 4 + self.eval_m];
+            let addr = (self.eval_n * 4 + self.eval_m) as u8;
+            let y = self.oam[addr as usize];
+            self.oam_buffer = self.oam_read_bus(addr);
             if in_range(y) {
                 self.sprite_overflow_set_pending = Some(2);
                 self.eval_overflow_reads = 3;
@@ -1233,17 +1267,20 @@ impl Ppu {
             // $FF while rendering — a read during that window observes that
             // internal bus activity instead of the real byte at OAMADDR.
             4 => {
-                let clearing_secondary_oam = self.rendering_enabled()
-                    && (self.scanline <= 239 || self.scanline == PRERENDER_SCANLINE)
-                    && (1..=64).contains(&self.dot);
-                let mut value = if clearing_secondary_oam {
-                    0xFF
+                // While rendering on a visible/pre-render scanline the sprite
+                // pipeline is driving the OAM data bus, so a $2004 read returns
+                // the internal OAM buffer (updated per-dot by the clear window,
+                // evaluation, overflow scan, and sprite fetch), NOT
+                // oam[oam_addr] (AccuracyCoin "$2004 Stress"). Outside
+                // rendering the CPU sees the real OAM byte at OAMADDR, with
+                // attribute bytes' bits 2-4 reading back clear.
+                let rendering = self.rendering_enabled()
+                    && (self.scanline <= 239 || self.scanline == PRERENDER_SCANLINE);
+                let value = if rendering {
+                    self.oam_buffer
                 } else {
-                    self.oam[self.oam_addr as usize]
+                    self.oam_read_bus(self.oam_addr)
                 };
-                if !clearing_secondary_oam && self.oam_addr & 3 == 2 {
-                    value &= 0xE3;
-                }
                 self.refresh_open_bus(value, 0xFF);
                 value
             }

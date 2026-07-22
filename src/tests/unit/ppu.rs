@@ -821,15 +821,26 @@ fn oamdata_read_during_secondary_oam_clear_window_always_returns_ff() {
 }
 
 #[test]
-fn oamdata_read_outside_clear_window_returns_real_oam_value() {
+fn oamdata_read_during_evaluation_returns_oam_buffer_not_oamaddr() {
+    // AccuracyCoin "$2004 Stress": while rendering, past the dot-1-64 clear
+    // window, the sprite-evaluation machinery is driving the OAM data bus, so a
+    // $2004 read returns the internal OAM buffer — the byte evaluation last
+    // read — NOT oam[oam_addr]. With every sprite Y out of range ($AA), the
+    // evaluation walk reads one Y byte per object, all $AA, so the buffer sits
+    // at $AA; the distinct byte parked at OAMADDR ($5A at oam[0]) is NOT what
+    // the read returns.
     let mut ppu = Ppu::new();
     let mut oam = [0xAAu8; 256];
-    oam[0] = 0x5A;
+    oam[0] = 0x5A; // sprite 0's Y — also out of range, read once at dot 65/66
     setup_oam(&mut ppu, &oam);
-    ppu.write_register(3, 0, None);
-    ppu.write_register(1, 0x18, None);
-    tick_to(&mut ppu, 0, 100); // dot 100: well past the clear window
-    assert_eq!(ppu.read_register(4, None), 0x5A);
+    ppu.write_register(3, 0, None); // OAMADDR = 0
+    ppu.write_register(1, 0x18, None); // enable rendering
+    tick_to(&mut ppu, 0, 100); // dot 100: well past the clear window, mid-eval
+    assert_eq!(
+        ppu.read_register(4, None),
+        0xAA,
+        "returns the eval-driven OAM buffer, not oam[oam_addr] ($5A)"
+    );
 }
 
 #[test]

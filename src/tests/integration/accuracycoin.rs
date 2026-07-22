@@ -305,7 +305,7 @@ fn dump_2004_stress(buf: &[u8]) -> String {
     let mut best: Option<(&str, &[u8; STRESS_2004_LEN], usize, usize)> = None;
     for (name, key) in [("KEY1", &STRESS_2004_KEY1), ("KEY2", &STRESS_2004_KEY2)] {
         let mut line = format!("  {name}: ");
-        for shift in 0..=4 {
+        for shift in 0..=12 {
             let (m, n) = stress_2004_mismatches(buf, key, shift);
             line.push_str(&format!("+{shift}={m}/{n}  "));
             if best.map_or(true, |(_, _, _, bm)| m < bm) {
