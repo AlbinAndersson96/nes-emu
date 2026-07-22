@@ -10,7 +10,7 @@ A NES emulator written in Rust. The CPU (full 6502 instruction set including uno
 
 ```bash
 cargo build          # compile
-cargo run <rom.nes>  # run a ROM
+cargo run <rom.nes>  # run a ROM (dev profile is opt-level 1 so it holds 60fps; --release is fastest)
 cargo test           # run all tests (includes blargg ROM tests in tests/roms/)
 cargo test <name>    # run a single test by name
 cargo clippy         # lint

@@ -66,6 +66,8 @@ sudo apt install pkg-config libgtk-3-dev libxkbcommon-x11-0
 ```bash
 cargo build            # compile
 cargo run <rom.nes>    # run a ROM (or run with no argument and use the File menu)
+                       #   the dev profile is optimized (opt-level 1) so this holds 60fps;
+                       #   use `cargo run --release <rom.nes>` for maximum performance
 cargo test             # run all tests (includes the blargg ROM suites)
 cargo clippy           # lint
 cargo fmt              # format

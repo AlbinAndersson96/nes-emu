@@ -29,7 +29,12 @@ use winit::{
     window::WindowId,
 };
 
-const FRAME_DURATION: Duration = Duration::from_nanos(16_666_667);
+// NTSC NES refreshes at 60.0988 Hz, not the round 60 Hz — one frame is
+// 16_639_267 ns (1 / 60.0988 s). Pacing at a flat 16_666_667 ns (60.000 Hz)
+// ran the machine ~0.16% slow: the effective CPU clock became 29780.5 × 60.000
+// = 1.7869 MHz instead of the real 1.789773 MHz. See the NTSC column of
+// https://www.nesdev.org/wiki/Cycle_reference_chart.
+const FRAME_DURATION: Duration = Duration::from_nanos(16_639_267);
 
 fn maybe_configure_wsl2_gpu() {
     let version = match fs::read_to_string("/proc/version") {
