@@ -470,6 +470,15 @@ impl Ppu {
             self.evaluate_sprites();
         }
 
+        // After the sprite-fetch window (dots 321-340, and holding through
+        // dot 0 of the next line before the clear window restarts), the OAM
+        // data bus rests on secondary-OAM index 0 — the first found sprite's Y
+        // (AccuracyCoin "$2004 Stress" key: the trailing run of secondary[0]
+        // and the single dot-0 sample both read it).
+        if render && is_render_scanline && (321..=340).contains(&self.dot) {
+            self.oam_buffer = self.secondary_read_bus(0);
+        }
+
         // ── Sprite fetch (visible + pre-render scanlines, dots 257–320) ──────
         if render && is_render_scanline {
             self.fetch_sprites(cart);
@@ -776,6 +785,15 @@ impl Ppu {
         }
     }
 
+    /// Read a secondary-OAM byte for the OAM data bus. No masking here:
+    /// attribute bytes were already stored with bits 2-4 clear during
+    /// evaluation, and cleared/empty slots hold $FF (which must read back as
+    /// $FF, not $E3). Used to drive oam_buffer during idle read-back and the
+    /// sprite-fetch window.
+    fn secondary_read_bus(&self, addr: usize) -> u8 {
+        self.secondary_oam[addr & 0x1F]
+    }
+
     fn evaluate_sprites(&mut self) {
         // Clear/init at dot 65 (after the secondary-OAM clearing cycles
         // 1-64). Note this must NOT touch sprite_count/sprite0_in_secondary —
@@ -800,8 +818,27 @@ impl Ppu {
         if self.scanline == PRERENDER_SCANLINE {
             return;
         }
-        // One step per odd dot in 65..=255.
-        if self.dot < 65 || self.dot > 255 || self.dot % 2 == 0 || self.eval_done {
+        if self.dot < 65 || self.dot > 256 {
+            return;
+        }
+        if self.eval_done {
+            // Post-evaluation idle walk (runs both parities): odd dots re-read
+            // primary OAM with n incrementing mod 64 (OAM[n*4], the Y byte);
+            // even dots read the open secondary-OAM slot, which still holds the
+            // last rejected Y written through there (AccuracyCoin "$2004
+            // Stress" key section 6: primary Y reads alternating with that
+            // constant, until sprite fetch begins at dot 257).
+            if self.dot % 2 == 1 {
+                self.oam_buffer = self.oam_read_bus(((self.eval_n & 63) * 4) as u8);
+                self.eval_n = self.eval_n.wrapping_add(1);
+            } else {
+                self.oam_buffer = self.secondary_read_bus(self.sprite_eval_count * 4);
+            }
+            return;
+        }
+        // Active evaluation advances once per odd dot; the byte read is held
+        // across the following even dot (2 dots per object).
+        if self.dot % 2 == 0 {
             return;
         }
 
@@ -822,8 +859,11 @@ impl Ppu {
                 // otherwise be two different OAM objects.
                 let byte = 4 - self.eval_copy_left as usize;
                 self.oam_buffer = self.oam_read_bus(self.eval_addr);
-                self.secondary_oam[self.sprite_eval_count * 4 + byte] =
-                    self.oam[self.eval_addr as usize];
+                // Store the value as it appears on the OAM data bus (attribute
+                // bytes' bits 2-4 read back clear — unused by sprite rendering,
+                // so this doesn't change any pixel). A later $2004 fetch-window
+                // read then returns it unmasked.
+                self.secondary_oam[self.sprite_eval_count * 4 + byte] = self.oam_buffer;
                 self.eval_addr = self.eval_addr.wrapping_add(1);
                 self.eval_copy_left -= 1;
                 if self.eval_copy_left == 0 {
@@ -856,6 +896,17 @@ impl Ppu {
                     self.eval_addr = self.eval_addr.wrapping_add(1);
                     self.eval_copy_left = 3;
                 } else {
+                    // Rejected-Y write-through: hardware speculatively writes
+                    // the out-of-range Y into the open secondary-OAM slot's Y
+                    // position before rejecting it, so the open slot ends the
+                    // scan holding the LAST rejected Y. A $2004 read of that
+                    // slot (the even-dot idle read-back, and the first
+                    // fetch-window read of the first empty slot — the key's
+                    // "one instance of $03") returns it. The slot is never
+                    // rendered (sprite_count = accepted count), and only the Y
+                    // byte moves, so this can't affect any pixel or the MMC3
+                    // dummy-fetch A12 (driven by the tile byte, still $FF).
+                    self.secondary_oam[self.sprite_eval_count * 4] = y;
                     self.eval_addr = self.eval_addr.wrapping_add(4) & 0xFC;
                     self.eval_n += 1;
                     self.eval_done = self.eval_n == 64;
@@ -955,6 +1006,14 @@ impl Ppu {
             // of wrapping mid-array.
             self.oam_addr = 0;
         }
+        // Drive the OAM data bus for a $2004 read this dot: each 8-dot slot
+        // reads its 4 secondary-OAM bytes (Y, tile, attr, X) then re-reads the
+        // X byte for the remaining 4 dots (AccuracyCoin "$2004 Stress" key
+        // section 7: "the fourth byte read a total of 5 times"). Attribute
+        // bytes read bits 2-4 back clear.
+        let slot = ((self.dot - 257) / 8) as usize;
+        let byte = ((self.dot - 257) % 8).min(3) as usize;
+        self.oam_buffer = self.secondary_read_bus(slot * 4 + byte);
         let idx = ((self.dot - 257) / 8) as usize;
         match (self.dot - 257) % 8 {
             0 | 2 => {
