@@ -307,6 +307,30 @@ impl Bus {
                     // VBL sample point, inside the same 9-dot budget.
                     return self.ppu.resample_sprite_flags(value);
                 }
+                if reg == 4 {
+                    // $2004 is read at T4 (3 CPU cycles after T1), the same as
+                    // $2002. While rendering, the value depends on the exact
+                    // PPU dot (the OAM buffer changes every dot), so the read
+                    // must sample the T4 state: pre-advance 8 dots, read, then
+                    // 1 more (the same 9-dot / 3-cycle budget as $2002, repaid
+                    // by the run loop). AccuracyCoin "$2004 Stress" pins the
+                    // read to end on a specific dot; without this the whole
+                    // per-dot capture is 8 dots misaligned.
+                    if let Some(ref cart) = self.cartridge {
+                        self.ppu.set_mirroring(cart.mirroring());
+                    }
+                    self.ppu.tick_dots(8, self.cartridge.as_mut());
+                    if self.ppu.take_nmi() {
+                        self.ppu_preadvance_nmi = true;
+                    }
+                    self.ppu_preadvance_cycles = self.ppu_preadvance_cycles.saturating_add(3);
+                    let value = self.ppu.read_register(reg, self.cartridge.as_mut());
+                    self.ppu.tick_dots(1, self.cartridge.as_mut());
+                    if self.ppu.take_nmi() {
+                        self.ppu_preadvance_nmi = true;
+                    }
+                    return value;
+                }
                 self.ppu.read_register(reg, self.cartridge.as_mut())
             }
 

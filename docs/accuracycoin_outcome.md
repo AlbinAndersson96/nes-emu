@@ -4,15 +4,94 @@
 git submodule of the upstream AccuracyCoin repo, so per-emulator notes can't
 live next to it anymore.)
 
-**Status (2026-07-21): 125 of the 141 tests pass** — Session 15 fixed `Branch Dummy Reads`
+**Status (2026-07-22): 125 of the 141 tests pass** — Session 17 built the `$2004 Stress`
+OAM-buffer model: its test 2 (AnswerKey1, the <8-in-range case) now passes outright and the
+verdict advances code 2 -> code 3, but the test as a whole still fails on test 3
+(AnswerKey2), so the 125 count is unchanged. Session 15 fixed `Branch Dummy Reads`
 (the taken-branch T3/T4 dummy reads), which as a more-accurate-DMC-clock side effect also
 flipped `DMA + $4016 Read` and `Instruction Timing` to pass, at the cost of `I Flag Latency`
 (a DMC-IRQ-phase-shuffle collateral). Session 14 fixed `Implied Dummy Reads` + `JSR Edge
 Cases` (level-sensed IRQ; the run no longer hangs).
-125 (Session 15) / 123 (Session 14) / 121 (Sessions 11-13) / 119 (Session 10) /
+125 (Sessions 15-17) / 123 (Session 14) / 121 (Sessions 11-13) / 119 (Session 10) /
 118 (Session 9) / 115 (Session 8) / 100 (Session 2) / 91 (develop baseline). `cargo test`
-remains fully green (377 passed / 0 failed). (Page 15, "Power On State", is all `DRAW` tests
+remains fully green (392 passed / 0 failed). (Page 15, "Power On State", is all `DRAW` tests
 with no pass/fail verdict and is excluded from the 141.)
+
+## Session 17 (2026-07-22): `$2004 Stress` OAM-buffer model — test 2 passes; test 3 blocked by the +3-dot shift
+
+Built the `$2004`-read-during-rendering OAM-buffer model from scratch, measured every step
+against the ROM's own answer keys via a new `TRACE_2004_STRESS` oracle. **Result: test 2
+(AnswerKey1) passes (0 mismatches); the verdict moves code 2 -> code 3. Test 3 (AnswerKey2,
+the 8-in-range case) is down to 3 mismatches at its best-fit +3 alignment, but the whole
+test-3 capture is uniformly +3 dots (1 CPU cycle) late — the documented Session-12 shift —
+so the test still fails.** Six commits, full `cargo test` green (392/0) at every step; NOT
+reverted (unlike Session 12's whole-diff revert of this same work).
+
+**What `$2004` returns while rendering (the model):** past the dot 1-64 secondary-OAM clear
+window, a `$2004` read returns the PPU's internal OAM data bus — driven per-dot by the
+sprite pipeline, NOT `oam[oam_addr]`. New `oam_buffer` field (`src/ppu/mod.rs`), latched by:
+- **Clear window (dots 1-64):** `$FF`.
+- **Evaluation (dots 65-256):** the primary-OAM byte read each odd dot (attribute bytes
+  masked to bits 2-4 clear via `oam_read_bus`), held across the following even dot.
+- **Post-eval idle walk (both parities, after `eval_done`):** odd dots re-read primary OAM
+  (`OAM[(n mod 64)*4]`); even dots read the open secondary-OAM slot back.
+- **Rejected-Y write-through:** an out-of-range Y is speculatively written into the open
+  secondary slot's Y position before rejection, so that slot ends the scan holding the last
+  rejected Y — what the even-dot idle read-back and the first fetch-window read of the first
+  empty slot (the key's "one instance of $03") return. Only the Y byte moves and the slot is
+  never rendered, so no pixel and no MMC3 dummy-fetch A12 (tile-driven) changes.
+- **Attribute masking on WRITE into secondary OAM** (bits 2-4 unused by rendering) so
+  occupied slots read back masked (`$61`) while cleared/empty slots read back `$FF` (not
+  `$E3`).
+- **Sprite-fetch window (dots 257-320):** per slot, Y/tile/attr then X re-read for the
+  slot's remaining 4 dots ("fourth byte read a total of 5 times").
+- **Overflow scan (8-sprite / KEY2 path):** odd dots = the buggy diagonal primary read,
+  even dots = secondary-OAM[0] read-back, gated on `eval_overflow_started` so the even dot
+  right after the 8th sprite's copy still holds that sprite's last byte (fill hasn't handed
+  off yet).
+
+**The `$2004` read needs the `$2002`-style read-cycle pre-advance** (8 dots / read / 1 dot,
+`src/bus.rs`): the read completes at T4 and the buffer changes every dot, so without it the
+whole capture is 8 dots misaligned. Adding it moved the best-fit alignment from +8 to +0 and
+was the single biggest KEY1 win (249 -> 110 mismatches). No blargg regression: `oam_read` /
+`oam_stress` read `$2004` only during forced blank, where the value is dot-independent and
+the repaid pre-advance is a no-op.
+
+**Measured progression (KEY1 mismatches):** 227 baseline -> 110 (pre-advance) -> 33 (idle +
+fetch window) -> 1 -> 0 (dot-256 even read-back). KEY2: 276 -> 37 (overflow even read-back)
+-> 4 -> 3 (fill->overflow gate).
+
+**The remaining blocker, and the session's key finding — the last 3 are NOT independent of
+the shift.** The 3 residual KEY2 mismatches (key idx 191/195/197) are the overflow scan's
+in-range find (`$7F`) and its two follow-on primary reads (`$81`,`$82`). The plan (and the
+Session-12 note's "0 at +3") assumed test-3's *content* and its *+3 shift* were separable —
+fix the content to 0 at +3, then solve the shift. **That is false for the find region.** The
+find is a single-dot event: its `$7F` latches on an odd internal dot, but the uniform +3-dot
+shift makes the ROM sample the adjacent *even* dot, which reads the secondary `$80`. Forcing
+the diagonal to latch through the "3 dummy reads" only exposed that our overflow n/m position
+is one step off at the find (it read `$7B/$7C/$7D` where hardware reads `$7F/$80/$81`) and it
+*added* a mismatch (key idx 193) — reverted. So the find-region reads only line up once the
+parity is correct, i.e. **the +3 shift must be solved first; it gates both the alignment and
+those 3 reads.**
+
+**The +3 shift itself (for the next session).** It is present from the very start of the
+test-3 eval walk (our first eval byte lands at dot 68; the key expects idx 65), so it is a
+uniform 1-CPU-cycle offset of the entire test-3 read loop, not something that accrues at the
+fill->overflow transition. Both test 2 and test 3 align their read loop via
+`Test_2004_Stress_Delay` -> `Sync_ToSpriteFlagsClearing`, whose final alignment hinges on the
+sync's own OAM DMA (`STA $4014`) landing on a **get vs put cycle** — the ROM literally
+measures this with an `SLO $4015` get/put probe and notes "if the write to $4014 is on a put
+cycle, then there's a 1 cycle delay" (`AccuracyCoin.asm` ~line 18360). So the +3 is the
+513-vs-514-cycle OAM-DMA / get-put-parity territory — the same deeply-calibrated,
+blargg-risking space as the reverted `Frame Counter IRQ` and `Controller Strobing` attempts.
+It is a dedicated-session investigation with an all-or-nothing payoff (test 3 passes only
+when the shift is 0 AND the 3 find reads land), not an incremental fix.
+
+**The oracle (keep it).** `TRACE_2004_STRESS=1 cargo test accuracycoin --release -- --ignored
+--nocapture` dumps the ROM's per-dot `$500..$654` capture and diffs it against both answer
+keys (extracted verbatim into `accuracycoin.rs`) across shifts 0..=12, listing the exact
+mismatching dots. This is what turned the whole model into a measured diff; resume the +3
+work with it.
 
 ## Session 16 (2026-07-21): DMC-phase cluster surveyed; Delta Modulation Channel (L) attempted — deeper than the load delay
 
@@ -865,7 +944,8 @@ bus model, comparable effort/risk to `OAM Corruption` above).
 ### Independent smaller items (pre-existing, unrelated to the DMC-DMA/JSR/OAMADDR/$2007 work)
 | Test | Code | Meaning |
 |---|---|---|
-| $2004 Stress / $2007 Stress | 2 / 2 | OAMADDR-overflow reads / read-buffer fill timing. |
+| $2004 Stress | 3 | OAM-buffer model built in Session 17: test 2 (AnswerKey1) PASSES; the verdict is now code 3 (was 2) because test 3 (AnswerKey2, 8-in-range) fails. Test 3 is 3 mismatches at its +3 alignment, but the whole test-3 capture is uniformly +3 dots (1 CPU cycle) late — a get/put-parity OAM-DMA shift in the ROM's sync — and that shift also gates the 3 remaining find-region reads. See the Session 17 write-up; the +3 shift is the sole blocker. |
+| $2007 Stress | 2 | read-buffer fill timing (unchanged; attempted+reverted Session 13). |
 
 (`All NOP instructions` and `Palette RAM Quirks` fixed in Session 8; `Stale BG/Sprite
 Shift Registers` and `BG Serial In` fixed in Session 9; `Open Bus` fixed in Session 10;
