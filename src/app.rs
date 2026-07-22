@@ -28,7 +28,11 @@ pub struct App {
     current_rom_bytes: Option<Vec<u8>>,
 }
 
-const CYCLES_PER_FRAME: u64 = 29_781;
+// Safety bound only: a real NTSC frame is 29781 CPU cycles (even) or 29780
+// (odd — the pre-render skipped dot), so one frame always completes well under
+// this. It guards `step_frame`'s loop against a pathological state where the
+// PPU never signals `frame_ready`.
+const MAX_CYCLES_PER_FRAME: u64 = 40_000;
 
 /// Parses `data` as an iNES ROM and, on success, replaces `*state` with a
 /// freshly reset `Running` state. On failure, `*state` is left untouched —
@@ -123,6 +127,25 @@ fn toggle_flag(flag: &mut bool) {
     *flag = !*flag;
 }
 
+/// Advances the machine until the PPU completes one frame (`frame_ready`, set
+/// once per PPU frame at scanline 239 dot 256), leaving it set for the caller.
+/// Each call consumes the exact NTSC frame length — 29781 CPU cycles on even
+/// frames, 29780 on odd (the pre-render skipped dot) — so it averages 29780.5,
+/// rather than a fixed count that would drift ~0.5 cycle/frame against the PPU.
+/// The `MAX_CYCLES_PER_FRAME` bound only guards against a pathological state
+/// where `frame_ready` never fires. Steps via `SystemClock`, which carries the
+/// blargg-verified interrupt-delivery rules (deferred NMI edges, per-cycle APU
+/// ticking, DMA interrupt deferral) — the same code the ROM test harness uses.
+/// Returns the CPU cycles consumed.
+fn run_one_frame(cpu: &mut Cpu, bus: &mut Bus, clock: &mut SystemClock) -> u64 {
+    bus.ppu.frame_ready = false;
+    let mut elapsed = 0u64;
+    while !bus.ppu.frame_ready && elapsed < MAX_CYCLES_PER_FRAME {
+        elapsed += clock.step(cpu, bus).cycles;
+    }
+    elapsed
+}
+
 impl App {
     pub fn new(renderer: Renderer) -> Self {
         Self {
@@ -163,14 +186,7 @@ impl App {
                 self.renderer.present_placeholder();
             }
             AppState::Running { cpu, bus, clock } => {
-                // SystemClock carries the blargg-verified interrupt-delivery
-                // rules (deferred NMI edges, per-cycle APU ticking, DMA
-                // interrupt deferral) — the same stepping code the ROM test
-                // harness uses.
-                let mut elapsed = 0u64;
-                while elapsed < CYCLES_PER_FRAME {
-                    elapsed += clock.step(cpu, bus).cycles;
-                }
+                run_one_frame(cpu, bus, clock);
                 if bus.ppu.frame_ready {
                     bus.ppu.frame_ready = false;
                     update_fps(
@@ -213,6 +229,58 @@ mod tests {
         let result = load_rom_into(&mut state, &test_rom_bytes());
         assert!(result.is_ok());
         assert!(matches!(state, AppState::Running { .. }));
+    }
+
+    // On-demand throughput benchmark (no assertion — debug legitimately exceeds
+    // the frame budget). Reports emulation-only cost per frame so a slowdown is
+    // easy to spot. Run: `cargo test bench_emulation_throughput -- --ignored
+    // --nocapture` (add `--release` to measure the shipping profile). 60 fps
+    // needs <= 16.639 ms/frame; see the [profile.dev] note in Cargo.toml.
+    #[test]
+    #[ignore]
+    fn bench_emulation_throughput() {
+        let mut state = AppState::NoRom;
+        load_rom_into(&mut state, &test_rom_bytes()).unwrap();
+        let AppState::Running { cpu, bus, clock } = &mut state else {
+            unreachable!("just loaded a ROM");
+        };
+        for _ in 0..60 {
+            run_one_frame(cpu, bus, clock);
+        }
+        let n = 600u32;
+        let start = Instant::now();
+        for _ in 0..n {
+            run_one_frame(cpu, bus, clock);
+        }
+        let per_frame = start.elapsed() / n;
+        let ms = per_frame.as_secs_f64() * 1000.0;
+        eprintln!(
+            "emulation only: {ms:.3} ms/frame  ({:.0} fps ceiling, need <=16.639 ms for 60fps)",
+            1000.0 / ms
+        );
+    }
+
+    #[test]
+    fn run_one_frame_consumes_exactly_one_ntsc_frame() {
+        let mut state = AppState::NoRom;
+        load_rom_into(&mut state, &test_rom_bytes()).unwrap();
+        let AppState::Running { cpu, bus, clock } = &mut state else {
+            unreachable!("just loaded a ROM");
+        };
+        // Settle past power-up before measuring.
+        for _ in 0..5 {
+            run_one_frame(cpu, bus, clock);
+        }
+        let cycles = run_one_frame(cpu, bus, clock);
+        assert!(bus.ppu.frame_ready, "a PPU frame must complete each call");
+        // One NTSC frame is 29780 (odd) or 29781 (even) CPU cycles; allow a few
+        // cycles of overshoot from stopping on an instruction boundary past the
+        // frame-ready dot. A regression running a fixed or doubled count lands
+        // outside this band.
+        assert!(
+            (29_780..=29_790).contains(&cycles),
+            "frame length {cycles} is not one NTSC frame (~29780.5 cycles)"
+        );
     }
 
     #[test]

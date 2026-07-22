@@ -16,3 +16,16 @@ toml = "0.8"
 
 [dev-dependencies]
 png = "0.17"
+
+# A cycle-accurate NES core is compute-heavy: at opt-level 0 the emulation loop
+# alone costs ~20 ms/frame (~49 fps ceiling), so a plain `cargo run` can't hold
+# the 16.639 ms NTSC frame budget and games run in slow motion. opt-level 1 cuts
+# that to ~3 ms/frame (~320 fps ceiling) while keeping debug info and quick
+# incremental builds. Dependencies are optimized fully — they compile once and
+# cache, and it keeps the egui/wgpu present path fast too. `--release` (~2.5 ms)
+# is still a touch faster for shipping.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
