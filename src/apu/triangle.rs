@@ -1,4 +1,5 @@
 use super::length::LengthCounter;
+use serde::{Deserialize, Serialize};
 
 /// 32-step staircase triangle waveform (15 → 0, then 0 → 15).
 const TRIANGLE_TABLE: [u8; 32] = [
@@ -11,6 +12,7 @@ const TRIANGLE_TABLE: [u8; 32] = [
 /// Unlike the pulse channels, the triangle timer counts at the full CPU clock
 /// rate (not APU rate). Volume is fixed — it is silenced by the length counter
 /// or the linear counter, never by an envelope.
+#[derive(Serialize, Deserialize)]
 pub struct TriangleChannel {
     enabled: bool,
     /// $4008 bit 7: halts both length counter and linear counter reload.

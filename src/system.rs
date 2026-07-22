@@ -1,5 +1,6 @@
 use crate::bus::Bus;
 use crate::cpu::Cpu;
+use serde::{Deserialize, Serialize};
 
 /// Drives the CPU, PPU, and APU in lockstep, one CPU tick (or one DMA stall
 /// cycle) per `step` call, with the interrupt-delivery rules that were
@@ -22,6 +23,7 @@ use crate::cpu::Cpu;
 ///
 /// Holds the loop-persistent state those rules need; create one per powered-on
 /// machine and feed every tick through it.
+#[derive(Serialize, Deserialize)]
 pub struct SystemClock {
     deferred_nmi: bool,
     dma_nmi_deferred: bool,

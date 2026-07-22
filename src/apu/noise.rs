@@ -1,5 +1,6 @@
 use super::envelope::Envelope;
 use super::length::LengthCounter;
+use serde::{Deserialize, Serialize};
 
 /// Timer reload periods for the noise channel (NTSC), indexed by $400E bits 3–0.
 const NTSC_PERIOD: [u16; 16] = [
@@ -10,6 +11,7 @@ const NTSC_PERIOD: [u16; 16] = [
 ///
 /// Uses a 15-bit LFSR clocked by the APU timer. Mode flag selects a 32,767-step
 /// (mode=0) or 93-step (mode=1, short) pseudo-random sequence.
+#[derive(Serialize, Deserialize)]
 pub struct NoiseChannel {
     enabled: bool,
     /// Short-sequence mode: XOR bit 6 instead of bit 1 into the LFSR.

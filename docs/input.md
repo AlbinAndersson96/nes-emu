@@ -55,6 +55,13 @@ arrow keys are `"ArrowUp"`/`"ArrowDown"`/`"ArrowLeft"`/`"ArrowRight"`).
 |---|---|
 | Toggle FPS overlay | Ctrl+`fps_toggle` (default: Ctrl+F) |
 | Open ROM | Ctrl+O (not configurable) |
+| Save state | F5 (not configurable) |
+| Load state | F9 (not configurable) |
+
+Save states are written to `<rom>.state` next to the loaded ROM (one
+quick-save slot per ROM). F5 overwrites it; F9 restores it. A save state
+records the full machine state but not the ROM itself, so it can only be
+loaded with the same ROM open. See `docs/savestate.md`.
 
 `fps_toggle` lives in an optional `[app]` section:
 

@@ -5,7 +5,7 @@ use crate::renderer::Renderer;
 use crate::replay::{Fm2Movie, Fm2Player};
 use crate::system::SystemClock;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub enum AppState {
@@ -26,6 +26,7 @@ pub struct App {
     fps_overlay_enabled: bool,
     replay: Option<Fm2Player>,
     current_rom_bytes: Option<Vec<u8>>,
+    current_rom_path: Option<PathBuf>,
 }
 
 // Safety bound only: a real NTSC frame is 29781 CPU cycles (even) or 29780
@@ -157,6 +158,7 @@ impl App {
             fps_overlay_enabled: false,
             replay: None,
             current_rom_bytes: None,
+            current_rom_path: None,
         }
     }
 
@@ -164,6 +166,7 @@ impl App {
         let data = fs::read(path).map_err(|e| format!("cannot read '{}': {e}", path.display()))?;
         load_rom_into(&mut self.state, &data)?;
         self.current_rom_bytes = Some(data);
+        self.current_rom_path = Some(path.to_path_buf());
         self.replay = None;
         Ok(())
     }
@@ -208,6 +211,48 @@ impl App {
 
     pub fn toggle_fps_overlay(&mut self) {
         toggle_flag(&mut self.fps_overlay_enabled);
+    }
+
+    /// Path of the quick-save-state file for the currently-loaded ROM
+    /// (`<rom>.state`, next to the ROM).
+    fn save_state_path(&self) -> Option<PathBuf> {
+        self.current_rom_path
+            .as_ref()
+            .map(|p| p.with_extension("state"))
+    }
+
+    /// Write a save state for the running machine to `<rom>.state`. A no-op
+    /// (returns an error) when no ROM is loaded. Errors are surfaced to the
+    /// caller for logging rather than interrupting emulation.
+    pub fn save_state(&mut self) -> Result<(), String> {
+        let path = self
+            .save_state_path()
+            .ok_or_else(|| "no ROM loaded".to_string())?;
+        let AppState::Running { cpu, bus, clock } = &self.state else {
+            return Err("no ROM loaded".to_string());
+        };
+        let bytes = crate::savestate::save(cpu, bus, clock)?;
+        fs::write(&path, &bytes).map_err(|e| format!("cannot write '{}': {e}", path.display()))?;
+        Ok(())
+    }
+
+    /// Restore the machine from `<rom>.state`. A no-op (returns an error) when
+    /// no ROM is loaded or no save state exists yet. The restore is atomic in
+    /// effect: the state is only mutated if deserialization succeeds.
+    pub fn load_state(&mut self) -> Result<(), String> {
+        let path = self
+            .save_state_path()
+            .ok_or_else(|| "no ROM loaded".to_string())?;
+        let AppState::Running { cpu, bus, clock } = &mut self.state else {
+            return Err("no ROM loaded".to_string());
+        };
+        let bytes =
+            fs::read(&path).map_err(|e| format!("cannot read '{}': {e}", path.display()))?;
+        crate::savestate::load(&bytes, cpu, bus, clock)?;
+        // The restored PPU framebuffer was not saved; drop any replay so
+        // playback doesn't fight the restored state.
+        self.replay = None;
+        Ok(())
     }
 }
 

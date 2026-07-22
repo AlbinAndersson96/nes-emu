@@ -8,6 +8,7 @@ mod menu;
 mod ppu;
 mod renderer;
 mod replay;
+mod savestate;
 mod system;
 #[cfg(test)]
 mod tests;
@@ -178,6 +179,22 @@ impl ApplicationHandler for WinitApp {
                     && self.key_map.is_fps_toggle(code);
                 if is_fps_toggle {
                     app.toggle_fps_overlay();
+                }
+
+                // Save states: F5 quick-saves, F9 quick-loads (to/from
+                // `<rom>.state` next to the ROM).
+                if event.state == ElementState::Pressed {
+                    match code {
+                        KeyCode::F5 => match app.save_state() {
+                            Ok(()) => eprintln!("save state written"),
+                            Err(e) => eprintln!("save state failed: {e}"),
+                        },
+                        KeyCode::F9 => match app.load_state() {
+                            Ok(()) => eprintln!("save state loaded"),
+                            Err(e) => eprintln!("load state failed: {e}"),
+                        },
+                        _ => {}
+                    }
                 }
 
                 if let Some((port, bit)) = self.key_map.on_key(code) {
