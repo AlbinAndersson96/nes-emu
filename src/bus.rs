@@ -215,6 +215,13 @@ impl Bus {
     /// `maybe_dmc_dma`), which reports its stall cycles via
     /// `take_dma_stall_cycles` instead.
     pub fn tick_apu(&mut self, cpu_cycles: u64) -> bool {
+        // Clock any CPU-cycle-driven mapper timer (the FME-7 IRQ counter).
+        // tick_apu is called exactly once per CPU cycle (both in the normal
+        // per-cycle loop and per DMA stall cycle), so this counts real CPU
+        // cycles one-for-one.
+        if let Some(ref mut c) = self.cartridge {
+            c.tick_cpu(cpu_cycles);
+        }
         // Repay any $4015-read pre-advance first so total APU time is conserved.
         let repay = (self.apu_preadvance_cycles as u64).min(cpu_cycles);
         self.apu_preadvance_cycles -= repay as u32;

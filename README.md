@@ -11,7 +11,7 @@ A cycle-accurate NES emulator written in Rust.
 | PPU — registers, scrolling, NMI | Complete |
 | PPU — background + sprite rendering | Complete |
 | APU — all 5 channels + frame counter | Complete (sample generation; no audio device wired yet) |
-| Cartridge — NROM (0), MMC1 (1), UxROM (2), CNROM (3), MMC3 (4), AxROM (7) | Complete |
+| Cartridge — NROM (0), MMC1 (1), UxROM (2), CNROM (3), MMC3 (4), AxROM (7), MMC2 (9), MMC4 (10), Color Dreams (11), BNROM/NINA-001 (34), GxROM (66), FME-7 (69), Camerica (71), Jaleco CHR (87), Namco 118 (206) | Complete |
 | Controllers — configurable keyboard input | Complete |
 | Display output | Complete (winit + egui/egui-wgpu, WSL2-compatible) |
 
@@ -36,7 +36,9 @@ A cycle-accurate NES emulator written in Rust.
   for the per-test breakdown and remaining-failure analysis.
 
 See [CLAUDE.md](CLAUDE.md) "Known gaps" for what remains (the listen-only `apu_mixer`
-suite, mappers beyond 0/1/2/3/4/7, and the deepest AccuracyCoin PPU/DMA bus-timing quirks).
+suite, the subsystem-scale/expansion-audio mappers deferred until an audio-output path
+exists — MMC5, and the Konami VRC / Namco 163 audio families — and the deepest
+AccuracyCoin PPU/DMA bus-timing quirks).
 
 ## Building and running
 
@@ -93,7 +95,7 @@ src/
   system.rs          — SystemClock: shared per-cycle stepping + interrupt-delivery rules
   bus.rs             — system bus: RAM, PPU, APU, controllers, cartridge; OAM/DMC DMA
   renderer.rs        — winit window + egui/egui-wgpu renderer; NES palette → RGBA
-  cartridge.rs       — iNES parser; mappers 0, 1, 2, 3, 4, 7
+  cartridge.rs       — iNES parser; mappers 0-4, 7, 9-11, 34, 66, 69, 71, 87, 206
   cpu/
     mod.rs           — Cpu struct, micro-op queue, tick(), Bus trait
     instructions.rs  — opcode dispatcher (all official + unofficial opcodes)
@@ -159,5 +161,6 @@ upstream repositories:
 
 - APU audio output (sample generation is implemented; an audio device / sink is not yet wired)
 - Battery-backed save (PRG-RAM) persistence
-- Additional mappers
+- The subsystem-scale / expansion-audio mappers (MMC5; the Konami VRC and Namco 163
+  audio families — deferred until an audio-output path exists to mix their extra channels)
 - Remaining AccuracyCoin accuracy quirks (see [`docs/accuracycoin_outcome.md`](docs/accuracycoin_outcome.md))
