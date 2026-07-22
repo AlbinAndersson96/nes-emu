@@ -836,6 +836,15 @@ impl Ppu {
             }
             return;
         }
+        // Once 8 sprites are found, the buggy overflow scan reads primary OAM
+        // on odd dots (below) and reads secondary OAM back on even dots — at
+        // secondary address $00, so a $2004 read there returns secondary-OAM[0]
+        // (AccuracyCoin "$2004 Stress" key section 4/6: the in-range sprite's
+        // Y alternating with the odd-dot diagonal reads).
+        if self.sprite_eval_count >= 8 && self.dot % 2 == 0 {
+            self.oam_buffer = self.secondary_read_bus(0);
+            return;
+        }
         // Active evaluation advances once per odd dot; the byte read is held
         // across the following even dot (2 dots per object).
         if self.dot % 2 == 0 {
