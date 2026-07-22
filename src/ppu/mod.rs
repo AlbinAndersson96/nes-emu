@@ -205,6 +205,7 @@ pub struct Ppu {
     eval_addr: u8,           // hardware OAMADDR-during-evaluation byte pointer, seeded from oam_addr at dot 65
     eval_copy_left: u8,      // bytes 1-3 still to copy for an in-range sprite
     eval_overflow_reads: u8, // the 3 dummy reads after the overflow flag sets
+    eval_overflow_started: bool, // the buggy overflow scan has done its first read
     eval_done: bool,         // n wrapped past 63 — evaluation idles until next line
     // The value on the PPU's internal OAM data bus, latched by whatever OAM /
     // secondary-OAM access the rendering machinery performs each dot. A $2004
@@ -290,6 +291,7 @@ impl Ppu {
             eval_addr: 0,
             eval_copy_left: 0,
             eval_overflow_reads: 0,
+            eval_overflow_started: false,
             eval_done: false,
             oam_buffer: 0xFF,
             frame: Box::new([0u8; 256 * 240]),
@@ -813,6 +815,7 @@ impl Ppu {
             self.eval_addr = self.oam_addr;
             self.eval_copy_left = 0;
             self.eval_overflow_reads = 0;
+            self.eval_overflow_started = false;
             self.eval_done = false;
         }
         if self.scanline == PRERENDER_SCANLINE {
@@ -836,12 +839,14 @@ impl Ppu {
             }
             return;
         }
-        // Once 8 sprites are found, the buggy overflow scan reads primary OAM
-        // on odd dots (below) and reads secondary OAM back on even dots — at
-        // secondary address $00, so a $2004 read there returns secondary-OAM[0]
-        // (AccuracyCoin "$2004 Stress" key section 4/6: the in-range sprite's
-        // Y alternating with the odd-dot diagonal reads).
-        if self.sprite_eval_count >= 8 && self.dot % 2 == 0 {
+        // Once the buggy overflow scan has begun, it reads primary OAM on odd
+        // dots (below) and reads secondary OAM back on even dots — at secondary
+        // address $00, so a $2004 read there returns secondary-OAM[0]
+        // (AccuracyCoin "$2004 Stress" key section 4/6: the in-range sprite's Y
+        // alternating with the odd-dot diagonal reads). The `started` gate
+        // keeps the even dot immediately after the 8th sprite's copy holding
+        // that sprite's last byte (the fill hasn't handed off yet).
+        if self.eval_overflow_started && self.dot % 2 == 0 {
             self.oam_buffer = self.secondary_read_bus(0);
             return;
         }
@@ -934,6 +939,7 @@ impl Ppu {
             }
         } else {
             // Buggy overflow scan: OAM[n][m] is treated as a Y coordinate.
+            self.eval_overflow_started = true;
             let addr = (self.eval_n * 4 + self.eval_m) as u8;
             let y = self.oam[addr as usize];
             self.oam_buffer = self.oam_read_bus(addr);
