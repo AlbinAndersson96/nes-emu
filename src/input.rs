@@ -40,6 +40,22 @@ fn default_load_state() -> KeyCode {
     KeyCode::F9
 }
 
+fn default_pause() -> KeyCode {
+    KeyCode::KeyP
+}
+
+fn default_speed_up() -> KeyCode {
+    KeyCode::Equal
+}
+
+fn default_slow_down() -> KeyCode {
+    KeyCode::Minus
+}
+
+fn default_normal_speed() -> KeyCode {
+    KeyCode::Backspace
+}
+
 fn default_slots() -> [KeyCode; NUM_SLOTS] {
     [
         KeyCode::Digit0,
@@ -66,6 +82,18 @@ struct RawAppConfig {
     /// Quick-load the active slot. Default: F9.
     #[serde(default = "default_load_state")]
     load_state: KeyCode,
+    /// Freeze/unfreeze emulation. Default: P.
+    #[serde(default = "default_pause")]
+    pause: KeyCode,
+    /// Step one entry faster through the speed list (fast forward). Default: =.
+    #[serde(default = "default_speed_up")]
+    speed_up: KeyCode,
+    /// Step one entry slower through the speed list (slow motion). Default: -.
+    #[serde(default = "default_slow_down")]
+    slow_down: KeyCode,
+    /// Jump back to 1x (normal) speed. Default: Backspace.
+    #[serde(default = "default_normal_speed")]
+    normal_speed: KeyCode,
     /// Keys selecting save-state slots 0..NUM_SLOTS, in order. Default: the
     /// number-row keys Digit0..Digit9. Must list exactly `NUM_SLOTS` keys.
     #[serde(default = "default_slots")]
@@ -78,6 +106,10 @@ impl Default for RawAppConfig {
             fps_toggle: default_fps_toggle(),
             save_state: default_save_state(),
             load_state: default_load_state(),
+            pause: default_pause(),
+            speed_up: default_speed_up(),
+            slow_down: default_slow_down(),
+            normal_speed: default_normal_speed(),
             slots: default_slots(),
         }
     }
@@ -113,6 +145,10 @@ pub struct KeyMap {
     fps_toggle: KeyCode,
     save_state: KeyCode,
     load_state: KeyCode,
+    pause: KeyCode,
+    speed_up: KeyCode,
+    slow_down: KeyCode,
+    normal_speed: KeyCode,
     slots: [KeyCode; NUM_SLOTS],
 }
 
@@ -130,6 +166,10 @@ impl KeyMap {
             fps_toggle: raw.app.fps_toggle,
             save_state: raw.app.save_state,
             load_state: raw.app.load_state,
+            pause: raw.app.pause,
+            speed_up: raw.app.speed_up,
+            slow_down: raw.app.slow_down,
+            normal_speed: raw.app.normal_speed,
             slots: raw.app.slots,
         }
     }
@@ -183,6 +223,26 @@ impl KeyMap {
         keycode == self.load_state
     }
 
+    /// True if `keycode` is the configured pause (freeze/unfreeze) key.
+    pub fn is_pause(&self, keycode: KeyCode) -> bool {
+        keycode == self.pause
+    }
+
+    /// True if `keycode` is the configured "speed up" (fast-forward) key.
+    pub fn is_speed_up(&self, keycode: KeyCode) -> bool {
+        keycode == self.speed_up
+    }
+
+    /// True if `keycode` is the configured "slow down" (slow-motion) key.
+    pub fn is_slow_down(&self, keycode: KeyCode) -> bool {
+        keycode == self.slow_down
+    }
+
+    /// True if `keycode` is the configured "normal speed" (reset to 1x) key.
+    pub fn is_normal_speed(&self, keycode: KeyCode) -> bool {
+        keycode == self.normal_speed
+    }
+
     /// The save-state slot `keycode` selects (0..NUM_SLOTS), or `None` if it
     /// isn't a configured slot key.
     pub fn slot_for_key(&self, keycode: KeyCode) -> Option<u8> {
@@ -218,6 +278,91 @@ impl Default for KeyMap {
             },
             app: RawAppConfig::default(),
         })
+    }
+}
+
+#[cfg(test)]
+mod speed_key_tests {
+    use super::*;
+
+    #[test]
+    fn default_map_has_speed_control_keys() {
+        let map = KeyMap::default();
+        assert!(map.is_pause(KeyCode::KeyP));
+        assert!(map.is_speed_up(KeyCode::Equal));
+        assert!(map.is_slow_down(KeyCode::Minus));
+        assert!(map.is_normal_speed(KeyCode::Backspace));
+    }
+
+    #[test]
+    fn missing_app_section_defaults_speed_keys() {
+        let players = r#"
+            [player1]
+            up = "KeyW"
+            down = "KeyS"
+            left = "KeyA"
+            right = "KeyD"
+            b = "KeyZ"
+            a = "KeyX"
+            select = "KeyQ"
+            start = "KeyE"
+
+            [player2]
+            up = "KeyI"
+            down = "KeyK"
+            left = "KeyJ"
+            right = "KeyL"
+            b = "KeyN"
+            a = "KeyM"
+            select = "Comma"
+            start = "Period"
+        "#;
+        let raw: RawConfig = toml::from_str(players).expect("valid toml must parse");
+        let map = KeyMap::from_raw(raw);
+        assert!(map.is_pause(KeyCode::KeyP));
+        assert!(map.is_speed_up(KeyCode::Equal));
+        assert!(map.is_slow_down(KeyCode::Minus));
+        assert!(map.is_normal_speed(KeyCode::Backspace));
+    }
+
+    #[test]
+    fn app_section_overrides_speed_keys() {
+        let text = r#"
+            [player1]
+            up = "KeyW"
+            down = "KeyS"
+            left = "KeyA"
+            right = "KeyD"
+            b = "KeyZ"
+            a = "KeyX"
+            select = "KeyQ"
+            start = "KeyE"
+
+            [player2]
+            up = "KeyI"
+            down = "KeyK"
+            left = "KeyJ"
+            right = "KeyL"
+            b = "KeyN"
+            a = "KeyM"
+            select = "Comma"
+            start = "Period"
+
+            [app]
+            pause = "Enter"
+            speed_up = "BracketRight"
+            slow_down = "BracketLeft"
+            normal_speed = "Backslash"
+        "#;
+        let raw: RawConfig = toml::from_str(text).expect("valid toml must parse");
+        let map = KeyMap::from_raw(raw);
+        assert!(map.is_pause(KeyCode::Enter));
+        assert!(map.is_speed_up(KeyCode::BracketRight));
+        assert!(map.is_slow_down(KeyCode::BracketLeft));
+        assert!(map.is_normal_speed(KeyCode::Backslash));
+        // Defaults no longer apply once overridden.
+        assert!(!map.is_pause(KeyCode::KeyP));
+        assert!(!map.is_speed_up(KeyCode::Equal));
     }
 }
 

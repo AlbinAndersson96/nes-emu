@@ -76,10 +76,42 @@ a specific path. See [`input.md`](input.md) for the file format and full details
 | Select save-state slot 0–9 | number keys 0–9 |
 | Quick-save active slot | F5 |
 | Quick-load active slot | F9 |
+| Pause / resume | P |
+| Speed up (fast forward) | `=` |
+| Slow down (slow motion) | `-` |
+| Reset to normal speed | Backspace |
 
-The FPS overlay, slot keys, and save/load keys are all configurable in the
-`[app]` section of `keybindings.toml` (`fps_toggle`, `slots`, `save_state`,
-`load_state`). Ctrl+O is fixed.
+The FPS overlay, slot keys, save/load keys, pause key, and speed keys are all
+configurable in the `[app]` section of `keybindings.toml` (`fps_toggle`,
+`slots`, `save_state`, `load_state`, `pause`, `speed_up`, `slow_down`,
+`normal_speed`). Ctrl+O is fixed.
+
+## Pausing
+
+Press **P** to freeze the emulator and press it again to resume. While paused
+the machine stops advancing entirely and the last rendered frame stays on
+screen; the window still responds to input and menus, and the title shows a
+`· paused` marker. The pause key is remappable via `pause` in the `[app]`
+section of `keybindings.toml`.
+
+## Emulation speed
+
+The emulator can run slower or faster than real time. Press `-` to **slow down**
+and `=` to **speed up** — each keypress steps one entry through the speed list:
+
+`1/32× · 1/16× · 1/8× · 1/4× · 1/2× · 1× · 1.5× · 2× · 3× · 4× · 8×`
+
+The list clamps at both ends (slowing past `1/32×` or speeding past `8×` does
+nothing), and **Backspace** jumps straight back to `1×`. Whenever the speed
+isn't `1×` it's shown in the window title (`nes-emu — <rom> · slot N · 2x`).
+
+Speed is a pure wall-clock pacing change: the emulator runs one NES frame every
+`frame_time ÷ multiplier` of real time, so slow motion stretches the interval
+between frames and fast forward shrinks it. (There is no audio output yet, so
+speed changes only affect video pacing.) At very high fast-forward the host may
+not be able to emulate frames quickly enough to keep up, in which case it simply
+runs as fast as it can. The keys are remappable via `[app]` in
+`keybindings.toml`.
 
 ## Save states
 

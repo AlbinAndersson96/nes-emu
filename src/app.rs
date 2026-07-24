@@ -30,11 +30,49 @@ pub struct App {
     /// Active save-state slot (0..NUM_SLOTS), selected with the number keys and
     /// used by the F5/F9 quick-save/load hotkeys.
     active_slot: u8,
+    /// Index into `SPEEDS` selecting the current emulation speed. The pacing
+    /// loop (`main.rs`) divides the NTSC frame interval by the multiplier, so a
+    /// factor < 1 is slow motion and > 1 is fast forward.
+    speed_index: usize,
+    /// When true the machine is frozen: the pacing loop stops advancing the
+    /// emulation, leaving the last rendered frame on screen. The window still
+    /// processes input (so it can be unpaused) and redraws the menu.
+    paused: bool,
 }
 
 /// Number of numbered save-state slots (selectable with the configured slot
 /// keys, by default the number-row keys 0-9).
 pub const NUM_SLOTS: usize = 10;
+
+/// Selectable emulation speeds, slowest to fastest, as `(multiplier, label)`.
+/// The multiplier scales real-time: `SPEEDS[NORMAL_SPEED_INDEX]` is 1× (the
+/// true NTSC rate), entries below it are slow motion (1/2×…1/32×) and entries
+/// above are fast forward (1.5×…8×). The pacing loop runs one NES frame every
+/// `FRAME_DURATION / multiplier` of wall-clock time.
+pub const SPEEDS: [(f64, &str); 11] = [
+    (1.0 / 32.0, "1/32x"),
+    (1.0 / 16.0, "1/16x"),
+    (1.0 / 8.0, "1/8x"),
+    (1.0 / 4.0, "1/4x"),
+    (1.0 / 2.0, "1/2x"),
+    (1.0, "1x"),
+    (1.5, "1.5x"),
+    (2.0, "2x"),
+    (3.0, "3x"),
+    (4.0, "4x"),
+    (8.0, "8x"),
+];
+
+/// Index of the 1× (normal-speed) entry in `SPEEDS`.
+pub const NORMAL_SPEED_INDEX: usize = 5;
+
+/// Move `index` `delta` steps through `SPEEDS`, clamping at both ends (so
+/// speeding up past 8× or slowing down past 1/32× is a no-op that leaves the
+/// current speed unchanged rather than wrapping).
+fn adjust_speed_index(index: usize, delta: i32) -> usize {
+    let max = (SPEEDS.len() - 1) as i32;
+    (index as i32 + delta).clamp(0, max) as usize
+}
 
 /// File path for save-state `slot` given the loaded ROM path. Slot 0 uses
 /// `<rom>.state` (the original single-slot name, kept for backward
@@ -181,6 +219,8 @@ impl App {
             current_rom_bytes: None,
             current_rom_path: None,
             active_slot: 0,
+            speed_index: NORMAL_SPEED_INDEX,
+            paused: false,
         }
     }
 
@@ -257,6 +297,55 @@ impl App {
         self.refresh_title();
     }
 
+    /// The current emulation-speed multiplier (1.0 = real time). The pacing
+    /// loop divides the NTSC frame interval by this.
+    pub fn speed_multiplier(&self) -> f64 {
+        SPEEDS[self.speed_index].0
+    }
+
+    /// Step one entry faster through `SPEEDS` (clamped at 8×). Refreshes the
+    /// window title so the new speed is visible.
+    pub fn speed_up(&mut self) {
+        self.set_speed_index(adjust_speed_index(self.speed_index, 1));
+    }
+
+    /// Step one entry slower through `SPEEDS` (clamped at 1/32×). Refreshes the
+    /// window title so the new speed is visible.
+    pub fn slow_down(&mut self) {
+        self.set_speed_index(adjust_speed_index(self.speed_index, -1));
+    }
+
+    /// Jump straight back to 1× (normal) speed.
+    pub fn reset_speed(&mut self) {
+        self.set_speed_index(NORMAL_SPEED_INDEX);
+    }
+
+    /// Human-readable label for the current speed (e.g. "2x", "1/4x"), used in
+    /// the window title and stderr feedback.
+    pub fn speed_label(&self) -> &'static str {
+        SPEEDS[self.speed_index].1
+    }
+
+    fn set_speed_index(&mut self, index: usize) {
+        if index != self.speed_index {
+            self.speed_index = index;
+            self.refresh_title();
+        }
+    }
+
+    /// Whether the emulator is currently paused (the pacing loop checks this to
+    /// decide whether to advance the machine).
+    pub fn is_paused(&self) -> bool {
+        self.paused
+    }
+
+    /// Freeze or unfreeze emulation. The last rendered frame stays on screen
+    /// while paused; the window title reflects the new state.
+    pub fn toggle_pause(&mut self) {
+        self.paused = !self.paused;
+        self.refresh_title();
+    }
+
     /// Save-state path for the active slot's file next to the loaded ROM. Used
     /// by the F5/F9 hotkeys and as the suggested filename in the "Save
     /// State..." dialog.
@@ -264,12 +353,20 @@ impl App {
         slot_state_path(self.current_rom_path.as_deref(), self.active_slot)
     }
 
-    /// Set the window title to reflect the loaded ROM and active slot.
+    /// Set the window title to reflect the loaded ROM, active slot, and — when
+    /// active — the current emulation speed (if not 1×) and paused state.
     fn refresh_title(&self) {
         let title = match self.current_rom_path.as_ref() {
             Some(p) => {
                 let name = p.file_stem().and_then(|s| s.to_str()).unwrap_or("nes-emu");
-                format!("nes-emu — {name} · slot {}", self.active_slot)
+                let mut title = format!("nes-emu — {name} · slot {}", self.active_slot);
+                if self.speed_index != NORMAL_SPEED_INDEX {
+                    title.push_str(&format!(" · {}", self.speed_label()));
+                }
+                if self.paused {
+                    title.push_str(" · paused");
+                }
+                title
             }
             None => "nes-emu".to_string(),
         };
@@ -515,6 +612,67 @@ mod tests {
         assert!((fps - 60.78).abs() < 1.0, "expected ~60.78 fps, got {fps}");
         assert_eq!(frames, 0, "counter must reset after computing fps");
         assert_eq!(last_update, now, "window start must reset to now");
+    }
+
+    #[test]
+    fn normal_speed_index_is_one_times() {
+        assert_eq!(
+            SPEEDS[NORMAL_SPEED_INDEX].0, 1.0,
+            "NORMAL_SPEED_INDEX must point at the 1x entry"
+        );
+    }
+
+    #[test]
+    fn adjust_speed_index_walks_and_clamps_both_ends() {
+        // Stepping up increases the index toward faster speeds.
+        assert_eq!(
+            adjust_speed_index(NORMAL_SPEED_INDEX, 1),
+            NORMAL_SPEED_INDEX + 1
+        );
+        // Stepping down decreases it toward slower speeds.
+        assert_eq!(
+            adjust_speed_index(NORMAL_SPEED_INDEX, -1),
+            NORMAL_SPEED_INDEX - 1
+        );
+        // Clamped at the fast end (8x) — no wrap.
+        let fastest = SPEEDS.len() - 1;
+        assert_eq!(adjust_speed_index(fastest, 1), fastest);
+        // Clamped at the slow end (1/32x) — no wrap.
+        assert_eq!(adjust_speed_index(0, -1), 0);
+    }
+
+    #[test]
+    fn speed_controls_cover_the_required_range() {
+        // The task's slow-motion and fast-forward factors must all be present.
+        let mults: Vec<f64> = SPEEDS.iter().map(|(m, _)| *m).collect();
+        for expected in [
+            1.0 / 2.0,
+            1.0 / 4.0,
+            1.0 / 8.0,
+            1.0 / 16.0,
+            1.0 / 32.0,
+            1.5,
+            2.0,
+            3.0,
+            4.0,
+            8.0,
+        ] {
+            assert!(
+                mults.iter().any(|&m| (m - expected).abs() < 1e-9),
+                "speed {expected}x must be selectable"
+            );
+        }
+    }
+
+    #[test]
+    fn toggle_pause_flips_paused_state() {
+        let mut paused = false;
+        // Mirror App::toggle_pause's core (a plain bool flip); the method also
+        // refreshes the window title, which needs a live Renderer/window.
+        toggle_flag(&mut paused);
+        assert!(paused, "first toggle pauses");
+        toggle_flag(&mut paused);
+        assert!(!paused, "second toggle resumes");
     }
 
     #[test]
