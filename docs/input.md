@@ -1,10 +1,25 @@
 # Controller Input
 
 Keyboard input is mapped to both NES controller ports via a TOML config
-file, `keybindings.toml`, which is seeded next to the built binary (e.g.
-`target/debug/keybindings.toml` or `target/release/keybindings.toml`) the
-first time you `cargo build`. Edit that file to remap keys; rebuilding
-afterward will not overwrite your edits (see `build.rs`).
+file, `keybindings.toml`.
+
+**Which file is read depends on the build:**
+
+- **Development (`cargo run`, debug builds):** the source file
+  `assets/keybindings.toml` in the repo is read directly. Edit it and the
+  change applies on the next `cargo run` — no rebuild dance, no stale copy.
+- **Release / installed (`cargo run --release`, a shipped binary):** the
+  copy sitting next to the executable is read. `build.rs` seeds that copy
+  from `assets/keybindings.toml` the first time you build and never
+  overwrites it afterward, so your customizations survive upgrades.
+- **Override:** set `$NES_EMU_KEYBINDINGS` to an explicit path to force that
+  file in either build.
+
+(The previous behavior — debug builds also reading the seeded
+`target/debug/keybindings.toml` — meant edits to the tracked
+`assets/keybindings.toml` never took effect, because the seed copy was
+created once and never refreshed. Debug builds now read the source directly
+to avoid that trap.)
 
 ## File format
 

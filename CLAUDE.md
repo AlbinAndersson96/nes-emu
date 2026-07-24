@@ -17,7 +17,7 @@ cargo clippy         # lint
 cargo fmt            # format
 ```
 
-- **`build.rs`** — seeds `keybindings.toml` (copied from `assets/keybindings.toml`) next to the compiled binary on first build; never overwrites an existing copy, so user edits survive rebuilds.
+- **`build.rs`** — seeds `keybindings.toml` (copied from `assets/keybindings.toml`) next to the compiled binary on first build; never overwrites an existing copy, so user edits survive rebuilds. That seeded copy is what **release** binaries read. **Debug** builds instead read `assets/keybindings.toml` from the source tree directly (via `main.rs::keybindings_path`, gated on `cfg!(debug_assertions)`), so editing it takes effect on the next `cargo run` without the never-overwritten `target/` copy shadowing the change. `$NES_EMU_KEYBINDINGS` overrides the path in either profile.
 
 ## Module structure
 

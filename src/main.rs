@@ -60,6 +60,31 @@ fn maybe_configure_wsl2_gpu() {
     }
 }
 
+/// Resolve which `keybindings.toml` to load, in priority order:
+///
+/// 1. `$NES_EMU_KEYBINDINGS`, if set — an explicit path override.
+/// 2. Debug builds: the source file `assets/keybindings.toml` in the crate,
+///    read directly so edits take effect on the next `cargo run` (the copy
+///    `build.rs` seeds into `target/<profile>/` is for release/installed use,
+///    and is never overwritten once it exists).
+/// 3. Release builds: `keybindings.toml` next to the executable (the seeded,
+///    user-customizable copy).
+///
+/// A missing file at the resolved path is not fatal — `KeyMap::load` warns and
+/// falls back to the built-in defaults.
+fn keybindings_path() -> PathBuf {
+    if let Some(path) = env::var_os("NES_EMU_KEYBINDINGS") {
+        return PathBuf::from(path);
+    }
+    if cfg!(debug_assertions) {
+        return PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/keybindings.toml");
+    }
+    env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("keybindings.toml")))
+        .unwrap_or_else(|| PathBuf::from("keybindings.toml"))
+}
+
 fn load_rom_via_dialog(app: &mut App) {
     if let Some(path) = rfd::FileDialog::new()
         .add_filter("NES ROM", &["nes"])
@@ -284,10 +309,7 @@ fn main() {
         process::exit(1);
     }
 
-    let key_map = env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("keybindings.toml")))
-        .map_or_else(KeyMap::default, |path| KeyMap::load(&path));
+    let key_map = KeyMap::load(&keybindings_path());
 
     let mut winit_app = WinitApp {
         app: None,
