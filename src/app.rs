@@ -34,6 +34,10 @@ pub struct App {
     /// loop (`main.rs`) divides the NTSC frame interval by the multiplier, so a
     /// factor < 1 is slow motion and > 1 is fast forward.
     speed_index: usize,
+    /// When true the machine is frozen: the pacing loop stops advancing the
+    /// emulation, leaving the last rendered frame on screen. The window still
+    /// processes input (so it can be unpaused) and redraws the menu.
+    paused: bool,
 }
 
 /// Number of numbered save-state slots (selectable with the configured slot
@@ -216,6 +220,7 @@ impl App {
             current_rom_path: None,
             active_slot: 0,
             speed_index: NORMAL_SPEED_INDEX,
+            paused: false,
         }
     }
 
@@ -328,6 +333,19 @@ impl App {
         }
     }
 
+    /// Whether the emulator is currently paused (the pacing loop checks this to
+    /// decide whether to advance the machine).
+    pub fn is_paused(&self) -> bool {
+        self.paused
+    }
+
+    /// Freeze or unfreeze emulation. The last rendered frame stays on screen
+    /// while paused; the window title reflects the new state.
+    pub fn toggle_pause(&mut self) {
+        self.paused = !self.paused;
+        self.refresh_title();
+    }
+
     /// Save-state path for the active slot's file next to the loaded ROM. Used
     /// by the F5/F9 hotkeys and as the suggested filename in the "Save
     /// State..." dialog.
@@ -336,7 +354,7 @@ impl App {
     }
 
     /// Set the window title to reflect the loaded ROM, active slot, and — when
-    /// not running at 1× — the current emulation speed.
+    /// active — the current emulation speed (if not 1×) and paused state.
     fn refresh_title(&self) {
         let title = match self.current_rom_path.as_ref() {
             Some(p) => {
@@ -344,6 +362,9 @@ impl App {
                 let mut title = format!("nes-emu — {name} · slot {}", self.active_slot);
                 if self.speed_index != NORMAL_SPEED_INDEX {
                     title.push_str(&format!(" · {}", self.speed_label()));
+                }
+                if self.paused {
+                    title.push_str(" · paused");
                 }
                 title
             }
@@ -641,6 +662,17 @@ mod tests {
                 "speed {expected}x must be selectable"
             );
         }
+    }
+
+    #[test]
+    fn toggle_pause_flips_paused_state() {
+        let mut paused = false;
+        // Mirror App::toggle_pause's core (a plain bool flip); the method also
+        // refreshes the window title, which needs a live Renderer/window.
+        toggle_flag(&mut paused);
+        assert!(paused, "first toggle pauses");
+        toggle_flag(&mut paused);
+        assert!(!paused, "second toggle resumes");
     }
 
     #[test]

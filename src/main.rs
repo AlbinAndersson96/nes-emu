@@ -263,6 +263,16 @@ impl ApplicationHandler for WinitApp {
                         }
                     }
 
+                    // Pause: freeze/unfreeze emulation. The pacing loop in
+                    // `about_to_wait` stops advancing the machine while paused.
+                    if self.key_map.is_pause(code) {
+                        app.toggle_pause();
+                        eprintln!(
+                            "emulation {}",
+                            if app.is_paused() { "paused" } else { "resumed" }
+                        );
+                    }
+
                     // Emulation speed: step through the slow-motion /
                     // fast-forward list, or jump back to 1x. The pacing loop in
                     // `about_to_wait` picks up the new multiplier on its next
@@ -309,6 +319,14 @@ impl ApplicationHandler for WinitApp {
         let Some(app) = self.app.as_mut() else {
             return;
         };
+        // Paused: don't advance the machine. Keep the schedule anchored to now
+        // so resuming picks up cleanly without a catch-up burst, and poll on a
+        // relaxed cadence so the window stays responsive to the unpause key.
+        if app.is_paused() {
+            self.next_frame = Instant::now() + FRAME_DURATION;
+            event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
+            return;
+        }
         // The wall-clock time one NES frame should take at the current speed:
         // slow motion stretches the interval (multiplier < 1), fast forward
         // shrinks it (multiplier > 1). At 1x this is exactly FRAME_DURATION.

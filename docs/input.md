@@ -73,14 +73,17 @@ arrow keys are `"ArrowUp"`/`"ArrowDown"`/`"ArrowLeft"`/`"ArrowRight"`).
 | Select save-state slot | `slots` (default: 0–9) |
 | Save state (active slot) | `save_state` (default: F5) |
 | Load state (active slot) | `load_state` (default: F9) |
+| Pause / resume | `pause` (default: P) |
 | Speed up (fast forward) | `speed_up` (default: `=`) |
 | Slow down (slow motion) | `slow_down` (default: `-`) |
 | Reset to normal speed | `normal_speed` (default: Backspace) |
 
-`speed_up`/`slow_down` step one entry through the emulation-speed list —
+`pause` freezes emulation (the last frame stays on screen, the window keeps
+responding); pressing it again resumes. `speed_up`/`slow_down` step one entry
+through the emulation-speed list —
 `1/32×, 1/16×, 1/8×, 1/4×, 1/2×, 1×, 1.5×, 2×, 3×, 4×, 8×` — clamping at both
-ends, and `normal_speed` jumps straight back to `1×`. The current speed is
-shown in the window title whenever it isn't `1×`. See
+ends, and `normal_speed` jumps straight back to `1×`. The current speed (when
+not `1×`) and a `paused` marker are shown in the window title. See
 [`docs/usage.md`](usage.md#emulation-speed).
 
 The `slots` keys pick one of ten save-state slots (shown in the window
@@ -98,6 +101,7 @@ App shortcuts live in an optional `[app]` section:
 fps_toggle = "KeyF"
 save_state = "F5"
 load_state = "F9"
+pause = "KeyP"
 speed_up = "Equal"
 slow_down = "Minus"
 normal_speed = "Backspace"

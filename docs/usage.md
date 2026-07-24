@@ -76,14 +76,23 @@ a specific path. See [`input.md`](input.md) for the file format and full details
 | Select save-state slot 0–9 | number keys 0–9 |
 | Quick-save active slot | F5 |
 | Quick-load active slot | F9 |
+| Pause / resume | P |
 | Speed up (fast forward) | `=` |
 | Slow down (slow motion) | `-` |
 | Reset to normal speed | Backspace |
 
-The FPS overlay, slot keys, save/load keys, and speed keys are all configurable
-in the `[app]` section of `keybindings.toml` (`fps_toggle`, `slots`,
-`save_state`, `load_state`, `speed_up`, `slow_down`, `normal_speed`). Ctrl+O is
-fixed.
+The FPS overlay, slot keys, save/load keys, pause key, and speed keys are all
+configurable in the `[app]` section of `keybindings.toml` (`fps_toggle`,
+`slots`, `save_state`, `load_state`, `pause`, `speed_up`, `slow_down`,
+`normal_speed`). Ctrl+O is fixed.
+
+## Pausing
+
+Press **P** to freeze the emulator and press it again to resume. While paused
+the machine stops advancing entirely and the last rendered frame stays on
+screen; the window still responds to input and menus, and the title shows a
+`· paused` marker. The pause key is remappable via `pause` in the `[app]`
+section of `keybindings.toml`.
 
 ## Emulation speed
 
