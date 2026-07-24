@@ -32,8 +32,9 @@ pub struct App {
     active_slot: u8,
 }
 
-/// Number of numbered save-state slots (selectable with keys 0-9).
-pub const NUM_SLOTS: u8 = 10;
+/// Number of numbered save-state slots (selectable with the configured slot
+/// keys, by default the number-row keys 0-9).
+pub const NUM_SLOTS: usize = 10;
 
 /// File path for save-state `slot` given the loaded ROM path. Slot 0 uses
 /// `<rom>.state` (the original single-slot name, kept for backward
@@ -249,7 +250,7 @@ impl App {
     /// Select the active save-state slot (used by the number keys). Out-of-range
     /// values are ignored. Updates the window title to reflect the new slot.
     pub fn select_slot(&mut self, slot: u8) {
-        if slot >= NUM_SLOTS {
+        if slot as usize >= NUM_SLOTS {
             return;
         }
         self.active_slot = slot;
@@ -347,7 +348,7 @@ mod tests {
             slot_state_path(Some(&rom), 0),
             Some(PathBuf::from("/games/mario.state"))
         );
-        for slot in 1..NUM_SLOTS {
+        for slot in 1..NUM_SLOTS as u8 {
             assert_eq!(
                 slot_state_path(Some(&rom), slot),
                 Some(PathBuf::from(format!("/games/mario.state{slot}"))),

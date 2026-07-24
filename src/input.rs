@@ -5,6 +5,8 @@ use std::path::Path;
 use serde::Deserialize;
 use winit::keyboard::KeyCode;
 
+use crate::app::NUM_SLOTS;
+
 pub const BUTTON_A: u8 = 1 << 0;
 pub const BUTTON_B: u8 = 1 << 1;
 pub const BUTTON_SELECT: u8 = 1 << 2;
@@ -26,15 +28,57 @@ struct RawKeyBindings {
     start: KeyCode,
 }
 
+fn default_fps_toggle() -> KeyCode {
+    KeyCode::KeyF
+}
+
+fn default_save_state() -> KeyCode {
+    KeyCode::F5
+}
+
+fn default_load_state() -> KeyCode {
+    KeyCode::F9
+}
+
+fn default_slots() -> [KeyCode; NUM_SLOTS] {
+    [
+        KeyCode::Digit0,
+        KeyCode::Digit1,
+        KeyCode::Digit2,
+        KeyCode::Digit3,
+        KeyCode::Digit4,
+        KeyCode::Digit5,
+        KeyCode::Digit6,
+        KeyCode::Digit7,
+        KeyCode::Digit8,
+        KeyCode::Digit9,
+    ]
+}
+
 #[derive(Deserialize)]
 struct RawAppConfig {
+    /// FPS-overlay toggle (paired with Ctrl). Default: F.
+    #[serde(default = "default_fps_toggle")]
     fps_toggle: KeyCode,
+    /// Quick-save the active slot. Default: F5.
+    #[serde(default = "default_save_state")]
+    save_state: KeyCode,
+    /// Quick-load the active slot. Default: F9.
+    #[serde(default = "default_load_state")]
+    load_state: KeyCode,
+    /// Keys selecting save-state slots 0..NUM_SLOTS, in order. Default: the
+    /// number-row keys Digit0..Digit9. Must list exactly `NUM_SLOTS` keys.
+    #[serde(default = "default_slots")]
+    slots: [KeyCode; NUM_SLOTS],
 }
 
 impl Default for RawAppConfig {
     fn default() -> Self {
         Self {
-            fps_toggle: KeyCode::KeyF,
+            fps_toggle: default_fps_toggle(),
+            save_state: default_save_state(),
+            load_state: default_load_state(),
+            slots: default_slots(),
         }
     }
 }
@@ -67,6 +111,9 @@ impl RawKeyBindings {
 pub struct KeyMap {
     bindings: HashMap<KeyCode, (usize, u8)>,
     fps_toggle: KeyCode,
+    save_state: KeyCode,
+    load_state: KeyCode,
+    slots: [KeyCode; NUM_SLOTS],
 }
 
 impl KeyMap {
@@ -81,6 +128,9 @@ impl KeyMap {
         Self {
             bindings,
             fps_toggle: raw.app.fps_toggle,
+            save_state: raw.app.save_state,
+            load_state: raw.app.load_state,
+            slots: raw.app.slots,
         }
     }
 
@@ -121,6 +171,25 @@ impl KeyMap {
     /// with Ctrl by the caller — this only checks the letter).
     pub fn is_fps_toggle(&self, keycode: KeyCode) -> bool {
         keycode == self.fps_toggle
+    }
+
+    /// True if `keycode` is the configured save-state (quick-save) key.
+    pub fn is_save_state(&self, keycode: KeyCode) -> bool {
+        keycode == self.save_state
+    }
+
+    /// True if `keycode` is the configured load-state (quick-load) key.
+    pub fn is_load_state(&self, keycode: KeyCode) -> bool {
+        keycode == self.load_state
+    }
+
+    /// The save-state slot `keycode` selects (0..NUM_SLOTS), or `None` if it
+    /// isn't a configured slot key.
+    pub fn slot_for_key(&self, keycode: KeyCode) -> Option<u8> {
+        self.slots
+            .iter()
+            .position(|&k| k == keycode)
+            .map(|i| i as u8)
     }
 }
 
@@ -299,5 +368,90 @@ mod tests {
     fn default_map_has_f_as_fps_toggle() {
         let map = KeyMap::default();
         assert!(map.is_fps_toggle(KeyCode::KeyF));
+    }
+
+    /// The two required player sections, shared by the `[app]`-focused tests.
+    const PLAYERS: &str = r#"
+        [player1]
+        up = "KeyW"
+        down = "KeyS"
+        left = "KeyA"
+        right = "KeyD"
+        b = "KeyZ"
+        a = "KeyX"
+        select = "KeyQ"
+        start = "KeyE"
+
+        [player2]
+        up = "KeyI"
+        down = "KeyK"
+        left = "KeyJ"
+        right = "KeyL"
+        b = "KeyN"
+        a = "KeyM"
+        select = "Comma"
+        start = "Period"
+    "#;
+
+    fn map_from_app(app_section: &str) -> KeyMap {
+        let text = format!("{PLAYERS}\n{app_section}");
+        let raw: RawConfig = toml::from_str(&text).expect("valid toml must parse");
+        KeyMap::from_raw(raw)
+    }
+
+    #[test]
+    fn default_map_has_save_load_and_slot_keys() {
+        let map = KeyMap::default();
+        assert!(map.is_save_state(KeyCode::F5));
+        assert!(map.is_load_state(KeyCode::F9));
+        assert_eq!(map.slot_for_key(KeyCode::Digit0), Some(0));
+        assert_eq!(map.slot_for_key(KeyCode::Digit9), Some(9));
+        assert_eq!(map.slot_for_key(KeyCode::KeyP), None);
+    }
+
+    #[test]
+    fn missing_app_section_defaults_save_load_and_slots() {
+        // No `[app]` at all -> RawAppConfig::default() supplies every app key.
+        let raw: RawConfig = toml::from_str(PLAYERS).expect("valid toml must parse");
+        let map = KeyMap::from_raw(raw);
+        assert!(map.is_save_state(KeyCode::F5));
+        assert!(map.is_load_state(KeyCode::F9));
+        assert_eq!(map.slot_for_key(KeyCode::Digit3), Some(3));
+    }
+
+    #[test]
+    fn app_section_overrides_save_load_and_slot_keys() {
+        let map = map_from_app(
+            r#"
+            [app]
+            save_state = "F2"
+            load_state = "F4"
+            slots = ["Numpad0", "Numpad1", "Numpad2", "Numpad3", "Numpad4",
+                     "Numpad5", "Numpad6", "Numpad7", "Numpad8", "Numpad9"]
+            "#,
+        );
+        assert!(map.is_save_state(KeyCode::F2));
+        assert!(map.is_load_state(KeyCode::F4));
+        assert!(!map.is_save_state(KeyCode::F5));
+        assert_eq!(map.slot_for_key(KeyCode::Numpad3), Some(3));
+        // The default number-row keys no longer select slots.
+        assert_eq!(map.slot_for_key(KeyCode::Digit3), None);
+    }
+
+    #[test]
+    fn app_section_fields_default_independently() {
+        // Only `save_state` is set; the other app keys fall back to defaults.
+        let map = map_from_app("[app]\nsave_state = \"F1\"");
+        assert!(map.is_save_state(KeyCode::F1));
+        assert!(map.is_load_state(KeyCode::F9)); // default
+        assert!(map.is_fps_toggle(KeyCode::KeyF)); // default
+        assert_eq!(map.slot_for_key(KeyCode::Digit5), Some(5)); // default
+    }
+
+    #[test]
+    fn slots_with_wrong_count_is_a_parse_error() {
+        // The array must contain exactly NUM_SLOTS keys.
+        let text = format!("{PLAYERS}\n[app]\nslots = [\"Digit0\", \"Digit1\"]");
+        assert!(toml::from_str::<RawConfig>(&text).is_err());
     }
 }

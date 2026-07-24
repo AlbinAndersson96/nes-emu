@@ -12,7 +12,9 @@ Two ways in:
 - **Hotkeys** — number keys **0-9** select the active slot; **F5** quick-saves
   and **F9** quick-loads that slot's file next to the loaded ROM. The active
   slot shows in the window title (`nes-emu — <rom> · slot N`). Ten slots per
-  ROM. All keys are fixed (not part of `keybindings.toml`).
+  ROM. All three keybindings are configurable via `keybindings.toml`'s `[app]`
+  section (`save_state`, `load_state`, and the ten-key `slots` array — see
+  `docs/input.md`).
 - **File menu** — **Save State...** and **Load State...** open a file dialog so
   you can save to / load from any path (the dialog is pre-filled with the active
   slot's location and name). The two items are disabled until a ROM is loaded.
@@ -70,9 +72,12 @@ Not saved:
   indicator).
 - **`src/menu.rs`** — the `Save State...` / `Load State...` File-menu items
   (gated on `rom_loaded`).
-- **`src/main.rs`** — the keyboard handler: `digit_slot` maps number keys to a
-  slot and F5/F9 save/load the active slot; plus the `save_state_via_dialog` /
-  `load_state_via_dialog` file-dialog helpers wired to the menu actions.
+- **`src/input.rs`** — the `[app]` keybindings: `save_state`, `load_state`, and
+  the `slots` array, with `KeyMap::is_save_state` / `is_load_state` /
+  `slot_for_key` lookups (each field independently defaulted).
+- **`src/main.rs`** — the keyboard handler consults `KeyMap` for the slot /
+  save / load keys; plus the `save_state_via_dialog` / `load_state_via_dialog`
+  file-dialog helpers wired to the menu actions.
 - **`src/renderer.rs`** — `Renderer::set_title` (updates the window title bar).
 
 The blob starts with a magic tag (`"NESS"`) and a version word; a mismatched

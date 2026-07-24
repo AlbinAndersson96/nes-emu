@@ -20,3 +20,18 @@ start = "Period"
 
 [app]
 fps_toggle = "KeyF"
+save_state = "F5"
+load_state = "F9"
+# Keys that select save-state slots 0-9, in order. Must list exactly 10 keys.
+slots = [
+    "Digit0",
+    "Digit1",
+    "Digit2",
+    "Digit3",
+    "Digit4",
+    "Digit5",
+    "Digit6",
+    "Digit7",
+    "Digit8",
+    "Digit9",
+]
