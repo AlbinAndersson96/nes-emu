@@ -27,6 +27,26 @@ pub struct App {
     replay: Option<Fm2Player>,
     current_rom_bytes: Option<Vec<u8>>,
     current_rom_path: Option<PathBuf>,
+    /// Active save-state slot (0..NUM_SLOTS), selected with the number keys and
+    /// used by the F5/F9 quick-save/load hotkeys.
+    active_slot: u8,
+}
+
+/// Number of numbered save-state slots (selectable with keys 0-9).
+pub const NUM_SLOTS: u8 = 10;
+
+/// File path for save-state `slot` given the loaded ROM path. Slot 0 uses
+/// `<rom>.state` (the original single-slot name, kept for backward
+/// compatibility); slots 1-9 use `<rom>.state1`..`<rom>.state9`.
+fn slot_state_path(rom_path: Option<&Path>, slot: u8) -> Option<PathBuf> {
+    rom_path.map(|p| {
+        let ext = if slot == 0 {
+            "state".to_string()
+        } else {
+            format!("state{slot}")
+        };
+        p.with_extension(ext)
+    })
 }
 
 // Safety bound only: a real NTSC frame is 29781 CPU cycles (even) or 29780
@@ -159,6 +179,7 @@ impl App {
             replay: None,
             current_rom_bytes: None,
             current_rom_path: None,
+            active_slot: 0,
         }
     }
 
@@ -168,6 +189,7 @@ impl App {
         self.current_rom_bytes = Some(data);
         self.current_rom_path = Some(path.to_path_buf());
         self.replay = None;
+        self.refresh_title();
         Ok(())
     }
 
@@ -219,13 +241,38 @@ impl App {
         matches!(self.state, AppState::Running { .. })
     }
 
-    /// Default quick-save-state path for the currently-loaded ROM
-    /// (`<rom>.state`, next to the ROM). Used by the F5/F9 hotkeys and as the
-    /// suggested filename in the "Save State..." dialog.
+    /// The active save-state slot (0..NUM_SLOTS).
+    pub fn active_slot(&self) -> u8 {
+        self.active_slot
+    }
+
+    /// Select the active save-state slot (used by the number keys). Out-of-range
+    /// values are ignored. Updates the window title to reflect the new slot.
+    pub fn select_slot(&mut self, slot: u8) {
+        if slot >= NUM_SLOTS {
+            return;
+        }
+        self.active_slot = slot;
+        self.refresh_title();
+    }
+
+    /// Save-state path for the active slot's file next to the loaded ROM. Used
+    /// by the F5/F9 hotkeys and as the suggested filename in the "Save
+    /// State..." dialog.
     pub fn default_state_path(&self) -> Option<PathBuf> {
-        self.current_rom_path
-            .as_ref()
-            .map(|p| p.with_extension("state"))
+        slot_state_path(self.current_rom_path.as_deref(), self.active_slot)
+    }
+
+    /// Set the window title to reflect the loaded ROM and active slot.
+    fn refresh_title(&self) {
+        let title = match self.current_rom_path.as_ref() {
+            Some(p) => {
+                let name = p.file_stem().and_then(|s| s.to_str()).unwrap_or("nes-emu");
+                format!("nes-emu — {name} · slot {}", self.active_slot)
+            }
+            None => "nes-emu".to_string(),
+        };
+        self.renderer.set_title(&title);
     }
 
     /// Write a save state for the running machine to `path`. A no-op (returns
@@ -290,6 +337,25 @@ mod tests {
         let result = load_rom_into(&mut state, &test_rom_bytes());
         assert!(result.is_ok());
         assert!(matches!(state, AppState::Running { .. }));
+    }
+
+    #[test]
+    fn slot_state_path_uses_bare_state_for_slot_zero_and_numbered_for_rest() {
+        let rom = PathBuf::from("/games/mario.nes");
+        // Slot 0 keeps the original single-slot name for backward compatibility.
+        assert_eq!(
+            slot_state_path(Some(&rom), 0),
+            Some(PathBuf::from("/games/mario.state"))
+        );
+        for slot in 1..NUM_SLOTS {
+            assert_eq!(
+                slot_state_path(Some(&rom), slot),
+                Some(PathBuf::from(format!("/games/mario.state{slot}"))),
+                "slot {slot}"
+            );
+        }
+        // No ROM loaded -> no path.
+        assert_eq!(slot_state_path(None, 0), None);
     }
 
     // On-demand throughput benchmark (no assertion — debug legitimately exceeds

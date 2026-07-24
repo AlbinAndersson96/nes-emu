@@ -80,6 +80,24 @@ fn load_replay_via_dialog(app: &mut App) {
     }
 }
 
+/// Maps a number-row or numpad digit key to a save-state slot index (0-9), or
+/// `None` for any other key.
+fn digit_slot(code: KeyCode) -> Option<u8> {
+    match code {
+        KeyCode::Digit0 | KeyCode::Numpad0 => Some(0),
+        KeyCode::Digit1 | KeyCode::Numpad1 => Some(1),
+        KeyCode::Digit2 | KeyCode::Numpad2 => Some(2),
+        KeyCode::Digit3 | KeyCode::Numpad3 => Some(3),
+        KeyCode::Digit4 | KeyCode::Numpad4 => Some(4),
+        KeyCode::Digit5 | KeyCode::Numpad5 => Some(5),
+        KeyCode::Digit6 | KeyCode::Numpad6 => Some(6),
+        KeyCode::Digit7 | KeyCode::Numpad7 => Some(7),
+        KeyCode::Digit8 | KeyCode::Numpad8 => Some(8),
+        KeyCode::Digit9 | KeyCode::Numpad9 => Some(9),
+        _ => None,
+    }
+}
+
 fn save_state_via_dialog(app: &mut App) {
     let mut dialog = rfd::FileDialog::new().add_filter("Save state", &["state"]);
     // Pre-fill the dialog with the default `<rom>.state` location/name.
@@ -213,16 +231,23 @@ impl ApplicationHandler for WinitApp {
                     app.toggle_fps_overlay();
                 }
 
-                // Save states: F5 quick-saves, F9 quick-loads (to/from
-                // `<rom>.state` next to the ROM).
+                // Save states: number keys 0-9 select the active slot; F5
+                // quick-saves and F9 quick-loads that slot's file next to the
+                // ROM (slot 0 = `<rom>.state`, slot N = `<rom>.stateN`).
                 if event.state == ElementState::Pressed {
+                    if let Some(slot) = digit_slot(code) {
+                        app.select_slot(slot);
+                        eprintln!("save-state slot {slot} selected");
+                    }
                     match code {
                         KeyCode::F5 => match app.save_state() {
-                            Ok(()) => eprintln!("save state written"),
+                            Ok(()) => eprintln!("save state written to slot {}", app.active_slot()),
                             Err(e) => eprintln!("save state failed: {e}"),
                         },
                         KeyCode::F9 => match app.load_state() {
-                            Ok(()) => eprintln!("save state loaded"),
+                            Ok(()) => {
+                                eprintln!("save state loaded from slot {}", app.active_slot())
+                            }
                             Err(e) => eprintln!("load state failed: {e}"),
                         },
                         _ => {}

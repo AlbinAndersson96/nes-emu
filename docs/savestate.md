@@ -9,15 +9,17 @@ ROM's own battery-backed saves.
 
 Two ways in:
 
-- **Hotkeys** — **F5** quick-saves to `<rom>.state` (next to the loaded ROM),
-  **F9** quick-loads it. One slot per ROM. Both keys are fixed (not part of
-  `keybindings.toml`).
+- **Hotkeys** — number keys **0-9** select the active slot; **F5** quick-saves
+  and **F9** quick-loads that slot's file next to the loaded ROM. The active
+  slot shows in the window title (`nes-emu — <rom> · slot N`). Ten slots per
+  ROM. All keys are fixed (not part of `keybindings.toml`).
 - **File menu** — **Save State...** and **Load State...** open a file dialog so
-  you can save to / load from any path (the dialog is pre-filled with the
-  default `<rom>.state` location and name). The two items are disabled until a
-  ROM is loaded.
+  you can save to / load from any path (the dialog is pre-filled with the active
+  slot's location and name). The two items are disabled until a ROM is loaded.
 
-With no ROM loaded, or no save file present, the action is a no-op and the
+Slot files are named `<rom>.state` for slot 0 (the original single-slot name,
+kept for backward compatibility) and `<rom>.state1`..`<rom>.state9` for slots
+1-9. With no ROM loaded, or no save file present, the action is a no-op and the
 reason is printed to stderr.
 
 ## What is and isn't saved
@@ -61,13 +63,17 @@ Not saved:
   `CartridgeState`. On `load()`, the live cartridge is moved onto the rebuilt
   bus and its mutable state overwritten.
 - **`src/app.rs`** — `App::save_state_to` / `load_state_from` (path-taking
-  core), the `save_state` / `load_state` wrappers (default `<rom>.state` slot),
-  `default_state_path`, and `is_rom_loaded`.
+  core), the `save_state` / `load_state` wrappers (active slot), the
+  `active_slot` field + `select_slot` / `active_slot` accessors, the pure
+  `slot_state_path` helper (slot → `<rom>.stateN`), `default_state_path` (active
+  slot's path), `is_rom_loaded`, and `refresh_title` (window-title slot
+  indicator).
 - **`src/menu.rs`** — the `Save State...` / `Load State...` File-menu items
   (gated on `rom_loaded`).
-- **`src/main.rs`** — F5/F9 dispatch in the keyboard handler, and the
-  `save_state_via_dialog` / `load_state_via_dialog` file-dialog helpers wired to
-  the menu actions.
+- **`src/main.rs`** — the keyboard handler: `digit_slot` maps number keys to a
+  slot and F5/F9 save/load the active slot; plus the `save_state_via_dialog` /
+  `load_state_via_dialog` file-dialog helpers wired to the menu actions.
+- **`src/renderer.rs`** — `Renderer::set_title` (updates the window title bar).
 
 The blob starts with a magic tag (`"NESS"`) and a version word; a mismatched
 tag or version is rejected, leaving the running machine untouched.
@@ -87,5 +93,8 @@ synthetic NROM image:
 - **`cartridge_state_restores_prg_ram_and_mapper_banking`** — the mapper's bank
   register and PRG-RAM survive a capture/restore (UxROM).
 - **`load_rejects_garbage`** — a non-save-state blob is rejected without panic.
+
+`src/app.rs`'s test module additionally covers the slot→path mapping
+(`slot_state_path_uses_bare_state_for_slot_zero_and_numbered_for_rest`).
 
 [`bincode`]: https://docs.rs/bincode
