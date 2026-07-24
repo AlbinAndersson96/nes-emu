@@ -268,6 +268,18 @@ impl App {
         }
     }
 
+    /// Snapshot of the live state shown in the renderer's info bar (FPS,
+    /// emulation speed, active save-state slot, paused marker).
+    pub fn status_info(&self) -> crate::renderer::StatusInfo {
+        crate::renderer::StatusInfo {
+            rom_loaded: self.is_rom_loaded(),
+            fps: self.fps,
+            speed_label: self.speed_label(),
+            slot: self.active_slot,
+            paused: self.paused,
+        }
+    }
+
     pub fn set_controller_buttons(&mut self, port: usize, buttons: u8) {
         set_controller_buttons_on(&mut self.state, port, buttons);
     }

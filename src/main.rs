@@ -302,7 +302,8 @@ impl ApplicationHandler for WinitApp {
 
             WindowEvent::RedrawRequested => {
                 let rom_loaded = app.is_rom_loaded();
-                match app.renderer.redraw(|ui| menu::draw(ui, rom_loaded)) {
+                let status = app.status_info();
+                match app.renderer.redraw(status, |ui| menu::draw(ui, rom_loaded)) {
                     menu::MenuAction::LoadRom => load_rom_via_dialog(app),
                     menu::MenuAction::SaveState => save_state_via_dialog(app),
                     menu::MenuAction::LoadState => load_state_via_dialog(app),

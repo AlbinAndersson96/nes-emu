@@ -100,7 +100,7 @@ src/
   replay.rs          — input recording / playback
   system.rs          — SystemClock: shared per-cycle stepping + interrupt-delivery rules
   bus.rs             — system bus: RAM, PPU, APU, controllers, cartridge; OAM/DMC DMA
-  renderer.rs        — winit window + egui/egui-wgpu renderer; NES palette → RGBA
+  renderer.rs        — winit window + egui/egui-wgpu renderer; NES palette → RGBA; info bar (FPS/speed/slot)
   cartridge.rs       — iNES parser; mappers 0-4, 7, 9-11, 34, 66, 69, 71, 87, 206
   cpu/
     mod.rs           — Cpu struct, micro-op queue, tick(), Bus trait
