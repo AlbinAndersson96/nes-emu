@@ -1,8 +1,10 @@
+use serde::{Deserialize, Serialize};
 /// Envelope generator — shared by Pulse 1, Pulse 2, and Noise.
 ///
 /// Clocked once per quarter-frame (240 Hz). Produces a volume level that either
 /// stays constant (constant_volume flag) or decays from 15 down to 0 and wraps
 /// when the loop flag is set.
+#[derive(Serialize, Deserialize)]
 pub struct Envelope {
     start_flag: bool,
     pub loop_flag: bool,

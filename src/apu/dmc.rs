@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 /// Output timer periods for the DMC (NTSC), in CPU cycles, indexed by $4010 bits 3–0.
 const NTSC_RATE: [u16; 16] = [
     428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106, 84, 72, 54,
@@ -9,6 +10,7 @@ const NTSC_RATE: [u16; 16] = [
 /// stall the CPU for 4 cycles and must be driven by the bus — the DMC signals its
 /// need via `needs_dma()` / `dma_address()` and accepts the fetched byte via
 /// `supply_dma_byte()`.
+#[derive(Serialize, Deserialize)]
 pub struct DmcChannel {
     pub irq_flag: bool,
     irq_enabled: bool,

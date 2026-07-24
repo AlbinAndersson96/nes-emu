@@ -1,4 +1,11 @@
 use crate::cartridge::{Cartridge, Mirroring};
+use serde::{Deserialize, Serialize};
+
+/// Default framebuffer for a freshly-deserialized PPU (the framebuffer is not
+/// saved; it is regenerated on the next rendered frame).
+fn default_frame() -> Box<[u8; 256 * 240]> {
+    Box::new([0u8; 256 * 240])
+}
 
 /// NES PPU — register state, VRAM, OAM, palette, VBlank/NMI, and scanline timing.
 ///
@@ -47,6 +54,7 @@ const MASK_WRITE_DELAY_DOTS: u8 = 3;
 /// NTSC PPU clock (5,369,318 Hz) is ~3.22 M dots.
 const OPEN_BUS_DECAY_DOTS: u64 = 3_221_591;
 
+#[derive(Serialize, Deserialize)]
 pub struct Ppu {
     // Programmer-visible write-only registers
     ctrl: u8,     // $2000 PPUCTRL
@@ -63,9 +71,11 @@ pub struct Ppu {
     read_buf: u8,
 
     // Internal memory
-    oam: Box<[u8; 256]>,   // Object Attribute Memory
+    #[serde(with = "crate::savestate::boxed_byte_arr")]
+    oam: Box<[u8; 256]>, // Object Attribute Memory
+    #[serde(with = "crate::savestate::boxed_byte_arr")]
     vram: Box<[u8; 2048]>, // 2 KB nametable RAM
-    palette: [u8; 32],     // Palette RAM
+    palette: [u8; 32], // Palette RAM
 
     // Status flags (make up $2002 PPUSTATUS)
     vblank: bool,
@@ -200,13 +210,13 @@ pub struct Ppu {
     // every 2 dots, so the overflow flag sets at the hardware-exact dot
     // (blargg sprite_overflow_tests/3.Timing) and the buggy diagonal
     // overflow scan (4.Obscure) falls out of eval_n/eval_m.
-    eval_n: usize,           // objects decided so far (0-64); addressing index once in the overflow scan
-    eval_m: usize,           // byte-within-sprite offset used by the overflow scan
-    eval_addr: u8,           // hardware OAMADDR-during-evaluation byte pointer, seeded from oam_addr at dot 65
-    eval_copy_left: u8,      // bytes 1-3 still to copy for an in-range sprite
+    eval_n: usize, // objects decided so far (0-64); addressing index once in the overflow scan
+    eval_m: usize, // byte-within-sprite offset used by the overflow scan
+    eval_addr: u8, // hardware OAMADDR-during-evaluation byte pointer, seeded from oam_addr at dot 65
+    eval_copy_left: u8, // bytes 1-3 still to copy for an in-range sprite
     eval_overflow_reads: u8, // the 3 dummy reads after the overflow flag sets
     eval_overflow_started: bool, // the buggy overflow scan has done its first read
-    eval_done: bool,         // n wrapped past 63 — evaluation idles until next line
+    eval_done: bool, // n wrapped past 63 — evaluation idles until next line
     // The value on the PPU's internal OAM data bus, latched by whatever OAM /
     // secondary-OAM access the rendering machinery performs each dot. A $2004
     // read while rendering returns THIS, not oam[oam_addr] — the sprite
@@ -220,6 +230,8 @@ pub struct Ppu {
 
     // ── Framebuffer ──────────────────────────────────────────────────────────
     // 256 × 240 pixels, each an index into the NES master palette (0x00–0x3F).
+    // Not saved (regenerated on the next rendered frame after a state restore).
+    #[serde(skip, default = "default_frame")]
     pub frame: Box<[u8; 256 * 240]>,
     pub frame_ready: bool, // set when scanline 239 dot 256 is done; cleared by caller
 }
@@ -780,11 +792,7 @@ impl Ppu {
     /// (AccuracyCoin "$2004 Stress" key: e.g. attr $7D reads as $61).
     fn oam_read_bus(&self, addr: u8) -> u8 {
         let v = self.oam[addr as usize];
-        if addr & 3 == 2 {
-            v & 0xE3
-        } else {
-            v
-        }
+        if addr & 3 == 2 { v & 0xE3 } else { v }
     }
 
     /// Read a secondary-OAM byte for the OAM data bus. No masking here:

@@ -313,6 +313,11 @@ impl Renderer {
     pub fn window_id(&self) -> WindowId {
         self.window.id()
     }
+
+    /// Update the window's title bar (used to surface the active save-state slot).
+    pub fn set_title(&self, title: &str) {
+        self.window.set_title(title);
+    }
 }
 
 #[cfg(test)]

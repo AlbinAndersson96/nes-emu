@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 mod dmc;
 mod envelope;
 mod length;
@@ -48,6 +49,7 @@ const MODE1: [(u32, bool, bool, bool, bool); 6] = [
 /// never cycle_count, so DMA/get-put parity is unaffected).
 const POWER_FRAME_DELAY: u8 = 4;
 
+#[derive(Serialize, Deserialize)]
 pub struct Apu {
     pub pulse1: PulseChannel,
     pub pulse2: PulseChannel,

@@ -1,6 +1,8 @@
+use serde::{Deserialize, Serialize};
+
 /// Nametable mirroring mode (determines how the PPU maps the two 1 KB VRAM banks
 /// to the four logical nametable addresses $2000/$2400/$2800/$2C00).
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub enum Mirroring {
     Horizontal, // NT0=A NT1=A NT2=B NT3=B
     Vertical,   // NT0=A NT1=B NT2=A NT3=B
@@ -177,6 +179,29 @@ impl Cartridge {
         }
         self.mapper.mirroring().unwrap_or(self.header_mirroring)
     }
+
+    /// Snapshot the mutable, ROM-independent state for a save state (PRG-RAM,
+    /// CHR-RAM, and the mapper's registers). The ROM is intentionally excluded.
+    pub(crate) fn capture_state(&self) -> crate::savestate::CartridgeState {
+        crate::savestate::CartridgeState {
+            prg_ram: self.prg_ram.to_vec(),
+            chr_ram: self.chr_ram.to_vec(),
+            mapper: self.mapper.state_save(),
+        }
+    }
+
+    /// Restore state captured by [`Cartridge::capture_state`] onto this
+    /// cartridge (which keeps its own ROM and mapper object). Size-mismatched
+    /// RAM blobs are ignored defensively.
+    pub(crate) fn restore_state(&mut self, s: &crate::savestate::CartridgeState) {
+        if s.prg_ram.len() == self.prg_ram.len() {
+            self.prg_ram.copy_from_slice(&s.prg_ram);
+        }
+        if s.chr_ram.len() == self.chr_ram.len() {
+            self.chr_ram.copy_from_slice(&s.chr_ram[..]);
+        }
+        self.mapper.state_load(&s.mapper);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -214,15 +239,41 @@ trait Mapper {
     fn irq_pending(&self) -> bool {
         false
     }
+    /// Serialize this mapper's mutable register state (for save states). The
+    /// ROM is not the mapper's concern — it lives in the `Cartridge`. Trait
+    /// objects can't be serde-serialized directly (the trait must stay
+    /// object-safe), so each mapper round-trips its own concrete type through
+    /// `bincode`; see the `mapper_state_serde!` macro.
+    fn state_save(&self) -> Vec<u8>;
+    /// Restore state produced by [`Mapper::state_save`]. A malformed blob is
+    /// ignored (the mapper keeps its current state).
+    fn state_load(&mut self, data: &[u8]);
+}
+
+/// Stamps out the boilerplate `state_save`/`state_load` for a mapper whose
+/// struct derives `Serialize`/`Deserialize`.
+macro_rules! mapper_state_serde {
+    ($t:ty) => {
+        fn state_save(&self) -> Vec<u8> {
+            bincode::serialize(self).unwrap_or_default()
+        }
+        fn state_load(&mut self, data: &[u8]) {
+            if let Ok(v) = bincode::deserialize::<$t>(data) {
+                *self = v;
+            }
+        }
+    };
 }
 
 // ---------------------------------------------------------------------------
 // Mapper 0 — NROM
 // ---------------------------------------------------------------------------
 
+#[derive(Serialize, Deserialize)]
 struct Nrom;
 
 impl Mapper for Nrom {
+    mapper_state_serde!(Nrom);
     fn prg_offset(&self, rom_len: usize, addr: u16) -> usize {
         (addr - 0x8000) as usize % rom_len
     }
@@ -245,6 +296,7 @@ impl Mapper for Nrom {
 //     3 — switch 16 KB at $8000, fix last 16 KB at $C000  ← reset default
 // ---------------------------------------------------------------------------
 
+#[derive(Serialize, Deserialize)]
 struct Mmc1 {
     shift: u8,       // bits accumulated LSB-first
     shift_count: u8, // bits written so far (0–4); write completes at 5
@@ -306,6 +358,7 @@ impl Mmc1 {
 }
 
 impl Mapper for Mmc1 {
+    mapper_state_serde!(Mmc1);
     fn prg_offset(&self, _rom_len: usize, addr: u16) -> usize {
         self.bank_offset(addr)
     }
@@ -354,6 +407,7 @@ impl Mapper for Mmc1 {
 // 8 KB CHR-RAM). Bus conflicts are not modeled, as for CNROM below.
 // ---------------------------------------------------------------------------
 
+#[derive(Serialize, Deserialize)]
 struct Uxrom {
     prg_bank: usize,
 }
@@ -365,6 +419,7 @@ impl Uxrom {
 }
 
 impl Mapper for Uxrom {
+    mapper_state_serde!(Uxrom);
     fn prg_offset(&self, rom_len: usize, addr: u16) -> usize {
         let bank_count = rom_len / 0x4000;
         if addr < 0xC000 {
@@ -390,6 +445,7 @@ impl Mapper for Uxrom {
 // equals the value, making the AND a no-op.
 // ---------------------------------------------------------------------------
 
+#[derive(Serialize, Deserialize)]
 struct Cnrom {
     chr_bank: usize,
 }
@@ -401,6 +457,7 @@ impl Cnrom {
 }
 
 impl Mapper for Cnrom {
+    mapper_state_serde!(Cnrom);
     fn prg_offset(&self, rom_len: usize, addr: u16) -> usize {
         (addr - 0x8000) as usize % rom_len
     }
@@ -457,6 +514,7 @@ impl Mapper for Cnrom {
 
 const A12_FILTER_DOTS: u64 = 16;
 
+#[derive(Serialize, Deserialize)]
 struct Mmc3 {
     bank_select: u8,
     bank_regs: [u8; 8],
@@ -502,6 +560,7 @@ impl Mmc3 {
 }
 
 impl Mapper for Mmc3 {
+    mapper_state_serde!(Mmc3);
     fn prg_offset(&self, _rom_len: usize, addr: u16) -> usize {
         let last = self.prg_bank_count_8k - 1;
         let swap = self.bank_select & 0x40 != 0;
@@ -595,6 +654,7 @@ impl Mapper for Mmc3 {
 // Bus conflicts are not modeled (and most AxROM boards have none anyway).
 // ---------------------------------------------------------------------------
 
+#[derive(Serialize, Deserialize)]
 struct Axrom {
     prg_bank: usize,
     /// Bit 4 of the last write: which 1 KB VRAM page all four nametables map to.
@@ -611,6 +671,7 @@ impl Axrom {
 }
 
 impl Mapper for Axrom {
+    mapper_state_serde!(Axrom);
     fn prg_offset(&self, rom_len: usize, addr: u16) -> usize {
         let bank_count = (rom_len / 0x8000).max(1);
         (self.prg_bank % bank_count) * 0x8000 + (addr - 0x8000) as usize
@@ -638,6 +699,7 @@ impl Mapper for Axrom {
 // real boards but, as with CNROM/UxROM, are not modeled.
 // ---------------------------------------------------------------------------
 
+#[derive(Serialize, Deserialize)]
 struct ColorDreams {
     prg_bank: usize,
     chr_bank: usize,
@@ -653,6 +715,7 @@ impl ColorDreams {
 }
 
 impl Mapper for ColorDreams {
+    mapper_state_serde!(ColorDreams);
     fn prg_offset(&self, rom_len: usize, addr: u16) -> usize {
         let banks = (rom_len / 0x8000).max(1);
         (self.prg_bank % banks) * 0x8000 + (addr - 0x8000) as usize
@@ -675,6 +738,7 @@ impl Mapper for ColorDreams {
 // 8 KB CHR-ROM bank. Mirroring is hardwired (header).
 // ---------------------------------------------------------------------------
 
+#[derive(Serialize, Deserialize)]
 struct Gxrom {
     prg_bank: usize,
     chr_bank: usize,
@@ -690,6 +754,7 @@ impl Gxrom {
 }
 
 impl Mapper for Gxrom {
+    mapper_state_serde!(Gxrom);
     fn prg_offset(&self, rom_len: usize, addr: u16) -> usize {
         let banks = (rom_len / 0x8000).max(1);
         (self.prg_bank % banks) * 0x8000 + (addr - 0x8000) as usize
@@ -715,6 +780,7 @@ impl Mapper for Gxrom {
 // unbanked 8 KB CHR-RAM. Bus conflicts are not modeled.
 // ---------------------------------------------------------------------------
 
+#[derive(Serialize, Deserialize)]
 struct Camerica {
     prg_bank: usize,
     mirror_override: Option<Mirroring>,
@@ -730,6 +796,7 @@ impl Camerica {
 }
 
 impl Mapper for Camerica {
+    mapper_state_serde!(Camerica);
     fn prg_offset(&self, rom_len: usize, addr: u16) -> usize {
         let banks = (rom_len / 0x4000).max(1);
         if addr < 0xC000 {
@@ -767,6 +834,7 @@ impl Mapper for Camerica {
 // (D0 → CHR A14, D1 → CHR A13). Mirroring is hardwired (header).
 // ---------------------------------------------------------------------------
 
+#[derive(Serialize, Deserialize)]
 struct Mapper87 {
     chr_bank: usize,
 }
@@ -778,6 +846,7 @@ impl Mapper87 {
 }
 
 impl Mapper for Mapper87 {
+    mapper_state_serde!(Mapper87);
     fn prg_offset(&self, rom_len: usize, addr: u16) -> usize {
         (addr - 0x8000) as usize % rom_len
     }
@@ -804,6 +873,7 @@ impl Mapper for Mapper87 {
 // Mirroring is hardwired (header) on both.
 // ---------------------------------------------------------------------------
 
+#[derive(Serialize, Deserialize)]
 struct Mapper34 {
     is_nina: bool,
     prg_bank: usize,
@@ -823,6 +893,7 @@ impl Mapper34 {
 }
 
 impl Mapper for Mapper34 {
+    mapper_state_serde!(Mapper34);
     fn prg_offset(&self, rom_len: usize, addr: u16) -> usize {
         let banks = (rom_len / 0x8000).max(1);
         (self.prg_bank % banks) * 0x8000 + (addr - 0x8000) as usize
@@ -870,6 +941,7 @@ impl Mapper for Mapper34 {
 // two 8 KB banks.
 // ---------------------------------------------------------------------------
 
+#[derive(Serialize, Deserialize)]
 struct Namco118 {
     bank_select: u8,
     bank_regs: [u8; 8],
@@ -885,6 +957,7 @@ impl Namco118 {
 }
 
 impl Mapper for Namco118 {
+    mapper_state_serde!(Namco118);
     fn prg_offset(&self, rom_len: usize, addr: u16) -> usize {
         let banks = (rom_len / 0x2000).max(1);
         let last = banks - 1;
@@ -939,6 +1012,7 @@ impl Mapper for Namco118 {
 // ---------------------------------------------------------------------------
 
 /// The shared CHR bank latch + register state of MMC2/MMC4.
+#[derive(Serialize, Deserialize)]
 struct PxLatch {
     prg_bank: usize,
     chr_lo_fd: usize,
@@ -1033,6 +1107,7 @@ impl PxLatch {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 struct Mmc2 {
     latch: PxLatch,
 }
@@ -1046,6 +1121,7 @@ impl Mmc2 {
 }
 
 impl Mapper for Mmc2 {
+    mapper_state_serde!(Mmc2);
     fn prg_offset(&self, rom_len: usize, addr: u16) -> usize {
         let banks = (rom_len / 0x2000).max(1);
         let last = banks - 1;
@@ -1080,6 +1156,7 @@ impl Mapper for Mmc2 {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 struct Mmc4 {
     latch: PxLatch,
 }
@@ -1093,6 +1170,7 @@ impl Mmc4 {
 }
 
 impl Mapper for Mmc4 {
+    mapper_state_serde!(Mmc4);
     fn prg_offset(&self, rom_len: usize, addr: u16) -> usize {
         let banks = (rom_len / 0x4000).max(1);
         // 16 KB switchable at $8000; the last 16 KB fixed at $C000.
@@ -1143,6 +1221,7 @@ impl Mapper for Mmc4 {
 // not modeled — the emulator has no audio-output path to mix it into yet.
 // ---------------------------------------------------------------------------
 
+#[derive(Serialize, Deserialize)]
 struct Fme7 {
     command: u8,
     chr_regs: [u8; 8],
@@ -1170,6 +1249,7 @@ impl Fme7 {
 }
 
 impl Mapper for Fme7 {
+    mapper_state_serde!(Fme7);
     fn prg_offset(&self, rom_len: usize, addr: u16) -> usize {
         let banks = (rom_len / 0x2000).max(1);
         let last = banks - 1;

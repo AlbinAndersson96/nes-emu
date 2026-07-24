@@ -8,6 +8,7 @@ mod menu;
 mod ppu;
 mod renderer;
 mod replay;
+mod savestate;
 mod system;
 #[cfg(test)]
 mod tests;
@@ -59,6 +60,31 @@ fn maybe_configure_wsl2_gpu() {
     }
 }
 
+/// Resolve which `keybindings.toml` to load, in priority order:
+///
+/// 1. `$NES_EMU_KEYBINDINGS`, if set — an explicit path override.
+/// 2. Debug builds: the source file `assets/keybindings.toml` in the crate,
+///    read directly so edits take effect on the next `cargo run` (the copy
+///    `build.rs` seeds into `target/<profile>/` is for release/installed use,
+///    and is never overwritten once it exists).
+/// 3. Release builds: `keybindings.toml` next to the executable (the seeded,
+///    user-customizable copy).
+///
+/// A missing file at the resolved path is not fatal — `KeyMap::load` warns and
+/// falls back to the built-in defaults.
+fn keybindings_path() -> PathBuf {
+    if let Some(path) = env::var_os("NES_EMU_KEYBINDINGS") {
+        return PathBuf::from(path);
+    }
+    if cfg!(debug_assertions) {
+        return PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/keybindings.toml");
+    }
+    env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("keybindings.toml")))
+        .unwrap_or_else(|| PathBuf::from("keybindings.toml"))
+}
+
 fn load_rom_via_dialog(app: &mut App) {
     if let Some(path) = rfd::FileDialog::new()
         .add_filter("NES ROM", &["nes"])
@@ -76,6 +102,38 @@ fn load_replay_via_dialog(app: &mut App) {
         && let Err(e) = app.load_replay(&path)
     {
         eprintln!("error: cannot load replay: {}", e);
+    }
+}
+
+fn save_state_via_dialog(app: &mut App) {
+    let mut dialog = rfd::FileDialog::new().add_filter("Save state", &["state"]);
+    // Pre-fill the dialog with the default `<rom>.state` location/name.
+    if let Some(default) = app.default_state_path() {
+        if let Some(dir) = default.parent() {
+            dialog = dialog.set_directory(dir);
+        }
+        if let Some(name) = default.file_name().and_then(|n| n.to_str()) {
+            dialog = dialog.set_file_name(name);
+        }
+    }
+    if let Some(path) = dialog.save_file()
+        && let Err(e) = app.save_state_to(&path)
+    {
+        eprintln!("error: cannot save state: {}", e);
+    }
+}
+
+fn load_state_via_dialog(app: &mut App) {
+    let mut dialog = rfd::FileDialog::new().add_filter("Save state", &["state"]);
+    if let Some(default) = app.default_state_path()
+        && let Some(dir) = default.parent()
+    {
+        dialog = dialog.set_directory(dir);
+    }
+    if let Some(path) = dialog.pick_file()
+        && let Err(e) = app.load_state_from(&path)
+    {
+        eprintln!("error: cannot load state: {}", e);
     }
 }
 
@@ -180,6 +238,32 @@ impl ApplicationHandler for WinitApp {
                     app.toggle_fps_overlay();
                 }
 
+                // Save states: the configured slot keys (default 0-9) select
+                // the active slot; the save/load keys (default F5/F9) quick-save
+                // and quick-load that slot's file next to the ROM (slot 0 =
+                // `<rom>.state`, slot N = `<rom>.stateN`). All are configurable
+                // via keybindings.toml's `[app]` section.
+                if event.state == ElementState::Pressed {
+                    if let Some(slot) = self.key_map.slot_for_key(code) {
+                        app.select_slot(slot);
+                        eprintln!("save-state slot {slot} selected");
+                    }
+                    if self.key_map.is_save_state(code) {
+                        match app.save_state() {
+                            Ok(()) => eprintln!("save state written to slot {}", app.active_slot()),
+                            Err(e) => eprintln!("save state failed: {e}"),
+                        }
+                    }
+                    if self.key_map.is_load_state(code) {
+                        match app.load_state() {
+                            Ok(()) => {
+                                eprintln!("save state loaded from slot {}", app.active_slot())
+                            }
+                            Err(e) => eprintln!("load state failed: {e}"),
+                        }
+                    }
+                }
+
                 if let Some((port, bit)) = self.key_map.on_key(code) {
                     match event.state {
                         ElementState::Pressed => self.button_state[port] |= bit,
@@ -189,11 +273,16 @@ impl ApplicationHandler for WinitApp {
                 }
             }
 
-            WindowEvent::RedrawRequested => match app.renderer.redraw(menu::draw) {
-                menu::MenuAction::LoadRom => load_rom_via_dialog(app),
-                menu::MenuAction::PlayReplay => load_replay_via_dialog(app),
-                menu::MenuAction::None => {}
-            },
+            WindowEvent::RedrawRequested => {
+                let rom_loaded = app.is_rom_loaded();
+                match app.renderer.redraw(|ui| menu::draw(ui, rom_loaded)) {
+                    menu::MenuAction::LoadRom => load_rom_via_dialog(app),
+                    menu::MenuAction::SaveState => save_state_via_dialog(app),
+                    menu::MenuAction::LoadState => load_state_via_dialog(app),
+                    menu::MenuAction::PlayReplay => load_replay_via_dialog(app),
+                    menu::MenuAction::None => {}
+                }
+            }
 
             _ => {}
         }
@@ -220,10 +309,7 @@ fn main() {
         process::exit(1);
     }
 
-    let key_map = env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("keybindings.toml")))
-        .map_or_else(KeyMap::default, |path| KeyMap::load(&path));
+    let key_map = KeyMap::load(&keybindings_path());
 
     let mut winit_app = WinitApp {
         app: None,

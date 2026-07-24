@@ -5,7 +5,7 @@ use crate::renderer::Renderer;
 use crate::replay::{Fm2Movie, Fm2Player};
 use crate::system::SystemClock;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub enum AppState {
@@ -26,6 +26,28 @@ pub struct App {
     fps_overlay_enabled: bool,
     replay: Option<Fm2Player>,
     current_rom_bytes: Option<Vec<u8>>,
+    current_rom_path: Option<PathBuf>,
+    /// Active save-state slot (0..NUM_SLOTS), selected with the number keys and
+    /// used by the F5/F9 quick-save/load hotkeys.
+    active_slot: u8,
+}
+
+/// Number of numbered save-state slots (selectable with the configured slot
+/// keys, by default the number-row keys 0-9).
+pub const NUM_SLOTS: usize = 10;
+
+/// File path for save-state `slot` given the loaded ROM path. Slot 0 uses
+/// `<rom>.state` (the original single-slot name, kept for backward
+/// compatibility); slots 1-9 use `<rom>.state1`..`<rom>.state9`.
+fn slot_state_path(rom_path: Option<&Path>, slot: u8) -> Option<PathBuf> {
+    rom_path.map(|p| {
+        let ext = if slot == 0 {
+            "state".to_string()
+        } else {
+            format!("state{slot}")
+        };
+        p.with_extension(ext)
+    })
 }
 
 // Safety bound only: a real NTSC frame is 29781 CPU cycles (even) or 29780
@@ -157,6 +179,8 @@ impl App {
             fps_overlay_enabled: false,
             replay: None,
             current_rom_bytes: None,
+            current_rom_path: None,
+            active_slot: 0,
         }
     }
 
@@ -164,7 +188,9 @@ impl App {
         let data = fs::read(path).map_err(|e| format!("cannot read '{}': {e}", path.display()))?;
         load_rom_into(&mut self.state, &data)?;
         self.current_rom_bytes = Some(data);
+        self.current_rom_path = Some(path.to_path_buf());
         self.replay = None;
+        self.refresh_title();
         Ok(())
     }
 
@@ -209,6 +235,89 @@ impl App {
     pub fn toggle_fps_overlay(&mut self) {
         toggle_flag(&mut self.fps_overlay_enabled);
     }
+
+    /// Whether a ROM is currently loaded and running (gates the save/load
+    /// menu items and hotkeys).
+    pub fn is_rom_loaded(&self) -> bool {
+        matches!(self.state, AppState::Running { .. })
+    }
+
+    /// The active save-state slot (0..NUM_SLOTS).
+    pub fn active_slot(&self) -> u8 {
+        self.active_slot
+    }
+
+    /// Select the active save-state slot (used by the number keys). Out-of-range
+    /// values are ignored. Updates the window title to reflect the new slot.
+    pub fn select_slot(&mut self, slot: u8) {
+        if slot as usize >= NUM_SLOTS {
+            return;
+        }
+        self.active_slot = slot;
+        self.refresh_title();
+    }
+
+    /// Save-state path for the active slot's file next to the loaded ROM. Used
+    /// by the F5/F9 hotkeys and as the suggested filename in the "Save
+    /// State..." dialog.
+    pub fn default_state_path(&self) -> Option<PathBuf> {
+        slot_state_path(self.current_rom_path.as_deref(), self.active_slot)
+    }
+
+    /// Set the window title to reflect the loaded ROM and active slot.
+    fn refresh_title(&self) {
+        let title = match self.current_rom_path.as_ref() {
+            Some(p) => {
+                let name = p.file_stem().and_then(|s| s.to_str()).unwrap_or("nes-emu");
+                format!("nes-emu — {name} · slot {}", self.active_slot)
+            }
+            None => "nes-emu".to_string(),
+        };
+        self.renderer.set_title(&title);
+    }
+
+    /// Write a save state for the running machine to `path`. A no-op (returns
+    /// an error) when no ROM is loaded. Errors are surfaced to the caller for
+    /// logging rather than interrupting emulation.
+    pub fn save_state_to(&mut self, path: &Path) -> Result<(), String> {
+        let AppState::Running { cpu, bus, clock } = &self.state else {
+            return Err("no ROM loaded".to_string());
+        };
+        let bytes = crate::savestate::save(cpu, bus, clock)?;
+        fs::write(path, &bytes).map_err(|e| format!("cannot write '{}': {e}", path.display()))?;
+        Ok(())
+    }
+
+    /// Restore the machine from `path`. A no-op (returns an error) when no ROM
+    /// is loaded or the file can't be read/parsed. The restore is atomic in
+    /// effect: the state is only mutated if deserialization succeeds.
+    pub fn load_state_from(&mut self, path: &Path) -> Result<(), String> {
+        let bytes = fs::read(path).map_err(|e| format!("cannot read '{}': {e}", path.display()))?;
+        let AppState::Running { cpu, bus, clock } = &mut self.state else {
+            return Err("no ROM loaded".to_string());
+        };
+        crate::savestate::load(&bytes, cpu, bus, clock)?;
+        // The restored PPU framebuffer was not saved; drop any replay so
+        // playback doesn't fight the restored state.
+        self.replay = None;
+        Ok(())
+    }
+
+    /// Quick-save to the default `<rom>.state` slot (F5).
+    pub fn save_state(&mut self) -> Result<(), String> {
+        let path = self
+            .default_state_path()
+            .ok_or_else(|| "no ROM loaded".to_string())?;
+        self.save_state_to(&path)
+    }
+
+    /// Quick-load from the default `<rom>.state` slot (F9).
+    pub fn load_state(&mut self) -> Result<(), String> {
+        let path = self
+            .default_state_path()
+            .ok_or_else(|| "no ROM loaded".to_string())?;
+        self.load_state_from(&path)
+    }
 }
 
 #[cfg(test)]
@@ -229,6 +338,25 @@ mod tests {
         let result = load_rom_into(&mut state, &test_rom_bytes());
         assert!(result.is_ok());
         assert!(matches!(state, AppState::Running { .. }));
+    }
+
+    #[test]
+    fn slot_state_path_uses_bare_state_for_slot_zero_and_numbered_for_rest() {
+        let rom = PathBuf::from("/games/mario.nes");
+        // Slot 0 keeps the original single-slot name for backward compatibility.
+        assert_eq!(
+            slot_state_path(Some(&rom), 0),
+            Some(PathBuf::from("/games/mario.state"))
+        );
+        for slot in 1..NUM_SLOTS as u8 {
+            assert_eq!(
+                slot_state_path(Some(&rom), slot),
+                Some(PathBuf::from(format!("/games/mario.state{slot}"))),
+                "slot {slot}"
+            );
+        }
+        // No ROM loaded -> no path.
+        assert_eq!(slot_state_path(None, 0), None);
     }
 
     // On-demand throughput benchmark (no assertion — debug legitimately exceeds

@@ -1,10 +1,25 @@
 # Controller Input
 
 Keyboard input is mapped to both NES controller ports via a TOML config
-file, `keybindings.toml`, which is seeded next to the built binary (e.g.
-`target/debug/keybindings.toml` or `target/release/keybindings.toml`) the
-first time you `cargo build`. Edit that file to remap keys; rebuilding
-afterward will not overwrite your edits (see `build.rs`).
+file, `keybindings.toml`.
+
+**Which file is read depends on the build:**
+
+- **Development (`cargo run`, debug builds):** the source file
+  `assets/keybindings.toml` in the repo is read directly. Edit it and the
+  change applies on the next `cargo run` — no rebuild dance, no stale copy.
+- **Release / installed (`cargo run --release`, a shipped binary):** the
+  copy sitting next to the executable is read. `build.rs` seeds that copy
+  from `assets/keybindings.toml` the first time you build and never
+  overwrites it afterward, so your customizations survive upgrades.
+- **Override:** set `$NES_EMU_KEYBINDINGS` to an explicit path to force that
+  file in either build.
+
+(The previous behavior — debug builds also reading the seeded
+`target/debug/keybindings.toml` — meant edits to the tracked
+`assets/keybindings.toml` never took effect, because the seed copy was
+created once and never refreshed. Debug builds now read the source directly
+to avoid that trap.)
 
 ## File format
 
@@ -55,27 +70,48 @@ arrow keys are `"ArrowUp"`/`"ArrowDown"`/`"ArrowLeft"`/`"ArrowRight"`).
 |---|---|
 | Toggle FPS overlay | Ctrl+`fps_toggle` (default: Ctrl+F) |
 | Open ROM | Ctrl+O (not configurable) |
+| Select save-state slot | `slots` (default: 0–9) |
+| Save state (active slot) | `save_state` (default: F5) |
+| Load state (active slot) | `load_state` (default: F9) |
 
-`fps_toggle` lives in an optional `[app]` section:
+The `slots` keys pick one of ten save-state slots (shown in the window
+title); `save_state`/`load_state` quick-save/load the active slot's file next
+to the loaded ROM (`<rom>.state` for slot 0, `<rom>.stateN` for slots 1–9).
+The **File → Save State... / Load State...** menu items open a file dialog to
+save to / load from any path instead. A save state records the full machine
+state but not the ROM itself, so it can only be loaded with the same ROM open.
+See `docs/savestate.md`.
+
+App shortcuts live in an optional `[app]` section:
 
 ```toml
 [app]
 fps_toggle = "KeyF"
+save_state = "F5"
+load_state = "F9"
+# Exactly 10 keys, selecting slots 0..9 in order.
+slots = [
+    "Digit0", "Digit1", "Digit2", "Digit3", "Digit4",
+    "Digit5", "Digit6", "Digit7", "Digit8", "Digit9",
+]
 ```
 
-If `[app]` is missing entirely (e.g. an older `keybindings.toml` written
-before this option existed), it defaults to `F` — same fallback tolerance
-as a missing file, just scoped to this one section instead of the whole
-file.
+Each field in `[app]` has an independent default, so an older
+`keybindings.toml` written before one of these options existed (or one that
+omits `[app]` entirely) still works — every unspecified app key falls back to
+the default shown above. `slots`, if present, must list exactly ten keys, or
+the file fails to parse.
 
 ## Fallback behavior
 
-If `keybindings.toml` is missing, unreadable, or fails to parse (either
-section missing, a key misspelled, etc.), the emulator prints a warning to
-stderr naming the file and reason, and runs with the hardcoded default
-keymap above — the same values as the shipped file, so behavior is
-identical either way. There's no partial merging: an invalid file falls
-back entirely rather than mixing in per-field defaults.
+If `keybindings.toml` is missing, unreadable, or fails to parse (a required
+`[player1]`/`[player2]` section missing, a key misspelled, a `slots` array of
+the wrong length, etc.), the emulator prints a warning to stderr naming the
+file and reason, and runs with the hardcoded default keymap above — the same
+values as the shipped file, so behavior is identical either way. There's no
+partial merging at the file level: an invalid file falls back entirely. Within
+a present-and-valid `[app]` section, however, each key defaults independently
+(see above).
 
 ## Implementation
 

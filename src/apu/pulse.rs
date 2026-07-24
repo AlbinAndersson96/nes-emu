@@ -1,6 +1,7 @@
 use super::envelope::Envelope;
 use super::length::LengthCounter;
 use super::sweep::SweepUnit;
+use serde::{Deserialize, Serialize};
 
 /// 8-step duty-cycle waveforms (indexed by duty[0..3], position[0..7]).
 const DUTY_TABLE: [[u8; 8]; 4] = [
@@ -11,6 +12,7 @@ const DUTY_TABLE: [[u8; 8]; 4] = [
 ];
 
 /// One of the two pulse channels ($4000–$4003 or $4004–$4007).
+#[derive(Serialize, Deserialize)]
 pub struct PulseChannel {
     enabled: bool,
     duty: u8,

@@ -1,8 +1,10 @@
+use serde::{Deserialize, Serialize};
 /// Sweep unit — present on Pulse 1 and Pulse 2.
 ///
 /// Clocked once per half-frame (120 Hz). Adjusts the pulse timer period to
 /// produce pitch slides. Pulse 1 uses one's-complement negation; Pulse 2 uses
 /// two's-complement negation.
+#[derive(Serialize, Deserialize)]
 pub struct SweepUnit {
     enabled: bool,
     /// Divider period P; the sweep fires every P+1 half-frames.

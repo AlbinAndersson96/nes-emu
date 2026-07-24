@@ -12,6 +12,7 @@ pollster = "0.3"
 fontdue = "0.9"
 rfd = { version = "0.14", default-features = false, features = ["gtk3"] }
 serde = { version = "1", features = ["derive"] }
+bincode = "1.3"
 toml = "0.8"
 
 [dev-dependencies]

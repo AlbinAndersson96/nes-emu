@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 /// Length counter lookup table — indexed by the upper 5 bits of the channel's
 /// fourth register ($4003/$4007/$400B/$400F). Shared by all four channels.
 pub const LENGTH_TABLE: [u8; 32] = [
@@ -17,6 +18,7 @@ pub const LENGTH_TABLE: [u8; 32] = [
 /// from both sides): 5 is the unique passing value.
 const WRITE_EFFECT_DELAY: u8 = 5;
 
+#[derive(Serialize, Deserialize)]
 pub struct LengthCounter {
     halt: bool,
     count: u8,

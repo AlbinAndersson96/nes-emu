@@ -6,6 +6,7 @@ mod bus;
 mod cartridge;
 mod cpu;
 mod ppu;
+mod savestate;
 
 use crate::cpu::Bus as CpuBus;
 

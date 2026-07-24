@@ -1,6 +1,8 @@
 mod instructions;
 
-#[derive(Debug, Clone, Copy)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub(in crate::cpu) enum MicroOp {
     // Placeholder: executes entire remaining instruction at once (transitional).
     RunInstruction(u8), // carries the opcode
@@ -19,7 +21,7 @@ pub(in crate::cpu) enum MicroOp {
     VectorFetchHi,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Cpu {
     pub a: u8,
     pub x: u8,

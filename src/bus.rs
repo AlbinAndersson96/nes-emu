@@ -2,6 +2,7 @@ use crate::apu::Apu;
 use crate::cartridge::Cartridge;
 use crate::cpu::Bus as CpuBus;
 use crate::ppu::Ppu;
+use serde::{Deserialize, Serialize};
 
 /// The NES system bus — implements the CPU's full 16-bit address space.
 ///
@@ -31,8 +32,14 @@ const DMC_DMA_ALIGNED_PARITY: bool = true;
 /// countdown, so the halt-eligibility check first passes on cycle write+4.
 const DMC_LOAD_DMA_DELAY: u8 = 3;
 
+#[derive(Serialize, Deserialize)]
 pub struct Bus {
+    #[serde(with = "crate::savestate::byte_arr")]
     ram: [u8; 2048],
+    // The cartridge holds the immutable ROM and the (non-serde) `Box<dyn Mapper>`
+    // trait object; it is snapshotted separately (see `crate::savestate`) and
+    // re-attached on restore, so it is skipped here.
+    #[serde(skip)]
     cartridge: Option<Cartridge>,
     pub ppu: Ppu,
     pub apu: Apu,
@@ -170,6 +177,18 @@ impl Bus {
     pub fn insert_cartridge(&mut self, cartridge: Cartridge) {
         self.ppu.set_mirroring(cartridge.mirroring());
         self.cartridge = Some(cartridge);
+    }
+
+    /// Borrow the currently-inserted cartridge, if any (used to snapshot its
+    /// mutable state for a save state).
+    pub fn cartridge_ref(&self) -> Option<&Cartridge> {
+        self.cartridge.as_ref()
+    }
+
+    /// Remove and return the currently-inserted cartridge (used on restore to
+    /// move the live cartridge — with its ROM and mapper — onto the rebuilt bus).
+    pub fn take_cartridge(&mut self) -> Option<Cartridge> {
+        self.cartridge.take()
     }
 
     /// Warm reset (Reset button) side effects outside the CPU itself.
