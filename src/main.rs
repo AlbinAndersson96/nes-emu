@@ -80,6 +80,38 @@ fn load_replay_via_dialog(app: &mut App) {
     }
 }
 
+fn save_state_via_dialog(app: &mut App) {
+    let mut dialog = rfd::FileDialog::new().add_filter("Save state", &["state"]);
+    // Pre-fill the dialog with the default `<rom>.state` location/name.
+    if let Some(default) = app.default_state_path() {
+        if let Some(dir) = default.parent() {
+            dialog = dialog.set_directory(dir);
+        }
+        if let Some(name) = default.file_name().and_then(|n| n.to_str()) {
+            dialog = dialog.set_file_name(name);
+        }
+    }
+    if let Some(path) = dialog.save_file()
+        && let Err(e) = app.save_state_to(&path)
+    {
+        eprintln!("error: cannot save state: {}", e);
+    }
+}
+
+fn load_state_via_dialog(app: &mut App) {
+    let mut dialog = rfd::FileDialog::new().add_filter("Save state", &["state"]);
+    if let Some(default) = app.default_state_path()
+        && let Some(dir) = default.parent()
+    {
+        dialog = dialog.set_directory(dir);
+    }
+    if let Some(path) = dialog.pick_file()
+        && let Err(e) = app.load_state_from(&path)
+    {
+        eprintln!("error: cannot load state: {}", e);
+    }
+}
+
 struct WinitApp {
     app: Option<App>,
     key_map: KeyMap,
@@ -206,11 +238,16 @@ impl ApplicationHandler for WinitApp {
                 }
             }
 
-            WindowEvent::RedrawRequested => match app.renderer.redraw(menu::draw) {
-                menu::MenuAction::LoadRom => load_rom_via_dialog(app),
-                menu::MenuAction::PlayReplay => load_replay_via_dialog(app),
-                menu::MenuAction::None => {}
-            },
+            WindowEvent::RedrawRequested => {
+                let rom_loaded = app.is_rom_loaded();
+                match app.renderer.redraw(|ui| menu::draw(ui, rom_loaded)) {
+                    menu::MenuAction::LoadRom => load_rom_via_dialog(app),
+                    menu::MenuAction::SaveState => save_state_via_dialog(app),
+                    menu::MenuAction::LoadState => load_state_via_dialog(app),
+                    menu::MenuAction::PlayReplay => load_replay_via_dialog(app),
+                    menu::MenuAction::None => {}
+                }
+            }
 
             _ => {}
         }

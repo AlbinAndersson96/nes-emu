@@ -213,46 +213,62 @@ impl App {
         toggle_flag(&mut self.fps_overlay_enabled);
     }
 
-    /// Path of the quick-save-state file for the currently-loaded ROM
-    /// (`<rom>.state`, next to the ROM).
-    fn save_state_path(&self) -> Option<PathBuf> {
+    /// Whether a ROM is currently loaded and running (gates the save/load
+    /// menu items and hotkeys).
+    pub fn is_rom_loaded(&self) -> bool {
+        matches!(self.state, AppState::Running { .. })
+    }
+
+    /// Default quick-save-state path for the currently-loaded ROM
+    /// (`<rom>.state`, next to the ROM). Used by the F5/F9 hotkeys and as the
+    /// suggested filename in the "Save State..." dialog.
+    pub fn default_state_path(&self) -> Option<PathBuf> {
         self.current_rom_path
             .as_ref()
             .map(|p| p.with_extension("state"))
     }
 
-    /// Write a save state for the running machine to `<rom>.state`. A no-op
-    /// (returns an error) when no ROM is loaded. Errors are surfaced to the
-    /// caller for logging rather than interrupting emulation.
-    pub fn save_state(&mut self) -> Result<(), String> {
-        let path = self
-            .save_state_path()
-            .ok_or_else(|| "no ROM loaded".to_string())?;
+    /// Write a save state for the running machine to `path`. A no-op (returns
+    /// an error) when no ROM is loaded. Errors are surfaced to the caller for
+    /// logging rather than interrupting emulation.
+    pub fn save_state_to(&mut self, path: &Path) -> Result<(), String> {
         let AppState::Running { cpu, bus, clock } = &self.state else {
             return Err("no ROM loaded".to_string());
         };
         let bytes = crate::savestate::save(cpu, bus, clock)?;
-        fs::write(&path, &bytes).map_err(|e| format!("cannot write '{}': {e}", path.display()))?;
+        fs::write(path, &bytes).map_err(|e| format!("cannot write '{}': {e}", path.display()))?;
         Ok(())
     }
 
-    /// Restore the machine from `<rom>.state`. A no-op (returns an error) when
-    /// no ROM is loaded or no save state exists yet. The restore is atomic in
+    /// Restore the machine from `path`. A no-op (returns an error) when no ROM
+    /// is loaded or the file can't be read/parsed. The restore is atomic in
     /// effect: the state is only mutated if deserialization succeeds.
-    pub fn load_state(&mut self) -> Result<(), String> {
-        let path = self
-            .save_state_path()
-            .ok_or_else(|| "no ROM loaded".to_string())?;
+    pub fn load_state_from(&mut self, path: &Path) -> Result<(), String> {
+        let bytes = fs::read(path).map_err(|e| format!("cannot read '{}': {e}", path.display()))?;
         let AppState::Running { cpu, bus, clock } = &mut self.state else {
             return Err("no ROM loaded".to_string());
         };
-        let bytes =
-            fs::read(&path).map_err(|e| format!("cannot read '{}': {e}", path.display()))?;
         crate::savestate::load(&bytes, cpu, bus, clock)?;
         // The restored PPU framebuffer was not saved; drop any replay so
         // playback doesn't fight the restored state.
         self.replay = None;
         Ok(())
+    }
+
+    /// Quick-save to the default `<rom>.state` slot (F5).
+    pub fn save_state(&mut self) -> Result<(), String> {
+        let path = self
+            .default_state_path()
+            .ok_or_else(|| "no ROM loaded".to_string())?;
+        self.save_state_to(&path)
+    }
+
+    /// Quick-load from the default `<rom>.state` slot (F9).
+    pub fn load_state(&mut self) -> Result<(), String> {
+        let path = self
+            .default_state_path()
+            .ok_or_else(|| "no ROM loaded".to_string())?;
+        self.load_state_from(&path)
     }
 }
 

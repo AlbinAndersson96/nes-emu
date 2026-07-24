@@ -7,12 +7,18 @@ ROM's own battery-backed saves.
 
 ## User interface
 
-- **F5** — quick-save to `<rom>.state` (next to the loaded ROM).
-- **F9** — quick-load from `<rom>.state`.
+Two ways in:
 
-One slot per ROM. Both keys are fixed (not part of `keybindings.toml`). With no
-ROM loaded, or no save file present, the key is a no-op and the reason is
-printed to stderr.
+- **Hotkeys** — **F5** quick-saves to `<rom>.state` (next to the loaded ROM),
+  **F9** quick-loads it. One slot per ROM. Both keys are fixed (not part of
+  `keybindings.toml`).
+- **File menu** — **Save State...** and **Load State...** open a file dialog so
+  you can save to / load from any path (the dialog is pre-filled with the
+  default `<rom>.state` location and name). The two items are disabled until a
+  ROM is loaded.
+
+With no ROM loaded, or no save file present, the action is a no-op and the
+reason is printed to stderr.
 
 ## What is and isn't saved
 
@@ -54,8 +60,14 @@ Not saved:
   cartridge skipped, and the cartridge's mutable state rides alongside as a
   `CartridgeState`. On `load()`, the live cartridge is moved onto the rebuilt
   bus and its mutable state overwritten.
-- **`src/app.rs`** — `App::save_state` / `load_state` (path is `<rom>.state`).
-- **`src/main.rs`** — F5/F9 dispatch in the keyboard handler.
+- **`src/app.rs`** — `App::save_state_to` / `load_state_from` (path-taking
+  core), the `save_state` / `load_state` wrappers (default `<rom>.state` slot),
+  `default_state_path`, and `is_rom_loaded`.
+- **`src/menu.rs`** — the `Save State...` / `Load State...` File-menu items
+  (gated on `rom_loaded`).
+- **`src/main.rs`** — F5/F9 dispatch in the keyboard handler, and the
+  `save_state_via_dialog` / `load_state_via_dialog` file-dialog helpers wired to
+  the menu actions.
 
 The blob starts with a magic tag (`"NESS"`) and a version word; a mismatched
 tag or version is rejected, leaving the running machine untouched.

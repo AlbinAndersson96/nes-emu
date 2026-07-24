@@ -58,10 +58,11 @@ arrow keys are `"ArrowUp"`/`"ArrowDown"`/`"ArrowLeft"`/`"ArrowRight"`).
 | Save state | F5 (not configurable) |
 | Load state | F9 (not configurable) |
 
-Save states are written to `<rom>.state` next to the loaded ROM (one
-quick-save slot per ROM). F5 overwrites it; F9 restores it. A save state
-records the full machine state but not the ROM itself, so it can only be
-loaded with the same ROM open. See `docs/savestate.md`.
+F5/F9 use a single quick-save slot at `<rom>.state` next to the loaded ROM.
+The **File → Save State... / Load State...** menu items open a file dialog
+to save to / load from any path instead. A save state records the full
+machine state but not the ROM itself, so it can only be loaded with the same
+ROM open. See `docs/savestate.md`.
 
 `fps_toggle` lives in an optional `[app]` section:
 
