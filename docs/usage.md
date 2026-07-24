@@ -46,6 +46,23 @@ You can also load a ROM at any time from the window's **File → Load ROM** menu
 images are supported; the mapper is chosen automatically from the header (see the
 [supported mappers](#supported-mappers) list).
 
+## The window
+
+The window has three horizontal bands: the **menu bar** on top, the **NES
+video** (256×240, scaled 2× to 512×480 by default) in the middle, and an
+**info bar** along the bottom. The info bar always shows the live state:
+
+- **FPS** — the measured frame rate (a 500 ms running average).
+- **Speed** — the current emulation-speed multiplier (`1x`, `1/4x`, `8x`, …).
+- **Slot** — the active save-state slot (0–9).
+- **PAUSED** — shown only while emulation is paused.
+
+Before a ROM is loaded the bar reads *No ROM loaded*. The same details also
+appear in the window title; the info bar keeps them visible even when the title
+is hidden or clipped. (The optional in-frame **FPS overlay**, toggled with
+Ctrl+F, is separate — it draws the FPS reading directly onto the video for
+screenshots, whereas the info bar is always present outside the picture.)
+
 ## Controls
 
 Default keyboard bindings (fully remappable — see [`input.md`](input.md)):

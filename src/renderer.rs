@@ -161,6 +161,46 @@ pub(crate) fn render_placeholder_frame(font: &fontdue::Font) -> [u8; 256 * 240] 
     frame
 }
 
+/// Snapshot of emulator status shown in the info bar below the NES view.
+/// Built by `App` each redraw from its live state.
+pub struct StatusInfo {
+    /// Whether a ROM is loaded and running. When false the bar shows an idle
+    /// message instead of live readings.
+    pub rom_loaded: bool,
+    /// Most recent FPS measurement (the 500 ms running average).
+    pub fps: f64,
+    /// Human-readable emulation-speed label (e.g. "1x", "1/4x").
+    pub speed_label: &'static str,
+    /// Active save-state slot (0..NUM_SLOTS).
+    pub slot: u8,
+    /// Whether emulation is currently paused.
+    pub paused: bool,
+}
+
+/// Draws the status bar shown below the NES view: FPS, emulation speed, and the
+/// active save-state slot (plus a paused marker). Rendered as an egui bottom
+/// panel so it sits under the framebuffer's `CentralPanel`. Split out so the
+/// layout is easy to adjust in one place.
+fn draw_info_bar(ui: &mut egui::Ui, status: &StatusInfo) {
+    egui::Panel::bottom("info_bar").show(ui, |ui| {
+        ui.horizontal(|ui| {
+            if status.rom_loaded {
+                ui.label(format!("FPS: {:.0}", status.fps.round()));
+                ui.separator();
+                ui.label(format!("Speed: {}", status.speed_label));
+                ui.separator();
+                ui.label(format!("Slot: {}", status.slot));
+                if status.paused {
+                    ui.separator();
+                    ui.label("PAUSED");
+                }
+            } else {
+                ui.label("No ROM loaded");
+            }
+        });
+    });
+}
+
 pub struct Renderer {
     window: Arc<Window>,
     ctx: egui::Context,
@@ -173,9 +213,11 @@ pub struct Renderer {
 
 impl Renderer {
     pub fn new(event_loop: &ActiveEventLoop) -> Result<Self, Box<dyn std::error::Error>> {
+        // 512×480 is the 2× NES view; the extra height leaves room for the
+        // menu bar (top) and the status/info bar (bottom) without squeezing it.
         let window_attributes = Window::default_attributes()
             .with_title("nes-emu")
-            .with_inner_size(LogicalSize::new(512.0, 480.0));
+            .with_inner_size(LogicalSize::new(512.0, 524.0));
         let window = Arc::new(event_loop.create_window(window_attributes)?);
 
         let ctx = egui::Context::default();
@@ -262,11 +304,15 @@ impl Renderer {
     }
 
     /// Runs one egui frame: `draw_menu` builds the menu bar and reports
-    /// which File-menu item (if any) was clicked; the NES framebuffer
-    /// texture is drawn into the remaining space via a `CentralPanel`.
-    /// Encodes and presents the frame via the `egui_wgpu` painter. Returns
-    /// `draw_menu`'s result.
-    pub fn redraw(&mut self, draw_menu: impl FnOnce(&mut egui::Ui) -> MenuAction) -> MenuAction {
+    /// which File-menu item (if any) was clicked; `status` fills the info bar
+    /// below the view; the NES framebuffer texture is drawn into the remaining
+    /// space via a `CentralPanel`. Encodes and presents the frame via the
+    /// `egui_wgpu` painter. Returns `draw_menu`'s result.
+    pub fn redraw(
+        &mut self,
+        status: StatusInfo,
+        draw_menu: impl FnOnce(&mut egui::Ui) -> MenuAction,
+    ) -> MenuAction {
         let texture_id = self.texture.id();
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let mut draw_menu = Some(draw_menu);
@@ -275,6 +321,9 @@ impl Renderer {
             if let Some(draw_menu) = draw_menu.take() {
                 menu_action = draw_menu(ui);
             }
+            // Info bar must be added before the CentralPanel so egui reserves
+            // its space at the bottom and the framebuffer fills what's left.
+            draw_info_bar(ui, &status);
             egui::CentralPanel::default().show(ui, |ui| {
                 let sized_texture = egui::load::SizedTexture::new(texture_id, ui.available_size());
                 ui.image(sized_texture);
@@ -459,6 +508,31 @@ mod tests {
             frame.contains(&0x30),
             "expected some foreground-colored pixels from drawn text"
         );
+    }
+
+    #[test]
+    fn draw_info_bar_does_not_panic_running_or_idle() {
+        for status in [
+            StatusInfo {
+                rom_loaded: true,
+                fps: 60.1,
+                speed_label: "2x",
+                slot: 3,
+                paused: true,
+            },
+            StatusInfo {
+                rom_loaded: false,
+                fps: 0.0,
+                speed_label: "1x",
+                slot: 0,
+                paused: false,
+            },
+        ] {
+            let ctx = egui::Context::default();
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                draw_info_bar(ui, &status);
+            });
+        }
     }
 
     #[test]
