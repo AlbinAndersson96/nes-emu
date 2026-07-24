@@ -262,6 +262,23 @@ impl ApplicationHandler for WinitApp {
                             Err(e) => eprintln!("load state failed: {e}"),
                         }
                     }
+
+                    // Emulation speed: step through the slow-motion /
+                    // fast-forward list, or jump back to 1x. The pacing loop in
+                    // `about_to_wait` picks up the new multiplier on its next
+                    // wakeup.
+                    if self.key_map.is_speed_up(code) {
+                        app.speed_up();
+                        eprintln!("emulation speed {}", app.speed_label());
+                    }
+                    if self.key_map.is_slow_down(code) {
+                        app.slow_down();
+                        eprintln!("emulation speed {}", app.speed_label());
+                    }
+                    if self.key_map.is_normal_speed(code) {
+                        app.reset_speed();
+                        eprintln!("emulation speed {}", app.speed_label());
+                    }
                 }
 
                 if let Some((port, bit)) = self.key_map.on_key(code) {
@@ -292,9 +309,25 @@ impl ApplicationHandler for WinitApp {
         let Some(app) = self.app.as_mut() else {
             return;
         };
-        if Instant::now() >= self.next_frame {
-            self.next_frame += FRAME_DURATION;
+        // The wall-clock time one NES frame should take at the current speed:
+        // slow motion stretches the interval (multiplier < 1), fast forward
+        // shrinks it (multiplier > 1). At 1x this is exactly FRAME_DURATION.
+        let interval = FRAME_DURATION.div_f64(app.speed_multiplier());
+        let now = Instant::now();
+        if now >= self.next_frame {
             app.step_frame();
+            self.next_frame += interval;
+            // If we've fallen behind — the host can't keep up at this speed, or
+            // fast forward just shrank the interval past the old target — resync
+            // to `now` so a backlog can't accumulate into a runaway catch-up.
+            if self.next_frame <= now {
+                self.next_frame = now + interval;
+            }
+        } else if self.next_frame > now + interval {
+            // Speed just increased while we were already waiting: the previously
+            // scheduled target is now too far out. Pull it in so the change
+            // takes effect promptly instead of after the old (longer) wait.
+            self.next_frame = now + interval;
         }
         event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
     }

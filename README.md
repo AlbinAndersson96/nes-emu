@@ -81,6 +81,10 @@ on first build and never overwrites an existing copy, so your edits survive rebu
 If the file is missing, a hardcoded default mapping is used. See
 [`docs/input.md`](docs/input.md) for the format and default bindings.
 
+Emulation speed is adjustable while running: `-` slows down and `=` speeds up
+(stepping through `1/32×`…`1×`…`8×`), and Backspace resets to `1×`. See
+[Emulation speed](docs/usage.md#emulation-speed).
+
 ## Project layout
 
 ```

@@ -22,6 +22,12 @@ start = "Period"
 fps_toggle = "KeyF"
 save_state = "F5"
 load_state = "F9"
+# Emulation-speed controls. speed_up steps one entry faster (fast forward,
+# up to 8x), slow_down one entry slower (slow motion, down to 1/32x), and
+# normal_speed jumps straight back to 1x.
+speed_up = "Equal"
+slow_down = "Minus"
+normal_speed = "Backspace"
 # Keys that select save-state slots 0-9, in order. Must list exactly 10 keys.
 slots = [
     "Digit0",
