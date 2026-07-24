@@ -910,7 +910,62 @@ Flags: **N Z**
 | **$Ex** | CPX # | SBC (zp,X) | — | CPX zp | SBC zp | INC zp | INX | SBC # | NOP | CPX abs | SBC abs | INC abs |
 | **$Fx** | BEQ rel | SBC (zp),Y | — | — | SBC zp,X | INC zp,X | SED | SBC abs,Y | — | — | SBC abs,X | INC abs,X |
 
-Cells marked `—` are unofficial/illegal opcodes not required for basic emulation.
+Cells marked `—` in the table above are the unofficial/illegal opcodes. **This emulator
+implements all 256 opcodes**, including every unofficial one — see the next section.
+
+---
+
+## Unofficial / Illegal Opcodes
+
+The 6502 has no "invalid instruction" trap: every one of the 256 opcode bytes decodes to
+*something*. The 105 bytes not assigned to the official instructions above trigger unofficial
+("illegal") behavior, most of it a predictable combination of two official operations sharing
+the datapath. Many games and — more importantly here — blargg's `instr_test-v5` /
+`nes_instr_test` ROMs exercise them, so `src/cpu/instructions.rs` implements them all. When
+implementing or fixing one, cross-check against the expected hash in the relevant blargg ROM
+test rather than any single written source — documented behavior varies between references.
+
+### Stable combination opcodes
+
+These are well-defined and stable across CPU revisions. Each fuses an RMW or load with an
+ALU op on A, reusing the addressing-mode machinery of its official cousins.
+
+| Mnemonic | Operation | Notes |
+|----------|-----------|-------|
+| LAX | `A = X = M` | LDA + LDX; flags N Z. Also `LAX #imm` (ATX, unstable on some chips) |
+| SAX | `M = A & X` | Store A AND X; no flags affected |
+| DCP | `M = M - 1; CMP A,M` | DEC then CMP; flags N Z C |
+| ISB / ISC | `M = M + 1; SBC M` | INC then SBC; flags N V Z C |
+| SLO | `M <<= 1; A \|= M` | ASL then ORA; flags N Z C |
+| SRE | `M >>= 1; A ^= M` | LSR then EOR; flags N Z C |
+| RLA | `M = ROL M; A &= M` | ROL then AND; flags N Z C |
+| RRA | `M = ROR M; A += M + C` | ROR then ADC; flags N V Z C |
+
+### Immediate-only ALU opcodes
+
+| Mnemonic | Operation | Notes |
+|----------|-----------|-------|
+| ANC | `A &= imm; C = N` | AND then copy bit 7 into carry |
+| ALR | `A = (A & imm) >> 1` | AND then LSR A; flags N Z C |
+| ARR | `A = (A & imm) ROR` | AND then ROR A, with special V/C from bits 6/5 |
+| XAA / ANE | `A = (A \| magic) & X & imm` | Highly unstable; modeled as `A = X & imm` |
+| LAS | `A = X = SP = M & SP` | AND memory with SP, load all three |
+
+### Unstable high-byte stores (SHA / SHX / SHY / TAS)
+
+`$93`/`$9F` (SHA), `$9E` (SHX), `$9C` (SHY), `$9B` (TAS) store `reg & (addr_hi + 1)`, and on
+a page cross the write address's high byte *becomes that stored value*. All five share one
+model (`sh_store`) matching AccuracyCoin's "behavior 1" (the common NES CPU). There is also an
+RDY quirk: if a DMC DMA is serviced on the pre-write dummy-read cycle, the `& (addr_hi + 1)`
+is dropped and the raw register is stored ("SHY becomes STY"). See the "SHA / SHX / SHY / TAS
+unstable-store behavior" design note in [`CLAUDE.md`](../CLAUDE.md).
+
+### Unofficial NOPs and KIL/JAM
+
+The remaining bytes are multi-byte NOPs (with immediate, zero-page, or absolute operands —
+they still *perform their addressing-mode read*, which matters when the target is a PPU
+register with read side effects) and the KIL/JAM opcodes (`$02`, `$12`, …) that permanently
+halt the CPU. Both are implemented.
 
 ---
 

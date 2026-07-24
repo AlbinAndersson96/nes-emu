@@ -1,0 +1,164 @@
+# User Guide
+
+How to build, run, and play with `nes-emu`. For the internals, see the
+reference pages linked from [`Home.md`](Home.md).
+
+## Requirements
+
+- A recent **Rust toolchain** (stable; edition 2024). Install via [rustup](https://rustup.rs).
+- A GPU or software rasterizer reachable by `wgpu` (Vulkan, Metal, DX12, or GL).
+  WSL2 is handled automatically — see [Troubleshooting](#troubleshooting).
+
+### System dependencies (Ubuntu/Debian)
+
+```bash
+sudo apt install pkg-config libgtk-3-dev libxkbcommon-x11-0
+```
+
+- `pkg-config` — used by the build to locate native libraries
+- `libgtk-3-dev` — required by the native file dialog (`rfd` crate, `gtk3` feature)
+- `libxkbcommon-x11-0` — required at runtime by `winit` for keyboard handling
+
+On macOS and Windows no extra packages are needed beyond the Rust toolchain.
+
+## Building
+
+```bash
+cargo build            # debug build (opt-level 1 — fast enough to hold 60 fps)
+cargo build --release  # fully optimized build
+```
+
+The dev profile is deliberately set to `opt-level = 1`: a cycle-accurate core is
+compute-heavy, and at `opt-level 0` the emulation loop alone can't hold the
+16.639 ms NTSC frame budget, so games would run in slow motion. `--release` is a
+touch faster still and is what you want for a shipped binary.
+
+## Running a ROM
+
+```bash
+cargo run <rom.nes>              # load and run a ROM immediately
+cargo run --release <rom.nes>    # same, fastest build
+cargo run                        # start with no ROM; use File → Load ROM
+```
+
+You can also load a ROM at any time from the window's **File → Load ROM** menu
+(or press **Ctrl+O**), which opens a native file picker. Only iNES (`.nes`)
+images are supported; the mapper is chosen automatically from the header (see the
+[supported mappers](#supported-mappers) list).
+
+## Controls
+
+Default keyboard bindings (fully remappable — see [`input.md`](input.md)):
+
+| Button | Player 1 | Player 2 |
+|--------|----------|----------|
+| Up | W | I |
+| Down | S | K |
+| Left | A | J |
+| Right | D | L |
+| B | Z | N |
+| A | X | M |
+| Select | Q | , (comma) |
+| Start | E | . (period) |
+
+Bindings are read from a `keybindings.toml` file. In **debug** builds the repo's
+`assets/keybindings.toml` is read directly (edit it, re-run, done). In
+**release** builds a copy is seeded next to the binary on first build and never
+overwritten, so your edits survive upgrades. Set `$NES_EMU_KEYBINDINGS` to force
+a specific path. See [`input.md`](input.md) for the file format and full details.
+
+### Application shortcuts
+
+| Action | Key (default) |
+|--------|---------------|
+| Load ROM (open file dialog) | Ctrl+O |
+| Toggle FPS overlay | Ctrl+F |
+| Select save-state slot 0–9 | number keys 0–9 |
+| Quick-save active slot | F5 |
+| Quick-load active slot | F9 |
+
+The FPS overlay, slot keys, and save/load keys are all configurable in the
+`[app]` section of `keybindings.toml` (`fps_toggle`, `slots`, `save_state`,
+`load_state`). Ctrl+O is fixed.
+
+## Save states
+
+A save state is a full snapshot of the running machine (CPU, PPU, APU, bus, and
+the cartridge's mutable state) — independent of the game's own battery save.
+
+- **Ten numbered slots.** Press a number key **0–9** to select the active slot;
+  the current slot is shown in the window title (`nes-emu — <rom> · slot N`).
+- **Quick save / load.** **F5** saves the active slot, **F9** loads it. Slot 0 is
+  stored as `<rom>.state`, slots 1–9 as `<rom>.state1`…`<rom>.state9`, next to the
+  ROM file.
+- **Save/Load to any path.** **File → Save State… / Load State…** open a file
+  dialog so you can save to or load from an arbitrary location.
+
+A save state does **not** include the ROM itself, so it can only be loaded while
+the same ROM is open. Full design details are in [`savestate.md`](savestate.md).
+
+## Input replay (FM2)
+
+The emulator can play back an FM2 input movie for deterministic replay:
+
+```bash
+cargo run <rom.nes> <replay.fm2>   # boot the ROM and play the movie
+```
+
+You can also load a movie at runtime from **File → Play Replay…**. This is handy
+for regression-checking a run or reproducing a bug from a recorded input trace.
+
+## Audio
+
+All five APU channels and the frame counter are emulated and mixed to a sample
+stream, but **no audio output device is wired yet** — you'll see accurate APU
+state and pass the APU test ROMs, but hear nothing. Audio output is on the
+roadmap (see the README's "What's next").
+
+## Supported mappers
+
+Fifteen iNES mappers are implemented; the header's mapper number selects one
+automatically:
+
+| # | Name | # | Name |
+|---|------|---|------|
+| 0 | NROM | 34 | BNROM / NINA-001 |
+| 1 | MMC1 (SxROM) | 66 | GxROM |
+| 2 | UxROM | 69 | Sunsoft FME-7 |
+| 3 | CNROM | 71 | Camerica |
+| 4 | MMC3 (+ scanline IRQ) | 87 | Jaleco CHR |
+| 7 | AxROM | 206 | Namco 118 / DxROM |
+| 9 | MMC2 | | |
+| 10 | MMC4 | | |
+| 11 | Color Dreams | | |
+
+A ROM whose mapper number isn't in this list will fail to load with an error.
+
+## Troubleshooting
+
+- **Blank window / GPU error under WSL2.** Handled automatically:
+  `maybe_configure_wsl2_gpu()` sets `WGPU_BACKEND=vulkan` and points
+  `VK_ICD_FILENAMES` at the Mesa LLVMpipe software ICD when it detects WSL2. If
+  you still hit issues, ensure Mesa's LLVMpipe ICD is installed.
+- **Game runs in slow motion.** You're likely running an unoptimized build. Use
+  `cargo run` (the dev profile is already `opt-level 1`) or `cargo run --release`.
+- **Bad keybindings file.** If `keybindings.toml` is missing or fails to parse,
+  the emulator prints a warning to stderr and falls back to the built-in defaults
+  (identical to the shipped file), so it always starts.
+- **"No such file" on load.** Only `.nes` (iNES) images are accepted; pass a path
+  to a valid ROM.
+
+## Running the tests
+
+The ROM test suites are git submodules — fetch them first (not needed just to
+build or run the emulator):
+
+```bash
+git submodule update --init --recursive
+cargo test                 # run everything (includes the blargg ROM suites)
+cargo test <name>          # run a single test by name
+cargo test accuracycoin --release -- --ignored --nocapture   # the AccuracyCoin runner
+```
+
+See the README's "Test conformance" and [`accuracycoin_outcome.md`](accuracycoin_outcome.md)
+for what passes.

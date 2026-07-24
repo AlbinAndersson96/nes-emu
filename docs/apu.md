@@ -440,17 +440,29 @@ This jitter is tested by `cpu_interrupts_v2` (tests 3-5).
 
 In this emulator the $4017 write is applied while the APU still sits at the start of the
 writing instruction (the caller only ticks the APU after the whole instruction), so
-`frame_reset_delay` is 7 as measured from the write's application: 4 unticked instruction
-cycles + the 3-cycle aligned-case hardware delay. See the derivation comment in the $4017
-write handler in `src/apu/mod.rs` — do not "correct" it to 3-4 without re-reading that.
-The same free-running divide-by-2 clock (`Apu::cycle_parity`) decides whether an OAM DMA
-stalls 513 or 514 cycles (`Bus::oam_dma`).
+`frame_reset_delay` is **7 or 8** as measured from the write's application: 4 unticked
+instruction cycles + the hardware's 3-cycle (aligned) / 4-cycle (unaligned) post-write
+delay, selected by `cycle_count & 1` at the write. See the derivation comment in the
+$4017 write handler in `src/apu/mod.rs` — do not "correct" it to 3-4 without re-reading
+that. The same free-running divide-by-2 clock (`Apu::cycle_parity`) decides whether an OAM
+DMA stalls 513 or 514 cycles (`Bus::oam_dma`). A constant (non-parity) delay silently
+defeats blargg's `sync_apu` equalizer — see "Known gaps" in [`CLAUDE.md`](../CLAUDE.md).
 
 ### DMC DMA stall
 
-When the DMC needs a byte it halts the CPU for 4 cycles. This is implemented in
-`Bus::tick_apu()` / `Bus::tick_dma()`: `tick_apu()` arms a 4-cycle stall counter when
-`dmc.needs_dma()` is true; the run loop then calls `tick_dma()` instead of `cpu.tick()`
-for those cycles, fetching the byte from `dmc.dma_address()` and supplying it via
-`dmc.supply_dma_byte()` on the final stall cycle. The 2–4 cycle alignment jitter (fewer
-cycles when the stall begins on a `write` cycle) is not currently modelled.
+When the DMC needs a byte it halts the CPU to steal a fetch. Unlike OAM DMA (which the run
+loop drives via `Bus::tick_dma`), DMC DMA is serviced **synchronously, mid-instruction,
+inside `CpuBus::read`** (`Bus::maybe_dmc_dma`): a request that asserted on an *earlier*
+cycle halts the current read (hardware RDY sampling — never the assert cycle itself, never a
+write cycle), performs 2–3 side-effecting dummy re-reads of the in-flight address plus the
+sample fetch, and reports the stolen cycles to the CPU via `CpuBus::take_dma_stall_cycles`
+(drained into `Cpu::cycles`, so `SystemClock` ticks the PPU/APU for them automatically).
+
+The 3- vs 4-cycle stall **is** modelled: it is chosen from the live APU clock phase
+(`Apu::dmc_realtime_current_parity`, `DMC_DMA_ALIGNED_PARITY`), and enable-started load DMAs
+are delayed to no earlier than the 4th cycle after the `$4015` write (`DMC_LOAD_DMA_DELAY`).
+Detection uses a DMC-only real-time clock (`Apu::dmc_tick_realtime`) with a `dmc_debt`
+counter so the post-hoc channel tick never double-clocks. These constants were swept against
+AccuracyCoin page 13 — see "DMC DMA cycle accuracy" in [`CLAUDE.md`](../CLAUDE.md) and
+`docs/accuracycoin_outcome.md`. What is deliberately *not* modelled: DMC/OAM DMA overlap,
+DMC bus conflicts, and explicit/implicit DMA abort.

@@ -181,10 +181,11 @@ knowing if debugging these tests further:
   (the `verify_sync_vbl_contract` diagnostic, since removed from
   `src/tests/roms.rs` with the other one-off tracers) — not a source of any
   known bug either.
-- The APU's frame-IRQ fires `frame_reset_delay` (7, as applied at instruction
-  start — 4 unticked instruction cycles + hardware's 3-cycle post-write-cycle
-  delay) + first `MODE0` step (29828) = 29835 cycles after the $4017 write is
-  applied. See the $4017 write handler in `src/apu/mod.rs` for the derivation;
+- The APU's frame-IRQ fires `frame_reset_delay` (**7 or 8**, parity-dependent, as
+  applied at instruction start — 4 unticked instruction cycles + hardware's
+  3-cycle (aligned) / 4-cycle (unaligned) post-write-cycle delay) + first `MODE0`
+  step after the $4017 write is applied. See the $4017 write handler in
+  `src/apu/mod.rs` for the derivation;
   the old flat 4 made the IRQ fire 3 cycles early relative to the instruction
   stream and was the root cause of `4-irq_and_dma`'s 3-row table shift.
 - `$4015` reads pre-advance the APU 4 cycles so the frame-IRQ flag (and its
@@ -211,7 +212,9 @@ Confirmed against all four sub-tables of `cpu_interrupts_v2/5-branch_delays_irq`
   by the run loop, which ticks the APU one cycle at a time) plus
   `branch_delay_irq`; the deferred IRQ then fires after the next instruction.
 
-These three subsystems being independently proven correct is *why* the
-`3-nmi_and_irq` contradiction above is genuinely unresolved rather than just
-under-investigated — the pieces that would normally explain a timing bug have all
-individually checked out.
+These three subsystems being independently proven correct is what let
+`3-nmi_and_irq` finally be resolved: once each piece was individually verified,
+the remaining discrepancy narrowed to the one-cycle `$2002` read-sampling-dot bug
+(see the note under "NMI hijacking an in-progress IRQ dispatch" above). With that
+fixed, all of `cpu_interrupts_v2` (tests 1–5 plus the combined suite) passes, and
+all 159 blargg CPU ROM tests are green.

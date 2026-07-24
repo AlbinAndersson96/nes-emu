@@ -31,7 +31,7 @@ A cycle-accurate NES emulator written in Rust.
   and the 2005 PPU suite (with golden-screenshot comparison).
 - **Mapper 3/4 ROM tests** pass: `mmc3_test`, `mmc3_test_2`, `mmc3_irq_tests`
   (minus the mutually-exclusive rev-A/MMC6 ROMs).
-- **AccuracyCoin** (the 141-test all-in-one accuracy ROM): 121/141, run via an
+- **AccuracyCoin** (the 141-test all-in-one accuracy ROM): 125/141, run via an
   `#[ignore]`d harness. See [`docs/accuracycoin_outcome.md`](docs/accuracycoin_outcome.md)
   for the per-test breakdown and remaining-failure analysis.
 
@@ -113,24 +113,32 @@ src/
     length.rs        — length counter (write-cycle-exact halt/reload timing)
     sweep.rs         — sweep unit
   tests/
-    mod.rs           — TestBus used by unit tests
-    bus.rs           — bus unit tests
-    cpu.rs           — CPU unit tests
-    ppu.rs           — PPU unit tests
-    cartridge.rs     — mapper unit tests (synthetic iNES images)
-    roms.rs          — $6000-protocol blargg ROM harness (CPU, APU, MMC3)
-    text_console_roms.rs — on-screen-text blargg ROM harness
-    ppu_roms.rs      — blargg PPU ROM harness (golden-screenshot comparison)
-    apu_2005_roms.rs — blargg 2005 APU frame-counter ROM harness
-    sprite_hit_roms.rs — blargg sprite-0-hit ROM harness
-    accuracycoin.rs  — headless AccuracyCoin all-in-one runner (#[ignore]d)
+    mod.rs           — test tree root (splits unit vs integration)
+    unit/            — white-box tests that reach into crate internals
+      mod.rs         — module list + TestBus (flat 64 KB space, access trace)
+      bus.rs         — bus unit tests
+      cpu.rs         — CPU unit tests (incl. cycle-by-cycle bus-access sequences)
+      ppu.rs         — PPU unit tests
+      cartridge.rs   — mapper unit tests (synthetic iNES images)
+      savestate.rs   — save-state round-trip tests
+    integration/     — whole-ROM harnesses (boot a .nes through the real machine)
+      mod.rs         — module list
+      roms.rs        — $6000-protocol blargg ROM harness (CPU, APU, MMC3)
+      text_console_roms.rs — on-screen-text blargg ROM harness
+      ppu_roms.rs    — blargg PPU ROM harness (golden-screenshot comparison)
+      apu_2005_roms.rs — blargg 2005 APU frame-counter ROM harness
+      sprite_hit_roms.rs — blargg sprite-0-hit ROM harness
+      accuracycoin.rs  — headless AccuracyCoin all-in-one runner (#[ignore]d)
 docs/
+  Home.md            — wiki landing page / documentation index
+  usage.md           — user guide: install, run, controls, save states, troubleshooting
   bus.md             — address map and bus design notes
-  cpu_instructions.md — 6502 instruction reference
+  cpu_instructions.md — 6502 instruction reference (official + unofficial opcodes)
   cpu_interrupts.md  — NMI/IRQ/BRK dispatch, hijacking, and polling rules
   apu.md             — APU register reference and implementation notes
   ppu.md             — PPU implementation reference and checklist
   input.md           — controller keybinding config format and defaults
+  savestate.md       — save-state design, hotkeys, and what is/isn't saved
   accuracycoin_outcome.md — AccuracyCoin per-test results and analysis
   investigations/    — chronological debugging logs (reference, not maintained docs)
 tests/roms/          — git submodules (see "Test ROMs are git submodules" above)
@@ -141,12 +149,19 @@ tests/screenshots/   — golden PPU screenshots for the 2005 PPU suite
 
 ## Docs
 
+The `docs/` folder doubles as the project wiki — [`docs/Home.md`](docs/Home.md) is
+the index page. Each page mixes the NES hardware reference with how this emulator
+implements it.
+
+- [`docs/Home.md`](docs/Home.md) — documentation index / wiki landing page
+- [`docs/usage.md`](docs/usage.md) — **user guide**: install, run a ROM, controls, save states, troubleshooting
 - [`docs/bus.md`](docs/bus.md) — NES address map and bus design
-- [`docs/cpu_instructions.md`](docs/cpu_instructions.md) — 6502 instruction reference
+- [`docs/cpu_instructions.md`](docs/cpu_instructions.md) — 6502 instruction reference (official + unofficial)
 - [`docs/cpu_interrupts.md`](docs/cpu_interrupts.md) — interrupt dispatch, hijacking, and polling rules
 - [`docs/apu.md`](docs/apu.md) — APU channel registers and frame counter
 - [`docs/ppu.md`](docs/ppu.md) — PPU implementation reference
 - [`docs/input.md`](docs/input.md) — controller keybinding config format and defaults
+- [`docs/savestate.md`](docs/savestate.md) — save-state design and hotkeys
 - [`docs/accuracycoin_outcome.md`](docs/accuracycoin_outcome.md) — AccuracyCoin per-test results and analysis
 
 ## Credits

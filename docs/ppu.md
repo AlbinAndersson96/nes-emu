@@ -561,9 +561,43 @@ When reading palette RAM via `$2007`, the read buffer is updated with the nameta
 
 ---
 
+## Emulator Implementation Notes
+
+The reference above describes the 2C02. This section records how *this* emulator
+(`src/ppu/mod.rs`) realizes the trickier behaviors — most of them added while chasing the
+AccuracyCoin accuracy ROM. Fuller design notes for each live under "Key design notes" in the
+project [`CLAUDE.md`](../CLAUDE.md); the AccuracyCoin story is in
+[`accuracycoin_outcome.md`](accuracycoin_outcome.md).
+
+- **Register access timing.** The `Bus` gives $2002/$2004/$2007 reads a "pre-advance": it
+  ticks the PPU ~8 dots, samples the register on the read's final dot, then ticks 1 more —
+  so a read observes the state the real chip would present mid-read, not at the instruction's
+  start. `$2002` additionally latches the VBL flag at the *start* of the read cycle but
+  re-samples the sprite-0/overflow bits ~2 dots later (`Ppu::resample_sprite_flags`).
+- **NMI is a sampled level, not a stored edge.** `nmi = vblank && nmi_enable` is edge-detected
+  once per CPU cycle by `SystemClock`, which yields the hardware 2-dot NMI-suppression windows
+  around VBL onset and the "flag never sets" race for a $2002 read one dot before VBL.
+- **$2007 during rendering uses the glitch increment.** A $2007 read/write while rendering is
+  enabled on a visible/pre-render scanline triggers the coarse-X + Y increment pulse
+  (`v += $1001`-ish), *not* the PPUCTRL +1/+32 increment (`advance_v_after_ppudata_access`).
+- **$2004 during rendering returns the OAM data bus.** Not `oam[oam_addr]` but `oam_buffer`,
+  the byte the sprite pipeline last latched that dot ($FF during the dot 1–64 clear window).
+- **Sprite evaluation is seeded from OAMADDR.** The per-scanline OAM pointer starts at whatever
+  `$2003` holds (not always index 0), which is how "misaligned OAM" and "sprite zero is
+  whichever object is examined first" arise. OAMADDR is also forced to 0 during dots 257–320.
+- **Sprite units are real down-counter + shifter pipelines**, not X-compares — counting units
+  decrement even during forced blank; halted units shift only while rendering is enabled. This
+  reproduces "stale sprite" draw behavior.
+- **$2001 mask writes have two taps.** The register updates immediately (what the odd-frame
+  skip decision samples) but the render pipeline sees the change `MASK_WRITE_DELAY_DOTS` later.
+- **Palette RAM** is initialized to the documented 2C02 power-up palette; greyscale zeroes the
+  low 4 bits of $2007 palette *reads* only.
+- **The PPU reports bus addresses to the mapper** (`notify_ppu_bus` → `Cartridge::ppu_bus_addr`)
+  at calibrated dots, driving the MMC3 A12 scanline-IRQ counter and the MMC2/MMC4 CHR latch.
+
 ## Implementation Checklist
 
-For a minimal but correct PPU implementation:
+For a minimal but correct PPU implementation (all implemented here):
 
 - [x] Internal registers: `v`, `t`, `x`, `w`
 - [x] Register R/W behavior: `$2000`–`$2007`, `$4014`

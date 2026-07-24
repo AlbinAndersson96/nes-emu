@@ -2,6 +2,16 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Keep the docs current
+
+**Documentation must be updated continuously, in the same change that alters the behavior it describes — never left for a later "docs pass."** This repository's docs went stale once already; don't let it happen again. Whenever you change code, check whether any of these need a matching edit and update them in the same commit:
+
+- **This file (`CLAUDE.md`)** — module structure, key design notes, known gaps, and test counts.
+- **`README.md`** — status table, test-conformance summary, project layout, and "What's next".
+- **`docs/*.md`** — the hardware/implementation reference pages ([`docs/Home.md`](docs/Home.md) is the index) and the [`docs/usage.md`](docs/usage.md) user guide. Each page is meant to describe both the NES behavior *and* how this emulator implements it, and doubles as the GitHub wiki, so keep both halves accurate.
+
+Concretely: a new mapper updates the mapper lists in `CLAUDE.md`, `README.md`, `docs/bus.md`, and `docs/usage.md`; a timing fix updates the relevant design note and the matching `docs/` reference; a passing-test-count change updates `CLAUDE.md`, `README.md`, and (for AccuracyCoin) `docs/accuracycoin_outcome.md`. The `docs/investigations/` logs are the one exception — they are historical records, not maintained docs.
+
 ## Project
 
 A NES emulator written in Rust. The CPU (full 6502 instruction set including unofficial opcodes), a full PPU (background rendering, sprites, palette, scrolling, OAM DMA), the full APU (all five channels plus frame counter), and fifteen mappers — 0 (NROM), 1 (MMC1), 2 (UxROM), 3 (CNROM), 4 (MMC3, including the A12-clocked scanline IRQ counter), 7 (AxROM), 9 (MMC2) and 10 (MMC4) with their automatic CHR bank latches, 11 (Color Dreams), 34 (BNROM + NINA-001), 66 (GxROM), 69 (Sunsoft FME-7, including its CPU-cycle IRQ counter; 5B expansion audio not modeled), 71 (Camerica), 87 (Jaleco CHR), and 206 (Namco 118 / DxROM) — are implemented. All 159 blargg CPU ROM tests pass: all 17 `instr_test-v5` tests, `instr_timing`, all 5 `instr_misc` tests, and all of `cpu_interrupts_v2` (tests 1-5 plus the combined suite). All 26 wired blargg APU ROM tests pass too: `apu_test` (9), `apu_reset` (6), and `blargg_apu_2005.07.30` (11). See Known gaps for the remaining PPU test failures.
@@ -127,7 +137,7 @@ tests/screenshots/
 
 ## Known gaps
 
-**`cargo test` is fully green**: every wired-up blargg suite passes and asserts its ROM's own verdict (370 tests; the single `#[ignore]`d one is the AccuracyCoin harness). This section records what was fixed and where the remaining unwired/unsupported territory is (the listen-only `apu_mixer` suite, and the subsystem-scale / expansion-audio mappers deliberately deferred — MMC5 (5), and the Konami VRC6/VRC7 and Namco 163 audio families — since their defining feature is expansion audio and no audio-output path exists yet to mix it into; their banking+IRQ can be added once one does).
+**`cargo test` is fully green**: every wired-up blargg suite passes and asserts its ROM's own verdict (392 passing; the single `#[ignore]`d one is the AccuracyCoin harness). This section records what was fixed and where the remaining unwired/unsupported territory is (the listen-only `apu_mixer` suite, and the subsystem-scale / expansion-audio mappers deliberately deferred — MMC5 (5), and the Konami VRC6/VRC7 and Namco 163 audio families — since their defining feature is expansion audio and no audio-output path exists yet to mix it into; their banking+IRQ can be added once one does).
 
 ### APU suites: wired and passing (except the listen-only mixer)
 
