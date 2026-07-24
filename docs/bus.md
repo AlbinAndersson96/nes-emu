@@ -47,10 +47,13 @@ for the canonical address.
 | $2006 | PPUADDR | W | VRAM address (write twice) |
 | $2007 | PPUDATA | R/W | VRAM data (auto-increments address) |
 
-> These are stubs — `ppu_registers` is a plain byte array. Only `$2002`
-> (PPUSTATUS) is partially implemented: the VBlank flag is derived from the
-> PPU's cycle counter in `Ppu::read_status()`. A full PPU module will replace
-> this array and implement all register side-effects.
+All eight registers are fully implemented by the `Ppu` (`src/ppu/mod.rs`) with
+their hardware side effects — the `Bus` routes `$2000`–`$3FFF` reads/writes to
+`Ppu::read_register` / `Ppu::write_register` (via the address mirror), applying
+the read-cycle "pre-advance" that samples PPU state on the read's final dot. See
+[`docs/ppu.md`](ppu.md) for the register-by-register behavior and the
+emulator-specific timing quirks ($2002 flag-timing race, $2007 glitch increment,
+$2004 OAM-data-bus reads, the open-bus decay register).
 
 ## APU / I/O ($4000–$4017)
 
@@ -131,9 +134,13 @@ is bit 6 (producing metallic percussion tones).
 
 The DMC reader fetches bytes from CPU address space and delta-decodes them
 into a 7-bit output level. Each byte drives 8 output steps. When the buffer
-empties the channel signals a DMA need; `Bus::tick_apu()` arms a 4-cycle
-stall counter, and `Bus::tick_dma()` fetches the byte from `dma_address()` and
-supplies it via `supply_dma_byte()` on the final stall cycle.
+empties the channel signals a DMA need. Unlike OAM DMA, DMC DMA is serviced
+synchronously *mid-instruction* inside `CpuBus::read` (`Bus::maybe_dmc_dma`): a
+request that asserted on an earlier cycle halts the current read (hardware RDY
+sampling), performs 2–3 side-effecting dummy re-reads plus the sample fetch, and
+reports the stolen 3–4 cycles to the CPU. The 3- vs 4-cycle stall depends on the
+live APU clock phase. See "DMC DMA cycle accuracy" in the project
+[`CLAUDE.md`](../CLAUDE.md) and [`docs/apu.md`](apu.md) for the full model.
 
 ### $4015 — APU Status (R/W)
 
@@ -240,7 +247,8 @@ struct mirrors smaller ROMs via `(addr - 0x8000) % prg_rom.len()`.
   - Mode 0/1: switch full 32 KB at $8000.
   - Mode 2: fix $8000–$BFFF to first bank, switch $C000–$FFFF.
   - Mode 3: switch $8000–$BFFF, fix $C000–$FFFF to last bank.
-- **CHR**: not yet wired (PPU rendering not implemented).
+- **CHR**: two switchable 4 KB banks (or one 8 KB bank), selected by the $A000/$C000
+  registers; banking also applies to CHR-RAM (folded mod 8 KB).
 - **PRG-RAM** (8 KB): always present at $6000–$7FFF regardless of the iNES header
   flag, because blargg test ROMs write results there unconditionally.
 - Configuration via a 5-bit serial shift register: five consecutive writes to any
@@ -263,8 +271,23 @@ The cartridge ROM supplies all three vectors in its final 6 bytes:
   reads shift out bits). The `&mut self` signature handles this without needing
   `Cell`/`RefCell`.
 - OAM DMA ($4014) is handled cycle-by-cycle: writing $4014 sets `oam_dma_active`
-  and arms a 513-cycle counter. While active, the run loop calls `Bus::tick_dma()`
+  and arms the stall counter. While active, the run loop calls `Bus::tick_dma()`
   instead of `cpu.tick()`, copying one byte per two cycles from the source page
-  into PPU OAM. (The +1 parity cycle for odd-cycle triggers is not yet modelled.)
-- Controller reads shift out bits LSB-first. After 8 bits the remaining reads
-  return 1 (open bus / pull-up).
+  into PPU OAM starting at the current OAMADDR (wrapping mod 256). The transfer
+  is **513 cycles**, or **514** when the `$4014` write lands on an odd APU
+  get/put cycle (`Apu::cycle_parity`) — the parity is modelled.
+- Controller reads shift out bits LSB-first. After 8 bits the shift register
+  fills with 1s, so further reads return 1 in bit 0. Bits 5–7 of `$4016`/`$4017`
+  reads (and bit 5 of `$4015`) are not driven by the 2A03 and return the CPU
+  open-bus latch (`Bus::cpu_open_bus`) — so e.g. `LDA $4016` naturally reads `$4x`
+  in its top bits. See the CPU open-bus notes below.
+- **Open bus.** Two independent latches model unconnected data lines. The **CPU
+  open-bus latch** (`Bus::cpu_open_bus`) records the last value on the external
+  bus on every transfer *except* `$4015` reads (whose status byte is internal to
+  the 2A03); reads of undriven addresses ($4000–$4014, $4018–$401F, unmapped
+  $4020–$5FFF, and the undriven bits of $4015/$4016/$4017) return it, with no
+  decay. The **PPU open-bus decay register** (`Ppu::io_bus`) drives the bits the
+  PPU leaves floating on $2002/$2004/$2007 reads and decays each bit to 0 after
+  ~600 ms. Emulator-external inspection (the $6000 result protocol, debuggers)
+  must use the side-effect-free `Bus::peek`, never `Bus::read`, so it doesn't
+  corrupt these latches.
